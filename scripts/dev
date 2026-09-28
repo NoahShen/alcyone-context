@@ -1,0 +1,63 @@
+#!/bin/bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+LOCAL="$ROOT/.local"
+JDK_DIR="$LOCAL/jdk/jdk-21.0.12.1+1"
+JDK_HOME="$JDK_DIR/Contents/Home"
+GRADLE_VERSION=8.14.3
+GRADLE_SHA=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
+JDK_SHA=3623232f33a9c3baadf304480b2535f9a3cba8a58d42ecbb438ba267315d9998
+JDK_URL='https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.12.1_1.tar.gz'
+GRADLE_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+fail() { echo "ERROR: $*" >&2; exit 1; }
+[[ "$(uname -s)/$(uname -m)" == Darwin/arm64 ]] || fail 'T05 supports only verified macOS arm64; other native platforms are unverified.'
+mkdir -p "$LOCAL/jdk" "$LOCAL/gradle-dist" "$LOCAL/gradle-user-home" "$LOCAL/tmp"
+verify() { echo "$2  $1" | shasum -a 256 -c - >/dev/null; }
+fetch() {
+    local url="$1" file="$2" sha="$3"
+    echo "Source: $url; SHA-256: $sha"
+    if [[ -f "$file" ]]; then
+        verify "$file" "$sha" || fail "Corrupt archive: $file; remove it and rerun bootstrap."
+        echo "Reuse: $file"
+    else
+        curl --fail --location --retry 2 --connect-timeout 30 --max-time 900 "$url" -o "$file.part"
+        verify "$file.part" "$sha" || fail "Checksum mismatch: $file.part"
+        mv "$file.part" "$file"
+    fi
+}
+check_install() {
+    local dir="$1" manifest="$2"
+    [[ -d "$dir" && -f "$manifest" ]] || fail "Missing installation/manifest: $dir; run bootstrap (remove incomplete installation first)."
+    (cd "$dir" && shasum -a 256 -c "$manifest" >/dev/null) || fail "Damaged installation: $dir; remove it and rerun bootstrap."
+}
+manifest() { (cd "$1" && find . -type f -exec shasum -a 256 {} +) > "$2"; }
+case "${1:-}" in
+bootstrap)
+    fetch "$JDK_URL" "$LOCAL/jdk/temurin-21.tar.gz" "$JDK_SHA"
+    if [[ ! -d "$JDK_DIR" ]]; then
+        tar -xzf "$LOCAL/jdk/temurin-21.tar.gz" -C "$LOCAL/jdk"
+        manifest "$JDK_DIR" "$LOCAL/jdk/install.sha256"
+    fi
+    check_install "$JDK_DIR" "$LOCAL/jdk/install.sha256"
+    fetch "$GRADLE_URL" "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION-bin.zip" "$GRADLE_SHA"
+    if [[ ! -d "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" ]]; then
+        unzip -q "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION-bin.zip" -d "$LOCAL/gradle-dist"
+        manifest "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" "$LOCAL/gradle-dist/install.sha256"
+    fi
+    check_install "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" "$LOCAL/gradle-dist/install.sha256"
+    "$JDK_HOME/bin/java" -version
+    echo "Ready: JDK=$JDK_HOME; Gradle=$LOCAL/gradle-dist/gradle-$GRADLE_VERSION"
+    ;;
+gradle)
+    shift
+    [[ -x "$JDK_HOME/bin/java" && -f "$LOCAL/jdk/install.sha256" ]] || fail 'Run scripts/dev bootstrap first.'
+    check_install "$JDK_DIR" "$LOCAL/jdk/install.sha256"
+    export JAVA_HOME="$JDK_HOME" GRADLE_USER_HOME="$LOCAL/gradle-user-home"
+    export PATH="$JAVA_HOME/bin:$PATH" TMPDIR="$LOCAL/tmp/"
+    cd "$ROOT"
+    exec "$ROOT/gradlew" "-Dorg.gradle.java.home=$JAVA_HOME" "-Djava.io.tmpdir=$LOCAL/tmp" \
+        "-Porg.gradle.java.installations.paths=$JAVA_HOME" \
+        "-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 -Djava.io.tmpdir=$LOCAL/tmp" "$@"
+    ;;
+*) fail 'Usage: scripts/dev bootstrap | scripts/dev gradle <args>' ;;
+esac

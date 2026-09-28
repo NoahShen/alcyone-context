@@ -1,0 +1,32 @@
+T04 dependency probe — 2026-09-28
+Platform: macOS 26.6.2 / arm64
+JDK: Temurin 21.0.12.1+1; Gradle 8.14.3; Kotlin 2.2.21
+WebDAV: temporary loopback WsgiDAV 4.3.3 / Cheroot 10.0.1
+JDK and Gradle downloads: SHA-256 verified against upstream published values.
+Scope: dependency probe only; no VFS SDK implementation or crash recovery.
+
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.14.3/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :generateMainProbeDatabaseInterface UP-TO-DATE
+> Task :processResources NO-SOURCE
+> Task :compileKotlin
+> Task :compileJava NO-SOURCE
+> Task :classes UP-TO-DATE
+
+> Task :run
+CAP LocalFS read=true write=true stat=true list=true mkdir=true delete=true rename=true recursiveList=false
+PASS LocalFS binary write/read/bounded-stream/overwrite/stat/list/empty-dir/delete/native-file-rename-if-supported
+OBSERVE LocalFS native-directory-rename=IsADirectory
+OBSERVE LocalFS delete-missing=success
+OBSERVE LocalFS follows-symlink-outside-root=true (VFS must enforce T02 separately)
+CAP WebDAV read=true write=true stat=true list=true mkdir=true delete=true rename=true recursiveList=false
+PASS WebDAV binary write/read/bounded-stream/overwrite/stat/list/empty-dir/delete/native-file-rename-if-supported
+OBSERVE WebDAV native-directory-rename=IsADirectory
+OBSERVE WebDAV delete-missing=success
+PASS LocalFS-WebDAV bidirectional copy-confirm-delete (storage only)
+PASS SQLDelight generation/native SQLite/unique-path/atomic rollback/close-reopen
+[DefaultDispatcher-worker-2] INFO t04 - PASS UUIDv7 sample uniqueness/version; coroutines; serialization; SLF4J
+
+BUILD SUCCESSFUL in 9s
+3 actionable tasks: 2 executed, 1 up-to-date

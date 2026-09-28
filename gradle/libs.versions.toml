@@ -1,0 +1,26 @@
+[versions]
+kotlin = "2.2.21"
+sqldelight = "2.1.0"
+opendal = "0.50.6"
+uuid = "6.1.1"
+coroutines = "1.10.2"
+serialization = "1.9.0"
+slf4j = "2.0.17"
+junit = "5.11.4"
+
+[libraries]
+coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+uuid = { module = "com.github.f4b6a3:uuid-creator", version.ref = "uuid" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+opendal = { module = "org.apache.opendal:opendal", version.ref = "opendal" }
+sqlite-driver = { module = "app.cash.sqldelight:sqlite-driver", version.ref = "sqldelight" }
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test-junit5", version.ref = "kotlin" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-engine = { module = "org.junit.jupiter:junit-jupiter-engine" }
+junit-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+sqldelight = { id = "app.cash.sqldelight", version.ref = "sqldelight" }
