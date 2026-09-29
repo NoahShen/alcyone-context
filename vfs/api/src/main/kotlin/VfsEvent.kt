@@ -2,9 +2,12 @@ package alcyone.vfs
 
 import java.time.Instant
 
-/** 稳定的变更事件身份，UUIDv7 文本形式；由 Core 生成，本类型只做格式校验和值语义。 */
-class VfsEventId private constructor(val value: String) {
-
+/**
+ * 稳定的变更事件身份，UUIDv7 文本形式；由 Core 生成（`alcyone.common.newUuidV7()`），本类型只做格式校验和值语义。
+ */
+class VfsEventId private constructor(
+    val value: String,
+) {
     override fun toString(): String = value
 
     override fun equals(other: Any?): Boolean = this === other || (other is VfsEventId && value == other.value)
@@ -13,7 +16,7 @@ class VfsEventId private constructor(val value: String) {
 
     companion object {
         /** 校验并规范化 UUIDv7 文本（接受大写，输出小写）；格式非法抛 [VfsErrorCode.INVALID_ARGUMENT]。 */
-        fun parse(text: String): VfsEventId = VfsEventId(normalizeUuidV7(text, "VfsEventId"))
+        fun parse(text: String): VfsEventId = VfsEventId(requireUuidV7(text, "VfsEventId"))
     }
 }
 

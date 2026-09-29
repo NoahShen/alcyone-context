@@ -33,7 +33,10 @@ interface Vfs {
     suspend fun list(uri: VfsUri): List<VfsEntry>
 
     /** 移动文件或目录；目标已存在则拒绝，保持 Node ID。 */
-    suspend fun move(source: VfsUri, target: VfsUri): NodeInfo
+    suspend fun move(
+        source: VfsUri,
+        target: VfsUri,
+    ): NodeInfo
 
     /** 删除；默认非递归，非空目录返回 DIRECTORY_NOT_EMPTY，不存在返回 NOT_FOUND。 */
     suspend fun delete(
@@ -45,5 +48,8 @@ interface Vfs {
     suspend fun getMetadata(id: NodeId): NodeMetadata
 
     /** 整体替换 Metadata，空对象清空；不提供隐式字段合并。 */
-    suspend fun setMetadata(id: NodeId, metadata: NodeMetadata)
+    suspend fun setMetadata(
+        id: NodeId,
+        metadata: NodeMetadata,
+    )
 }

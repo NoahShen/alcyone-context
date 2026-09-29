@@ -1,5 +1,8 @@
 package alcyone.vfs
 
+import alcyone.common.InvalidUuidException
+import alcyone.common.normalizeUuidV7
+
 /**
  * 稳定错误码。调用方按 code 分支，不解析错误文本，也不依赖 OpenDAL / SQLDelight 异常类型。
  */
@@ -51,3 +54,17 @@ class VfsException(
     val operationId: String? = null,
     val effect: VfsEffect = VfsEffect.NONE,
 ) : RuntimeException(message)
+
+/**
+ * 适配 `alcyone.common` 的 UUID 校验异常：底层工具库不知道 VFS 错误契约，由 API 在边界转换，
+ * 保证 [NodeId]、[VfsEventId] 对调用方只表现为 [VfsErrorCode.INVALID_ARGUMENT]。
+ */
+internal fun requireUuidV7(
+    text: String,
+    typeName: String,
+): String =
+    try {
+        normalizeUuidV7(text, typeName)
+    } catch (e: InvalidUuidException) {
+        throw VfsException(VfsErrorCode.INVALID_ARGUMENT, e.message ?: "invalid UUIDv7")
+    }

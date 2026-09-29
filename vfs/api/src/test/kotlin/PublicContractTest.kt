@@ -9,31 +9,44 @@ import kotlin.test.assertTrue
 
 /** T01 第 4、5、6.2、7、8 节的公共边界：错误码表、异常诊断字段、事件模型、选项默认值与签名纯净性。 */
 class PublicContractTest {
-
     private val uuidV7 = "018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091"
 
     // A05 错误契约
     @Test
     fun `error codes cover the T01 table`() {
-        val expected = setOf(
-            "INVALID_URI", "INVALID_ARGUMENT", "READ_ONLY", "STORAGE_ACCESS_DENIED", "NOT_FOUND",
-            "ALREADY_EXISTS", "TYPE_MISMATCH", "DIRECTORY_NOT_EMPTY", "MOUNT_NOT_FOUND",
-            "UNSUPPORTED_OPERATION", "LIMIT_EXCEEDED", "STORAGE_ERROR", "STATE_ERROR", "CONFLICT",
-            "RECOVERY_REQUIRED", "CLOSED",
-        )
+        val expected =
+            setOf(
+                "INVALID_URI",
+                "INVALID_ARGUMENT",
+                "READ_ONLY",
+                "STORAGE_ACCESS_DENIED",
+                "NOT_FOUND",
+                "ALREADY_EXISTS",
+                "TYPE_MISMATCH",
+                "DIRECTORY_NOT_EMPTY",
+                "MOUNT_NOT_FOUND",
+                "UNSUPPORTED_OPERATION",
+                "LIMIT_EXCEEDED",
+                "STORAGE_ERROR",
+                "STATE_ERROR",
+                "CONFLICT",
+                "RECOVERY_REQUIRED",
+                "CLOSED",
+            )
         assertEquals(expected, VfsErrorCode.entries.map { it.name }.toSet())
     }
 
     @Test
     fun `exception carries logical uri operation id and effect`() {
         val uri = VfsUri.parse("alcyone://resources/a.txt")
-        val error = VfsException(
-            code = VfsErrorCode.STORAGE_ERROR,
-            message = "backend connection lost",
-            uri = uri,
-            operationId = "op-1",
-            effect = VfsEffect.UNKNOWN,
-        )
+        val error =
+            VfsException(
+                code = VfsErrorCode.STORAGE_ERROR,
+                message = "backend connection lost",
+                uri = uri,
+                operationId = "op-1",
+                effect = VfsEffect.UNKNOWN,
+            )
         assertEquals(VfsErrorCode.STORAGE_ERROR, error.code)
         assertEquals(uri, error.uri)
         assertEquals("op-1", error.operationId)
@@ -55,8 +68,13 @@ class PublicContractTest {
     fun `event types match T01 and do not expose NODE_REGISTERED`() {
         assertEquals(
             setOf(
-                "FILE_CREATED", "FILE_WRITTEN", "FILE_MOVED", "DIRECTORY_MOVED",
-                "FILE_DELETED", "DIRECTORY_DELETED", "METADATA_UPDATED",
+                "FILE_CREATED",
+                "FILE_WRITTEN",
+                "FILE_MOVED",
+                "DIRECTORY_MOVED",
+                "FILE_DELETED",
+                "DIRECTORY_DELETED",
+                "METADATA_UPDATED",
             ),
             VfsEventType.entries.map { it.name }.toSet(),
         )
@@ -66,16 +84,17 @@ class PublicContractTest {
     @Test
     fun `move events carry source and target uri`() {
         val now = Instant.parse("2026-09-28T00:00:00Z")
-        val event = VfsEvent(
-            id = VfsEventId.parse(uuidV7),
-            type = VfsEventType.FILE_MOVED,
-            nodeId = NodeId.parse(uuidV7),
-            occurredAt = now,
-            uri = VfsUri.parse("alcyone://resources/b.txt"),
-            operationId = "op-2",
-            sourceUri = VfsUri.parse("alcyone://resources/a.txt"),
-            targetUri = VfsUri.parse("alcyone://resources/b.txt"),
-        )
+        val event =
+            VfsEvent(
+                id = VfsEventId.parse(uuidV7),
+                type = VfsEventType.FILE_MOVED,
+                nodeId = NodeId.parse(uuidV7),
+                occurredAt = now,
+                uri = VfsUri.parse("alcyone://resources/b.txt"),
+                operationId = "op-2",
+                sourceUri = VfsUri.parse("alcyone://resources/a.txt"),
+                targetUri = VfsUri.parse("alcyone://resources/b.txt"),
+            )
         assertEquals(VfsEventType.FILE_MOVED, event.type)
         assertEquals("alcyone://resources/a.txt", event.sourceUri.toString())
         assertEquals(event.uri, event.targetUri)
@@ -135,24 +154,43 @@ class PublicContractTest {
     @Test
     fun `public signatures expose no infrastructure or physical path types`() {
         val forbidden = listOf("org.apache.opendal", "app.cash.sqldelight", "org.sqlite", "java.sql", "java.nio.file")
-        val apiTypes = listOf(
-            Vfs::class.java, VfsUri::class.java, VfsPath::class.java, NodeId::class.java, VfsEventId::class.java,
-            VfsEvent::class.java, VfsEventType::class.java, VfsException::class.java, VfsErrorCode::class.java,
-            VfsEffect::class.java, VfsEntry::class.java, NodeInfo::class.java, NodeType::class.java,
-            StorageStat::class.java, NodeMetadata::class.java, ReadOptions::class.java, WriteOptions::class.java,
-            WriteMode::class.java, StatOptions::class.java, DeleteOptions::class.java,
-        )
-        val referenced: List<String> = apiTypes.flatMap { type ->
-            val fromMethods = type.declaredMethods.flatMap { method ->
-                method.parameterTypes.map { it.name } + method.returnType.name +
-                    method.genericParameterTypes.mapNotNull { (it as? Class<*>)?.name } +
-                    (method.genericReturnType as? Class<*>)?.name.orEmpty()
+        val apiTypes =
+            listOf(
+                Vfs::class.java,
+                VfsUri::class.java,
+                VfsPath::class.java,
+                NodeId::class.java,
+                VfsEventId::class.java,
+                VfsEvent::class.java,
+                VfsEventType::class.java,
+                VfsException::class.java,
+                VfsErrorCode::class.java,
+                VfsEffect::class.java,
+                VfsEntry::class.java,
+                NodeInfo::class.java,
+                NodeType::class.java,
+                StorageStat::class.java,
+                NodeMetadata::class.java,
+                ReadOptions::class.java,
+                WriteOptions::class.java,
+                WriteMode::class.java,
+                StatOptions::class.java,
+                DeleteOptions::class.java,
+            )
+        val referenced: List<String> =
+            apiTypes.flatMap { type ->
+                val fromMethods =
+                    type.declaredMethods.flatMap { method ->
+                        method.parameterTypes.map { it.name } + method.returnType.name +
+                            method.genericParameterTypes.mapNotNull { (it as? Class<*>)?.name } +
+                            (method.genericReturnType as? Class<*>)?.name.orEmpty()
+                    }
+                val fromFields =
+                    type.declaredFields.flatMap { field ->
+                        listOf(field.type.name, (field.genericType as? Class<*>)?.name.orEmpty())
+                    }
+                fromMethods + fromFields
             }
-            val fromFields = type.declaredFields.flatMap { field ->
-                listOf(field.type.name, (field.genericType as? Class<*>)?.name.orEmpty())
-            }
-            fromMethods + fromFields
-        }
         for (name in referenced) {
             assertTrue(forbidden.none { name.startsWith(it) }, "public signature must not expose $name")
         }

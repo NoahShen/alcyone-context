@@ -1,13 +1,10 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
     `java-library`
-    alias(libs.plugins.kotlin.serialization)
 }
 
 dependencies {
-    api(project(":common"))
-    api(libs.coroutines)
-    api(libs.serialization.json)
+    implementation(libs.uuid)
     testImplementation(libs.kotlin.test)
     testImplementation(platform(libs.junit.bom))
     testRuntimeOnly(libs.junit.engine)

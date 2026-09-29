@@ -1,8 +1,10 @@
 # AGENTS.md
 
-## 本次修改（2026-09-29，T06 验收通过）
+## 本次修改（2026-09-29，common 模块与格式化工具）
 
-- T05 交付物已入库，T06 已完成并通过独立验收；更新模块目录约定说明。涉及“本次修改”“设计文档与阅读顺序”。
+- 新增 `common/` 公共工具库模块（UUIDv7），更新模块职责表、依赖方向与基础设施边界。涉及“模块职责与依赖”。
+- 增加代码格式与版本集中管理的强制要求。涉及“开发与验证”。
+- 更新 T06 状态为独立验收通过后的修订轮。涉及“设计文档与阅读顺序”。
 
 本文为在本仓库工作的编码 Agent 提供项目背景、设计依据与开发约束，适用于整个仓库。文档默认使用中文，代码标识符使用英文。
 
@@ -69,6 +71,7 @@ OpenDAL 以 JVM 依赖嵌入运行，无需独立服务；构建发布时需处�
 | 计划目录 | 职责 |
 | --- | --- |
 | `docs/` | 设计与决策 |
+| `common/` | 与 `vfs/` 平级的公共工具库，供 `vfs`、`memory` 等业务模块共用；当前提供 UUIDv7 生成与校验 |
 | `vfs/api/` | 公共接口和领域类型，如 `Vfs`、`VfsUri`、`VfsPath`、`NodeInfo`、选项、事件与异常 |
 | `vfs/core/` | URI、Node、Metadata、Mount、Event 规则及文件操作编排；定义 Storage / Repository Port |
 | `vfs/storage-opendal/` | 实现 Core 的 Storage Port，处理 OpenDAL 调用、后端能力与错误转换 |
@@ -76,9 +79,10 @@ OpenDAL 以 JVM 依赖嵌入运行，无需独立服务；构建发布时需处�
 | `vfs/runtime/` | SDK 入口与依赖组装，提供 `AlcyoneVfs`、配置及完整 VFS 实例 |
 | `integration-tests/vfs/` | 组合 Runtime、Core、真实 SQLite 与 Storage 的跨模块测试 |
 
-依赖方向：`core → api`；两个基础设施模块依赖 Core 定义的 Port；Runtime 组装 API、Core 和基础设施实现。Core 不反向依赖具体 Adapter。
+依赖方向：`common` 不依赖任何业务模块；`core → api → common`；两个基础设施模块依赖 Core 定义的 Port；Runtime 组装 API、Core 和基础设施实现。Core 不反向依赖具体 Adapter。
 
 - API 不暴露 OpenDAL、SQLDelight、SQLite 或 Repository 实现。
+- `common` 只放与业务无关的工具；它不知道 VFS 错误契约，抛自身异常，由 `vfs/api` 在边界转换。业务规则、协议常量和领域校验不放在 `common`。
 - Core 中的 Storage Port 仅表达业务所需能力，不另建一套通用存储后端框架；后端差异交给 OpenDAL。
 - Runtime 隐藏 Repository、Driver、Operator 和各 Manager 的创建过程。
 - SQLDelight Schema 放在持久化模块的 `src/main/sqldelight/`；单元测试放在所属模块的 `src/test/`。
@@ -129,6 +133,8 @@ VfsUri / 参数校验 → VfsPath → Mount / StoragePath → 存储约束检查
 - 第一阶段仅覆盖经由 VFS 发起的变更事件，不保证发现绕过 VFS 的外部文件变化。
 
 ## 开发与验证
+
+**代码格式：写完代码必须跑 `./scripts/dev gradle spotlessApply` 再交付。`spotlessCheck` 已挂进 `check`，格式不过 `./scripts/dev gradle build` 会直接失败。依赖与插件版本在 `gradle/libs.versions.toml` 声明；JDK 与 Gradle 发行包的版本、下载地址和 SHA-256 在 `gradle/toolchain.versions` 声明。构建文件与脚本不得再硬编码版本号。**
 
 **任务文档目录：每个开发任务在 `docs/tasks/<里程碑>-<任务ID>/` 下建立独立目录，存放该任务的任务说明、使用说明和验收记录，例如 `docs/tasks/m1-t05/`。不要把不同任务的文档平铺在 `docs/tasks/` 根目录。**
 

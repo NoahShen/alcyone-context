@@ -2,14 +2,26 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 LOCAL="$ROOT/.local"
-JDK_DIR="$LOCAL/jdk/jdk-21.0.12.1+1"
-JDK_HOME="$JDK_DIR/Contents/Home"
-GRADLE_VERSION=8.14.3
-GRADLE_SHA=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
-JDK_SHA=3623232f33a9c3baadf304480b2535f9a3cba8a58d42ecbb438ba267315d9998
-JDK_URL='https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.12.1_1.tar.gz'
-GRADLE_URL="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
 fail() { echo "ERROR: $*" >&2; exit 1; }
+
+# gradle/toolchain.versions is the single source for these versions; the root Gradle build reads it too.
+VERSIONS_FILE="$ROOT/gradle/toolchain.versions"
+[[ -f "$VERSIONS_FILE" ]] || fail "Missing $VERSIONS_FILE: it holds the JDK and Gradle versions and checksums."
+version_value() {
+    local key="$1" value
+    value="$(sed -n "s/^${key}=\(.*\)$/\1/p" "$VERSIONS_FILE" | head -1)"
+    [[ -n "$value" ]] || fail "Missing or empty '$key' in $VERSIONS_FILE"
+    printf '%s' "$value"
+}
+JDK_VERSION="$(version_value jdk.version)"
+JDK_SHA="$(version_value jdk.sha256)"
+JDK_URL="$(version_value jdk.url)"
+GRADLE_VERSION="$(version_value gradle.version)"
+GRADLE_SHA="$(version_value gradle.sha256)"
+GRADLE_URL="$(version_value gradle.url)"
+
+JDK_DIR="$LOCAL/jdk/jdk-$JDK_VERSION"
+JDK_HOME="$JDK_DIR/Contents/Home"
 [[ "$(uname -s)/$(uname -m)" == Darwin/arm64 ]] || fail 'T05 supports only verified macOS arm64; other native platforms are unverified.'
 mkdir -p "$LOCAL/jdk" "$LOCAL/gradle-dist" "$LOCAL/gradle-user-home" "$LOCAL/tmp"
 verify() { echo "$2  $1" | shasum -a 256 -c - >/dev/null; }

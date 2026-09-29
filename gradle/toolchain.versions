@@ -1,0 +1,8 @@
+# Single source of truth for the project-local toolchain.
+# scripts/dev and the root Gradle build both read this file; change a version here only.
+jdk.version=21.0.12.1+1
+jdk.sha256=3623232f33a9c3baadf304480b2535f9a3cba8a58d42ecbb438ba267315d9998
+jdk.url=https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.12.1_1.tar.gz
+gradle.version=8.14.3
+gradle.sha256=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
+gradle.url=https://services.gradle.org/distributions/gradle-8.14.3-bin.zip

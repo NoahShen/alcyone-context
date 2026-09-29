@@ -8,7 +8,6 @@ import kotlin.test.assertTrue
 
 /** T01 第 4.1 节：NodeId 是 UUIDv7 文本形式，移动后不变，不是路径的哈希。 */
 class NodeIdTest {
-
     private val uuidV7 = "018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091"
 
     @Test
@@ -28,16 +27,17 @@ class NodeIdTest {
 
     @Test
     fun `non uuid v7 input is rejected locally`() {
-        val invalid = listOf(
-            "",
-            "not-a-uuid",
-            "018f6a3c9c1e7b2d8f3a4c5d6e7f8091",
-            "{018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091}",
-            "urn:uuid:018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091",
-            "018f6a3c-9c1e-4b2d-8f3a-4c5d6e7f8091", // version 4
-            "018f6a3c-9c1e-7b2d-cf3a-4c5d6e7f8091", // variant not RFC 4122
-            "018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f809z", // non hex
-        )
+        val invalid =
+            listOf(
+                "",
+                "not-a-uuid",
+                "018f6a3c9c1e7b2d8f3a4c5d6e7f8091",
+                "{018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091}",
+                "urn:uuid:018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091",
+                "018f6a3c-9c1e-4b2d-8f3a-4c5d6e7f8091", // version 4
+                "018f6a3c-9c1e-7b2d-cf3a-4c5d6e7f8091", // variant not RFC 4122
+                "018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f809z", // non hex
+            )
         for (text in invalid) {
             val error = assertFailsWith<VfsException>("expected INVALID_ARGUMENT for: $text") { NodeId.parse(text) }
             assertEquals(VfsErrorCode.INVALID_ARGUMENT, error.code)

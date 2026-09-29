@@ -11,14 +11,16 @@ import java.nio.charset.CodingErrorAction
  * 序列化时逐段编码并保留 unreserved 字符。`VfsUri` → [VfsPath] → `VfsUri` 结果稳定。
  * `memory` / `resources` 始终作为 [VfsPath] 的第一段保留，不按通用 URL 的 authority 解释。
  */
-class VfsUri private constructor(val path: VfsPath) {
-
-    override fun toString(): String = buildString {
-        append(SCHEME).append("://") // memory/resources 保留为路径第一段，不作为 authority
-        if (path.isRoot) return@buildString
-        append(path.segments.joinToString("/") { encodeSegment(it) })
-        if (path.isNamespaceRoot) append('/') // 两个命名空间根输出尾斜线
-    }
+class VfsUri private constructor(
+    val path: VfsPath,
+) {
+    override fun toString(): String =
+        buildString {
+            append(VfsProtocol.SCHEME).append("://") // memory/resources 保留为路径第一段，不作为 authority
+            if (path.isRoot) return@buildString
+            append(path.segments.joinToString("/") { encodeSegment(it) })
+            if (path.isNamespaceRoot) append('/') // 两个命名空间根输出尾斜线
+        }
 
     override fun equals(other: Any?): Boolean = this === other || (other is VfsUri && path == other.path)
 
@@ -30,12 +32,12 @@ class VfsUri private constructor(val path: VfsPath) {
     }
 }
 
-private const val SCHEME = "alcyone"
-
 private fun splitUri(text: String): List<String> {
     val schemeEnd = text.indexOf("://")
-    if (schemeEnd != SCHEME.length || !text.regionMatches(0, SCHEME, 0, SCHEME.length, ignoreCase = true)) {
-        throw invalidUri("scheme must be '$SCHEME'")
+    if (schemeEnd != VfsProtocol.SCHEME.length ||
+        !text.regionMatches(0, VfsProtocol.SCHEME, 0, VfsProtocol.SCHEME.length, ignoreCase = true)
+    ) {
+        throw invalidUri("scheme must be '${VfsProtocol.SCHEME}'")
     }
     val rest = text.substring(schemeEnd + "://".length)
     if (rest.isEmpty()) return emptyList() // alcyone:// → /
@@ -72,7 +74,8 @@ internal fun percentDecodeOnce(segment: String): String {
         index += 3
     }
     return try {
-        Charsets.UTF_8.newDecoder()
+        Charsets.UTF_8
+            .newDecoder()
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)
             .decode(ByteBuffer.wrap(out.toByteArray()))
@@ -83,27 +86,34 @@ internal fun percentDecodeOnce(segment: String): String {
 }
 
 /** 逐段编码：保留 unreserved 字符，其余按 UTF-8 百分号编码，十六进制大写。 */
-internal fun encodeSegment(segment: String): String = buildString {
-    for (byte in segment.toByteArray(Charsets.UTF_8)) {
-        val value = byte.toInt() and 0xFF
-        val char = value.toChar()
-        if (char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' || char == '-' || char == '.' ||
-            char == '_' || char == '~'
-        ) {
-            append(char)
-        } else {
-            append('%').append(HEX[value shr 4]).append(HEX[value and 0x0F])
+internal fun encodeSegment(segment: String): String =
+    buildString {
+        for (byte in segment.toByteArray(Charsets.UTF_8)) {
+            val value = byte.toInt() and 0xFF
+            val char = value.toChar()
+            if (char in 'A'..'Z' ||
+                char in 'a'..'z' ||
+                char in '0'..'9' ||
+                char == '-' ||
+                char == '.' ||
+                char == '_' ||
+                char == '~'
+            ) {
+                append(char)
+            } else {
+                append('%').append(HEX[value shr 4]).append(HEX[value and 0x0F])
+            }
         }
     }
-}
 
 private const val HEX = "0123456789ABCDEF"
 
-private fun hexDigit(char: Char): Int = when (char) {
-    in '0'..'9' -> char - '0'
-    in 'a'..'f' -> char - 'a' + 10
-    in 'A'..'F' -> char - 'A' + 10
-    else -> -1
-}
+private fun hexDigit(char: Char): Int =
+    when (char) {
+        in '0'..'9' -> char - '0'
+        in 'a'..'f' -> char - 'a' + 10
+        in 'A'..'F' -> char - 'A' + 10
+        else -> -1
+    }
 
 internal fun invalidUri(reason: String): VfsException = VfsException(VfsErrorCode.INVALID_URI, "Invalid VFS URI: $reason")

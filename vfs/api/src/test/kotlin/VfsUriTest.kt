@@ -7,7 +7,6 @@ import kotlin.test.assertTrue
 
 /** T02 第 2.3 节全部例子与第 2.1、2.2 节接受空间、规范化规则。 */
 class VfsUriTest {
-
     // 2.1 接受的逻辑空间
     @Test
     fun `root uri maps to logical root`() {
@@ -153,15 +152,16 @@ class VfsUriTest {
 
     @Test
     fun `uri round trip is idempotent`() {
-        val inputs = listOf(
-            "alcyone://",
-            "alcyone://resources",
-            "alcyone://resources/a",
-            "alcyone://resources/a%20b.txt",
-            "alcyone://resources/%E6%8A%A5%E5%91%8A.md",
-            "alcyone://resources/%252e%252e",
-            "alcyone://memory/notes/2026/a%2Bb",
-        )
+        val inputs =
+            listOf(
+                "alcyone://",
+                "alcyone://resources",
+                "alcyone://resources/a",
+                "alcyone://resources/a%20b.txt",
+                "alcyone://resources/%E6%8A%A5%E5%91%8A.md",
+                "alcyone://resources/%252e%252e",
+                "alcyone://memory/notes/2026/a%2Bb",
+            )
         for (input in inputs) {
             val once = VfsUri.parse(input).toString()
             val twice = VfsUri.parse(once)
@@ -179,12 +179,13 @@ class VfsUriTest {
 
     @Test
     fun `different logical locations stay different`() {
-        val uris = listOf(
-            "alcyone://resources/a",
-            "alcyone://resources/A",
-            "alcyone://resources/a/b",
-            "alcyone://memory/a",
-        ).map { VfsUri.parse(it) }
+        val uris =
+            listOf(
+                "alcyone://resources/a",
+                "alcyone://resources/A",
+                "alcyone://resources/a/b",
+                "alcyone://memory/a",
+            ).map { VfsUri.parse(it) }
         assertEquals(uris.size, uris.toSet().size)
     }
 

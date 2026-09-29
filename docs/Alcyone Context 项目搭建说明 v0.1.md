@@ -1,5 +1,13 @@
 # Alcyone Context 项目搭建说明
 
+## 本次修改（2026-09-29，工具链版本单一来源）
+
+- 声明 `gradle/toolchain.versions` 为 JDK 与 Gradle 版本、下载地址和 SHA-256 的单一来源，`scripts/dev` 与根构建守卫均从它读取。涉及第 2 节。
+
+## 本次修改（2026-09-29，新增 common 模块）
+
+- 目录结构新增与 `vfs/` 平级的 `common/` 公共工具库模块，并说明其职责与依赖方向。涉及第 2 节。
+
 ## 本次修改（2026-09-28，任务文档目录更新）
 
 - 明确正式开发工具只在项目内生效，链接更新为独立目录 `docs/tasks/m1-t05/T05_工程初始化与验收.md`。涉及第 2 节。
@@ -32,11 +40,15 @@ VFS 提供统一文件访问并隐藏后端差异；Agent 身份、目录分配�
 
 正式开发的 JDK、Gradle 发行包和依赖缓存只放在项目内忽略目录，由项目入口设置进程级环境，不改变系统默认 Java 或用户 shell 配置。具体环境准备、模块交付和验收要求见 [T05 工程初始化与验收](tasks/m1-t05/T05_工程初始化与验收.md)。
 
+JDK 与 Gradle 的版本、下载地址和 SHA-256 集中在 `gradle/toolchain.versions`（每行 `KEY=VALUE`），是工具链版本的唯一来源；`scripts/dev` 与根 `build.gradle.kts` 的 JDK 守卫、`tasks.wrapper` 都从该文件读取，不在代码中重复硬编码。`gradle/wrapper/gradle-wrapper.properties` 是 wrapper 任务生成的产物，改版本后应同步重新生成。
+
 初始项目目录如下：
 
 ```text
 alcyone-context/
 ├── docs/
+│
+├── common/
 │
 ├── vfs/
 │   ├── api/
@@ -54,6 +66,9 @@ alcyone-context/
 ```text
 docs
 → 项目与 VFS 设计文档
+
+common
+→ 与业务无关的公共工具库（UUIDv7 生成与校验），供 vfs、memory 等模块共用
 
 vfs/api
 → VFS 对外契约
