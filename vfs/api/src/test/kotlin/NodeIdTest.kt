@@ -50,4 +50,38 @@ class NodeIdTest {
         val error = assertFailsWith<VfsException> { VfsEventId.parse("018f6a3c-9c1e-4b2d-8f3a-4c5d6e7f8091") }
         assertEquals(VfsErrorCode.INVALID_ARGUMENT, error.code)
     }
+
+    @Test
+    fun `both vfs id types accept every variant nibble in both cases`() {
+        val forms =
+            listOf(
+                "018f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091",
+                "018f6a3c-9c1e-7b2d-9f3a-4c5d6e7f8091",
+                "018f6a3c-9c1e-7b2d-af3a-4c5d6e7f8091",
+                "018f6a3c-9c1e-7b2d-bf3a-4c5d6e7f8091",
+            )
+        for (form in forms) {
+            for (written in listOf(form, form.uppercase())) {
+                assertEquals(form, NodeId.parse(written).value, "NodeId must accept $written")
+                assertEquals(form, VfsEventId.parse(written).value, "VfsEventId must accept $written")
+            }
+        }
+    }
+
+    @Test
+    fun `both vfs id types reject non ascii characters as invalid argument`() {
+        val invalid =
+            listOf(
+                "\u0660" + "18f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091",
+                "018F6A3C-9C1E-7B2D-C3A-4C5D6E7F8091", // variant 小写 c，不是 8/9/a/b
+                "018f6a3c-9c1e-7b2d-\uFF2D3a-4c5d6e7f8091",
+            )
+        for (text in invalid) {
+            val nodeError = assertFailsWith<VfsException>("NodeId must reject $text") { NodeId.parse(text) }
+            assertEquals(VfsErrorCode.INVALID_ARGUMENT, nodeError.code)
+            assertEquals(VfsEffect.NONE, nodeError.effect)
+            val eventError = assertFailsWith<VfsException>("VfsEventId must reject $text") { VfsEventId.parse(text) }
+            assertEquals(VfsErrorCode.INVALID_ARGUMENT, eventError.code)
+        }
+    }
 }

@@ -3,6 +3,7 @@ package alcyone.vfs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /** T02 第 2.3 节全部例子与第 2.1、2.2 节接受空间、规范化规则。 */
@@ -15,7 +16,7 @@ class VfsUriTest {
     }
 
     @Test
-    fun `namespace roots keep first segment`() {
+    fun `single segment paths keep the first segment`() {
         assertEquals("/memory", VfsUri.parse("alcyone://memory/").path.toString())
         assertEquals("/resources", VfsUri.parse("alcyone://resources").path.toString())
         assertTrue(VfsUri.parse("alcyone://memory/").path.isNamespaceRoot)
@@ -90,12 +91,14 @@ class VfsUriTest {
         assertInvalidUri("alcyone://resources:80/a")
     }
 
-    // 拒绝项
+    // R5：命名空间由 Runtime 配置提供，API 不检查第一段名称
     @Test
-    fun `unknown top level directory is rejected`() {
-        assertInvalidUri("alcyone://other/a")
-        assertInvalidUri("alcyone://Resources/a")
-        assertInvalidUri("alcyone://MEMORY/a")
+    fun `arbitrary top level directories are accepted`() {
+        assertEquals("/notes/a", VfsUri.parse("alcyone://notes/a").path.toString())
+        assertEquals("/Resources/a", VfsUri.parse("alcyone://Resources/a").path.toString())
+        assertEquals("/MEMORY", VfsUri.parse("alcyone://MEMORY").path.toString())
+        assertEquals("alcyone://notes/", VfsUri.parse("alcyone://notes").toString())
+        assertNotEquals(VfsUri.parse("alcyone://Resources/a"), VfsUri.parse("alcyone://resources/a"))
     }
 
     @Test
@@ -114,11 +117,37 @@ class VfsUriTest {
     }
 
     @Test
+    fun `C1 control characters are rejected`() {
+        assertInvalidUri("alcyone://resources/a%C2%85b") // U+0085 NEXT LINE
+        assertInvalidUri("alcyone://resources/a%C2%9Fb") // U+009F
+        assertInvalidUri("alcyone://resources/a%C2%80b") // U+0080
+        assertInvalidUri("alcyone://resources/a\u0085b")
+    }
+
+    @Test
+    fun `unpaired surrogates are rejected in raw and encoded text`() {
+        assertInvalidUri("alcyone://resources/\uD800")
+        assertInvalidUri("alcyone://resources/\uDC00")
+        assertInvalidUri("alcyone://resources/a%20\uD800")
+        assertInvalidUri("alcyone://resources/%ED%A0%80") // UTF-8 编码的孤立代理项
+    }
+
+    @Test
+    fun `emoji surrogate pairs survive a round trip`() {
+        val uri = VfsUri.parse("alcyone://resources/%F0%9F%98%80.txt")
+        assertEquals("\uD83D\uDE00.txt", uri.path.segments.last())
+        assertEquals(uri, VfsUri.parse(uri.toString()))
+        assertEquals("alcyone://resources/%F0%9F%98%80.txt", uri.toString())
+    }
+
+    @Test
     fun `invalid escapes and invalid utf8 are rejected`() {
         assertInvalidUri("alcyone://resources/a%zz")
         assertInvalidUri("alcyone://resources/a%2")
         assertInvalidUri("alcyone://resources/%FF")
         assertInvalidUri("alcyone://resources/%C3")
+        assertInvalidUri("alcyone://resources/%C0%AF") // 过长编码的 '/'
+        assertInvalidUri("alcyone://resources/%F4%90%80%80") // 超过 U+10FFFF
     }
 
     @Test
@@ -144,7 +173,7 @@ class VfsUriTest {
     }
 
     @Test
-    fun `namespace roots serialize with a trailing slash`() {
+    fun `single segment paths serialize with a trailing slash`() {
         assertEquals("alcyone://memory/", VfsUri.parse("alcyone://memory").toString())
         assertEquals("alcyone://resources/", VfsUri.parse("alcyone://resources/").toString())
         assertEquals("alcyone://", VfsUri.parse("alcyone://").toString())
@@ -175,6 +204,17 @@ class VfsUriTest {
         val fromUri = VfsUri.parse("alcyone://resources/a/").path
         assertEquals(VfsPath.parse("/resources/a"), fromUri)
         assertEquals(VfsUri.parse("alcyone://resources/a"), VfsUri.parse("alcyone://resources/a/"))
+    }
+
+    @Test
+    fun `serialization never changes the logical location`() {
+        for (input in listOf("alcyone://notes/a", "alcyone://notes", "alcyone://resources/a%20b", "alcyone://resources/报告.md")) {
+            val uri = VfsUri.parse(input)
+            val reparsed = VfsUri.parse(uri.toString())
+            assertEquals(uri, reparsed, "round trip must keep the location for $input")
+            assertEquals(uri.path, reparsed.path)
+            assertEquals(uri.toString(), reparsed.toString())
+        }
     }
 
     @Test

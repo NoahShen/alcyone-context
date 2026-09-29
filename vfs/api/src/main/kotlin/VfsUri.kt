@@ -2,6 +2,8 @@ package alcyone.vfs
 
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 
 /**
@@ -9,17 +11,18 @@ import java.nio.charset.CodingErrorAction
  *
  * 规范化、百分号编码、大小写、尾斜线与路径穿越规则见 T02 第 2 节：解析时每段严格解码一次，
  * 序列化时逐段编码并保留 unreserved 字符。`VfsUri` → [VfsPath] → `VfsUri` 结果稳定。
- * `memory` / `resources` 始终作为 [VfsPath] 的第一段保留，不按通用 URL 的 authority 解释。
+ * 第一段是普通路径段而非 authority，原样保留；其名称不构成白名单，
+ * 解析成功不表示路径存在、可访问或已挂载。
  */
 class VfsUri private constructor(
     val path: VfsPath,
 ) {
     override fun toString(): String =
         buildString {
-            append(VfsProtocol.SCHEME).append("://") // memory/resources 保留为路径第一段，不作为 authority
+            append(VfsProtocol.SCHEME).append("://") // 第一段是路径，不按通用 URL 的 authority 解释
             if (path.isRoot) return@buildString
             append(path.segments.joinToString("/") { encodeSegment(it) })
-            if (path.isNamespaceRoot) append('/') // 两个命名空间根输出尾斜线
+            if (path.isNamespaceRoot) append('/') // 单段路径输出尾斜线
         }
 
     override fun equals(other: Any?): Boolean = this === other || (other is VfsUri && path == other.path)
@@ -41,7 +44,9 @@ private fun splitUri(text: String): List<String> {
     }
     val rest = text.substring(schemeEnd + "://".length)
     if (rest.isEmpty()) return emptyList() // alcyone:// → /
-    rest.firstOrNull { it.code < 0x20 || it.code == 0x7F }?.let { throw invalidUri("raw control character") }
+    // 原始文本先检查：解码会按 UTF-8 重新编码，非法字符若放过就会被静默替换。
+    if (hasUnpairedSurrogate(rest)) throw invalidUri("unpaired surrogate")
+    rest.firstOrNull { isForbiddenSegmentChar(it) && it != '/' }?.let { throw invalidUri("raw control character") }
     if ('\\' in rest) throw invalidUri("raw backslash")
     if ('?' in rest || '#' in rest) throw invalidUri("query and fragment are not supported")
     if (' ' in rest) throw invalidUri("raw space must be encoded as %20")
@@ -62,7 +67,7 @@ internal fun percentDecodeOnce(segment: String): String {
     while (index < segment.length) {
         if (segment[index] != '%') {
             val run = segment.indexOf('%', index).let { if (it < 0) segment.length else it }
-            out.write(segment.substring(index, run).toByteArray(Charsets.UTF_8))
+            out.write(strictUtf8(segment.substring(index, run)))
             index = run
             continue
         }
@@ -80,7 +85,7 @@ internal fun percentDecodeOnce(segment: String): String {
             .onUnmappableCharacter(CodingErrorAction.REPORT)
             .decode(ByteBuffer.wrap(out.toByteArray()))
             .toString()
-    } catch (e: java.nio.charset.CharacterCodingException) {
+    } catch (e: CharacterCodingException) {
         throw invalidUri("percent escapes are not valid UTF-8")
     }
 }
@@ -88,7 +93,7 @@ internal fun percentDecodeOnce(segment: String): String {
 /** 逐段编码：保留 unreserved 字符，其余按 UTF-8 百分号编码，十六进制大写。 */
 internal fun encodeSegment(segment: String): String =
     buildString {
-        for (byte in segment.toByteArray(Charsets.UTF_8)) {
+        for (byte in strictUtf8(segment)) {
             val value = byte.toInt() and 0xFF
             val char = value.toChar()
             if (char in 'A'..'Z' ||
@@ -104,6 +109,23 @@ internal fun encodeSegment(segment: String): String =
                 append('%').append(HEX[value shr 4]).append(HEX[value and 0x0F])
             }
         }
+    }
+
+/**
+ * 严格 UTF-8 编码：拒绝非法字符而不是替换成 `?`，避免规范化结果与输入不同。
+ * 路径入口已经校验过字符，这里是第二道防线。
+ */
+private fun strictUtf8(text: String): ByteArray =
+    try {
+        val buffer =
+            Charsets.UTF_8
+                .newEncoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .encode(CharBuffer.wrap(text))
+        ByteArray(buffer.remaining()).also { buffer.get(it) }
+    } catch (e: CharacterCodingException) {
+        throw IllegalStateException("reached encoding with unencodable text", e)
     }
 
 private const val HEX = "0123456789ABCDEF"

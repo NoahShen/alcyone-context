@@ -1,5 +1,9 @@
 # VFS 路径与文件操作语义 v0.1
 
+## 本次修改（2026-09-29，取消命名空间白名单）
+
+- 取消 API 的固定命名空间检查；命名空间与虚拟目录改为由后续配置决定，保留路径语法与规范化规则。涉及第 2、3 节。
+
 ## 本次修改（2026-09-28，恢复能力延后）
 
 - 首版不实现文件操作中断恢复、自动补偿或重启修复；保留基本失败报告与状态事务。涉及第 1、4～12 节。
@@ -30,7 +34,7 @@ T01 已确认无调用身份的文件 API、VfsEntry / NodeInfo、Metadata 和 S
 
 ### 2.1 接受的逻辑空间
 
-沿用现有 memory / resources 两个顶层目录：
+顶层命名空间由后续 Runtime 配置提供，以下以 memory / resources 为例；API 解析不检查配置成员资格：
 
 | URI | VfsPath | 解释 |
 | --- | --- | --- |
@@ -39,7 +43,7 @@ T01 已确认无调用身份的文件 API、VfsEntry / NodeInfo、Metadata 和 S
 | `alcyone://resources` | `/resources` | Resources 命名空间根 |
 | `alcyone://resources/a/b.txt` | `/resources/a/b.txt` | 普通文件或目录路径 |
 
-scheme 按不区分大小写识别，输出统一为 `alcyone`；命名空间只接受小写 `memory` / `resources`，普通路径段保留大小写。拒绝未知顶层目录、userinfo、端口、query 和 fragment，不把其中任何一部分悄悄丢弃。
+scheme 按不区分大小写识别，输出统一为 `alcyone`；所有路径段（包括第一段）保留大小写，不限制顶层目录名称。拒绝 userinfo、端口、query 和 fragment，不把其中任何一部分悄悄丢弃。
 
 `alcyone://` 使用 VFS 自身的根表示，不要求通用 URL 的 host 解析结果完整表达本协议；`memory` / `resources` 必须保留为 VfsPath 的第一段。
 
@@ -49,7 +53,7 @@ scheme 按不区分大小写识别，输出统一为 `alcyone`；命名空间只
 2. 每段按严格 UTF-8 规则进行一次百分号解码；非法转义或非法字节序列拒绝。
 3. 解码后的整段为 `.` 或 `..` 时拒绝；段内含 `/`、反斜线、NUL 或控制字符时拒绝。拒绝原始反斜线，避免平台间将其当分隔符。
 4. 不进行文件名大小写折叠或 Unicode 归一化，不自动 trim 文件名；允许合法中文等 Unicode 字符。原始空格要求使用 `%20`，不猜测 URI 中的空白。
-5. VfsPath 使用已解码的绝对逻辑路径；除 `/` 外不保留尾斜线。VfsUri 序列化时逐段编码，保留 unreserved 字符，其余按 UTF-8 百分号编码，十六进制大写；两个命名空间根输出尾斜线。
+5. VfsPath 使用已解码的绝对逻辑路径；除 `/` 外不保留尾斜线。VfsUri 序列化时逐段编码，保留 unreserved 字符，其余按 UTF-8 百分号编码，十六进制大写；单段路径对应的 URI 输出尾斜线；`isNamespaceRoot` 仅表示这一结构，不证明配置中存在该命名空间。
 6. URI → VfsPath → URI 的规范结果应幂等。Storage Adapter 接收已解码的 StoragePath，不得再次执行 URI 解码。
 
 `/resources/a` 与 `/resources/a/` 是同一逻辑位置；尾斜线不负责指定类型，实际类型由虚拟命名空间或 Storage 确定。
@@ -58,6 +62,9 @@ scheme 按不区分大小写识别，输出统一为 `alcyone`；命名空间只
 
 | 输入 | 结果 |
 | --- | --- |
+| `alcyone://notes/a` | 接受；解析不证明存在对应 Mount 或资源 |
+| `alcyone://Resources/a` | 接受并保留大小写，与 `/resources/a` 不同 |
+| `alcyone://notes` | 规范为 `alcyone://notes/`；path 为 `/notes` |
 | `ALCYONE://resources/a/` | URI 规范为 `alcyone://resources/a`；path 为 `/resources/a` |
 | `alcyone://resources/%61.txt` | 与 `alcyone://resources/a.txt` 相同 |
 | `alcyone://resources/报告.md` | 接受；序列化为对应 UTF-8 百分号编码 |
@@ -76,7 +83,7 @@ scheme 按不区分大小写识别，输出统一为 `alcyone`；命名空间只
 
 ### 3.1 配置与路由
 
-- Mount 路径先按 VfsPath 规范化，重复逻辑路径拒绝初始化；允许挂在 memory / resources 根或其子目录，不允许挂在 `/`。
+- Mount 路径先按 VfsPath 规范化，重复逻辑路径拒绝初始化；允许挂在配置的命名空间根或其子目录，不允许挂在 `/`。
 - Mount 在 Runtime 存活期间固定；新增 / 移除 / 重挂载需要关闭后重新配置，跨重启如何迁移 Registry 由 T03 定义。
 - 使用最长的完整路径段前缀匹配：`/resources/a` 匹配 `/resources/a/x`，不匹配 `/resources/abc`。
 - 去掉匹配的 Mount 前缀得到 StoragePath；恰好访问 Mount 根时，Adapter 接收“后端根”，不将空字符串误当上级目录。
@@ -84,9 +91,9 @@ scheme 按不区分大小写识别，输出统一为 `alcyone`；命名空间只
 
 ### 3.2 虚拟目录与 Mount 覆盖
 
-为使只配置深层 Mount 时仍能浏览，建议从固定命名空间与 Mount 配置推导必要目录，不另存完整目录树：
+为使只配置深层 Mount 时仍能浏览，建议从命名空间配置与 Mount 配置推导必要目录，不另存完整目录树：
 
-- `/`、`/memory`、`/resources` 是命名空间目录；即使没有对应 Mount，也能 stat / list。
+- `/` 与配置中的命名空间根是虚拟目录；即使没有对应 Mount，也能 stat / list。例如配置包含 memory / resources 时，才据此提供 `/memory`、`/resources`，不能仅凭 URI 解析成功生成虚拟目录。
 - 某 Mount 的缺失逻辑祖先表现为虚拟目录。例如仅配置 `/resources/medical/ct` 时，`/resources/medical` 仍可列出 `ct`。
 - Mount 路径作为目录入口，覆盖父后端同名文件 / 目录及其整个子树。父后端数据保留在原处，但通过该逻辑入口不可见。
 - 必要祖先与父后端同名文件冲突时也以逻辑目录优先，不自动删除 / 改写那个物理文件。配置和诊断信息应能解释该覆盖关系。

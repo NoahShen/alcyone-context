@@ -39,6 +39,32 @@ class UuidTest {
     }
 
     @Test
+    fun `every variant nibble is accepted in both cases`() {
+        for (variant in listOf('8', '9', 'a', 'b')) {
+            for (written in listOf(variant, variant.uppercaseChar())) {
+                val text = "018f6a3c-9c1e-7b2d-${written}f3a-4c5d6e7f8091"
+                assertEquals(text.lowercase(), normalizeUuidV7(text, "uuid"), "variant $written must be accepted")
+                assertTrue(isUuidV7(text))
+            }
+        }
+    }
+
+    @Test
+    fun `uppercase variant a and b are accepted`() {
+        assertEquals("018f6a3c-9c1e-7b2d-af3a-4c5d6e7f8091", normalizeUuidV7("018F6A3C-9C1E-7B2D-AF3A-4C5D6E7F8091", "NodeId"))
+        assertEquals("018f6a3c-9c1e-7b2d-bf3a-4c5d6e7f8091", normalizeUuidV7("018F6A3C-9C1E-7B2D-BF3A-4C5D6E7F8091", "NodeId"))
+    }
+
+    @Test
+    fun `non ascii digits and letters are rejected`() {
+        assertRejects("\u0660" + "18f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091") // 阿拉伯-印度数字零
+        assertRejects("\u06F1" + "18f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091") // 阿拉伯-印度数字一
+        assertRejects("018f6a3c-9c1e-7b2d-\uFF2D3a-4c5d6e7f8091") // 全角字母
+        assertRejects("018f6a3c-9c1e-7b2d-c\u06603a-4c5d6e7f8091") // 非 ASCII 落在 variant 位
+        assertRejects("\uFF11\uFF18f6a3c-9c1e-7b2d-8f3a-4c5d6e7f8091")
+    }
+
+    @Test
     fun `wrong version and variant bits are rejected`() {
         assertRejects("018f6a3c-9c1e-4b2d-8f3a-4c5d6e7f8091") // version 4
         assertRejects("018f6a3c-9c1e-6b2d-8f3a-4c5d6e7f8091") // version 6

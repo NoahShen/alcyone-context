@@ -1,8 +1,20 @@
 # VFS 公共契约草案 v0.1
 
+## 本次修改（2026-09-29，错误码分类澄清）
+
+- 在第 7 节补充 `INVALID_URI` 与 `INVALID_ARGUMENT` 的划分口径：路径类输入（含 URI 与其解码结果 `VfsPath`）用 `INVALID_URI`，ID、选项、字节内容等非路径参数用 `INVALID_ARGUMENT`。涉及第 7 节。
+
+## 本次修改（2026-09-29，取消命名空间白名单）
+
+- 明确 URI / Path 不校验命名空间成员资格，目录示例不构成白名单。涉及第 4.1 节。
+
 日期：2026-09-27  
 对应任务：T01  
 状态：T01 审阅通过（2026-09-28），作为后续设计基线；未开始实现
+
+## 本次修改（2026-09-29，明确 INVALID_URI 与 INVALID_ARGUMENT 的分类）
+
+- 在第 7 节错误码表中区分 `INVALID_URI`（路径格式）与 `INVALID_ARGUMENT`（ID、选项等非路径参数），作为 T06 的实现决定。涉及第 7 节。
 
 ## 本次修改（2026-09-28，T03 审阅通过）
 
@@ -75,7 +87,7 @@ Context System 配置逻辑 Mount 和所需同步策略；普通 read / write / 
 
 `VfsUri.parse(text)` 校验并构造 URI，`uri.path` 返回逻辑路径；`VfsPath` 和 `NodeId` 也只能通过校验后的构造入口生成。非法输入在本地被拒绝，不触发 Mount 或 Storage。规范化、编码、大小写、尾斜线和路径穿越规则由 T02 细化。
 
-`memory` / `resources` 是 Alcyone 逻辑命名空间的一部分；解析为路径时不能因通用 URI 库把它识别为 authority 而将其丢弃。
+`memory` / `resources` 仅是逻辑命名空间示例，第一段必须作为路径保留，不能因通用 URI 库把它识别为 authority 而丢弃。API 不限制第一段的名称，也不查询配置；例如 `alcyone://notes/a.txt` 可解析，但不代表资源存在或已有匹配 Mount。
 
 ### 4.2 列表项与稳定 Node 分开
 
@@ -240,7 +252,7 @@ Metadata 绑定 Node ID，移动后保留。查询 / 替换已注册 Node 的 Me
 
 | 错误码建议 | 主要触发条件 |
 | --- | --- |
-| INVALID_URI / INVALID_ARGUMENT | URI、ID、选项或数据格式非法；本地校验失败 |
+| INVALID_URI / INVALID_ARGUMENT | URI、ID、选项或数据格式非法；本地校验失败。分类：路径格式错误（`VfsUri`、`VfsPath`）用 `INVALID_URI`；ID、选项、字节内容等非路径参数用 `INVALID_ARGUMENT` |
 | READ_ONLY | 底层存储为只读，拒绝物理变更 |
 | STORAGE_ACCESS_DENIED | 后端拒绝访问或凭据无效 |
 | NOT_FOUND | 底层资源不存在，或查询的 Node ID 无记录 |
@@ -254,6 +266,8 @@ Metadata 绑定 Node ID，移动后保留。查询 / 替换已注册 Node 的 Me
 | CONFLICT | 已确定的并发控制规则检测到冲突 |
 | RECOVERY_REQUIRED | 预留给后续恢复能力；首版使用 STORAGE_ERROR / STATE_ERROR 等现有错误及 effect 报告结果 |
 | CLOSED | Runtime 已关闭或正在关闭，不接受新操作 |
+
+路径类输入与非路径参数的划分口径：`VfsUri` 与其解码结果 `VfsPath` 是同一份路径表示（`VfsPath` 只接受已解码的绝对逻辑路径和路径段列表，不接受其它对象），两者格式非法时统一返回 `INVALID_URI`，调用方不需要先判断输入来自哪个入口。`INVALID_ARGUMENT` 用于非路径参数：Node ID、事件 ID、读写选项（如负数 `maxBytes`）以及内容数据格式。例：`VfsPath.parse("/a//b")` 与 `VfsUri.parse("alcyone://a//b")` 同为 `INVALID_URI`；`NodeId.parse("非 UUIDv7")` 与 `ReadOptions(-1)` 为 `INVALID_ARGUMENT`。
 
 ### 7.1 异常需要携带的信息
 

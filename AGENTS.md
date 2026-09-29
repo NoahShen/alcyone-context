@@ -1,10 +1,12 @@
 # AGENTS.md
 
-## 本次修改（2026-09-29，common 模块与格式化工具）
+## 本次修改（2026-09-29，取消命名空间白名单）
 
-- 新增 `common/` 公共工具库模块（UUIDv7），更新模块职责表、依赖方向与基础设施边界。涉及“模块职责与依赖”。
-- 增加代码格式与版本集中管理的强制要求。涉及“开发与验证”。
-- 更新 T06 状态为独立验收通过后的修订轮。涉及“设计文档与阅读顺序”。
+- 移除 API 顶层目录白名单；命名空间由后续配置提供。涉及“VFS 必须保持的语义”。
+
+## 本次修改（2026-09-29，T06 提交复核待修复）
+
+- 记录 T06 提交复核发现路径不可变性、UUID / Unicode 与参数校验缺口，任务重新打开；更新当前测试状态。涉及“设计文档与阅读顺序”“开发与验证”。
 
 本文为在本仓库工作的编码 Agent 提供项目背景、设计依据与开发约束，适用于整个仓库。文档默认使用中文，代码标识符使用英文。
 
@@ -33,7 +35,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 9. [T05 工程初始化与验收](docs/tasks/m1-t05/T05_工程初始化与验收.md)：开发 Agent 的阶段任务及 A01～A08 验收标准；同目录含使用说明与验收记录。
 
-10. [T06 公共契约实现与验收](docs/tasks/m1-t06/T06_公共契约实现与验收.md)：API 类型、路径校验、事件与异常的实现范围及 A01～A08 验收标准；状态 DONE。
+10. [T06 公共契约实现与验收](docs/tasks/m1-t06/T06_公共契约实现与验收.md)：API 类型、路径校验、事件与异常的实现范围及 A01～A08 验收标准；当前提交复核不通过，待按同目录修复清单处理。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
@@ -91,7 +93,7 @@ OpenDAL 以 JVM 依赖嵌入运行，无需独立服务；构建发布时需处�
 
 ### 路径、身份与目录
 
-- 顶级命名空间为 `alcyone://memory/` 和 `alcyone://resources/`。
+- `memory` / `resources` 是顶级命名空间示例，不是 API 白名单。VfsUri / VfsPath 仅校验路径语法，保留所有路径段的大小写；命名空间由后续 Runtime 配置提供。
 - 区分 `VfsUri`、`VfsPath` 和 `StoragePath`。例如 `alcyone://resources/medical/ct/a.dcm` 对应逻辑路径 `/resources/medical/ct/a.dcm`；挂载 `/resources/medical/` 后，Storage Path 为 `ct/a.dcm`。
 - URI 表示位置，Node ID 表示身份。移动、重命名和跨 Mount 移动均保持同一个 Node ID。
 - Metadata 等逻辑信息绑定 Node ID；Node Registry 优先按全局 `VfsPath` 定位 Node，调用方无需预先知道 Mount。
@@ -157,4 +159,4 @@ VfsUri / 参数校验 → VfsPath → Mount / StoragePath → 存储约束检查
 - 正常关闭后重启可读取已提交的 SQLite 状态，不要求修复中断操作，事件对应成功变更，Consumer 失败不影响已完成操作。
 - 通过 Runtime 组合真实 SQLite 与 Local FS / WebDAV 的集成行为。
 
-T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前测试均为 NO-SOURCE，不得声称 SDK 业务测试已通过。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。
+T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前 common / API 有 53 个单元测试通过，但 T06 边界复核仍有待修复项；其余业务模块尚无完整实现，不得声称 SDK 文件操作已验收。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。

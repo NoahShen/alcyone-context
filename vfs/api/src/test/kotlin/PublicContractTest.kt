@@ -128,6 +128,29 @@ class PublicContractTest {
         assertTrue(DeleteOptions(recursive = true).recursive)
     }
 
+    // R4：本地可判定的选项范围在 API 边界检查
+    @Test
+    fun `read options reject a negative limit on construction and on copy`() {
+        val constructed = assertFailsWith<VfsException> { ReadOptions(-1) }
+        assertEquals(VfsErrorCode.INVALID_ARGUMENT, constructed.code)
+        assertEquals(VfsEffect.NONE, constructed.effect)
+
+        val copied = assertFailsWith<VfsException> { ReadOptions(1024).copy(maxBytes = -1) }
+        assertEquals(VfsErrorCode.INVALID_ARGUMENT, copied.code)
+        assertEquals(VfsEffect.NONE, copied.effect)
+        assertFailsWith<VfsException> { ReadOptions(Long.MIN_VALUE) }
+    }
+
+    @Test
+    fun `read options accept null zero and positive limits`() {
+        assertEquals(null, ReadOptions().maxBytes) // 使用 Runtime 限额，不表示无限
+        assertEquals(0L, ReadOptions(0).maxBytes) // 只接受空内容
+        assertEquals(1024L, ReadOptions(1024).maxBytes)
+        assertEquals(0L, ReadOptions(1024).copy(maxBytes = 0).maxBytes)
+        assertEquals(null, ReadOptions(1024).copy(maxBytes = null).maxBytes)
+        assertEquals(1L, ReadOptions().copy(maxBytes = 1).maxBytes)
+    }
+
     @Test
     fun `metadata defaults are empty`() {
         val metadata = NodeMetadata()

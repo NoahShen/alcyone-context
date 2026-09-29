@@ -3,11 +3,19 @@ package alcyone.vfs
 /**
  * 读取选项。
  *
- * @param maxBytes 调用方进一步收紧的上限；为空时使用 Runtime 限额，不表示无限。
+ * @param maxBytes 调用方进一步收紧的上限：`null` 表示使用 Runtime 限额（不表示无限），`0` 表示只接受空内容，
+ * 正数为字节上限。负数在构造时抛 [VfsErrorCode.INVALID_ARGUMENT]、effect 为 [VfsEffect.NONE]，
+ * 构造与 `copy()` 都无法绕过；具体限额与 I/O 执行由 Runtime 负责。
  */
 data class ReadOptions(
     val maxBytes: Long? = null,
-)
+) {
+    init {
+        if (maxBytes != null && maxBytes < 0) {
+            throw VfsException(VfsErrorCode.INVALID_ARGUMENT, "ReadOptions.maxBytes must not be negative: $maxBytes")
+        }
+    }
+}
 
 /** 写入模式：仅创建、仅覆盖已存在文件，或创建或覆盖。 */
 enum class WriteMode { CREATE_NEW, REPLACE_EXISTING, UPSERT }
