@@ -12,9 +12,14 @@ if [[ ! -f "$ROOT/gradle/toolchain.versions" ]]; then
     exit 1
 fi
 version_value() { sed -n "s/^$1=\(.*\)$/\1/p" "$ROOT/gradle/toolchain.versions" | head -1; }
-JDK_HOME="$LOCAL/jdk/jdk-$(version_value jdk.version)/Contents/Home"
+# macOS bundles nest the JDK in Contents/Home; Linux tarballs are the JDK directory itself.
+if [[ "$(uname -s)" == Darwin ]]; then
+    JDK_HOME="$LOCAL/jdk/jdk-$(version_value jdk.version)/Contents/Home"
+else
+    JDK_HOME="$LOCAL/jdk/jdk-$(version_value jdk.version)"
+fi
 
-if [[ ! -x "$JDK_HOME/bin/java" || ! -f "$LOCAL/jdk/install.sha256" ]]; then
+if [[ ! -x "$JDK_HOME/bin/java" || ! -s "$LOCAL/jdk/install.sha256" ]]; then
     echo "ERROR: project toolchain is not prepared. Run './scripts/dev bootstrap' first." >&2
     exit 1
 fi

@@ -32,9 +32,11 @@ fun toolchainValue(
     key: String,
 ): String = toolchainVersions[key] ?: error("gradle/toolchain.versions is missing '$key'")
 
-check(File(System.getProperty("java.home")).canonicalFile ==
-    rootDir.resolve(".local/jdk/jdk-${toolchainValue("jdk.version")}/Contents/Home").canonicalFile
-) {
+// macOS bundles nest the JDK in a .app-like Contents/Home; Linux tarballs are the JDK directory itself.
+val isMacOs = System.getProperty("os.name").startsWith("Mac")
+val projectJdkHome =
+    rootDir.resolve(".local/jdk/jdk-${toolchainValue("jdk.version")}").let { if (isMacOs) it.resolve("Contents/Home") else it }
+check(File(System.getProperty("java.home")).canonicalFile == projectJdkHome.canonicalFile) {
     "Use scripts/dev bootstrap and scripts/dev gradle: the build requires the project-local JDK."
 }
 

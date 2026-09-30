@@ -1,5 +1,12 @@
 # AGENTS.md
 
+## 本次修改（2026-09-30，工具链支持 Linux，CI 改为 ubuntu-latest）
+
+- 项目工具链扩展到 macOS arm64、Linux x64、Linux arm64：`gradle/toolchain.versions` 按平台分列 JDK 的 URL 与 SHA-256，`scripts/dev` 按 `uname` 选平台并归一化 JDK 目录；Gradle 发行包与插件版本仍是单一来源。CI 运行器由 `macos-14` 改为 `ubuntu-latest`。涉及“开发与验证”。
+- 修复两处会在 Linux 上触发的实现缺陷：`find -exec` 不能调用 shell 函数（导致安装清单被静默写成空文件），以及 GNU `sha256sum -c` 对空清单返回 0（会把未校验的安装判为完好）。安装清单现在要求非空。
+- **验证边界**：macOS arm64 上 `./scripts/check` 通过（120 个测试）；Linux x64 验证到“下载校验 + 解压归一化 + 清单校验”（用真实 Adoptium 归档），**完整构建未在真实 Linux 上跑过**；Linux arm64 仅静态验证。详见 T08 验收记录第 5.1 节。T08 状态回到 IN_PROGRESS。
+- 未改动任何 VFS 业务代码与测试。
+
 ## 本次修改（2026-09-30，T08 本地检查与 CI 配置）
 
 - 新增统一检查入口 `./scripts/check`（等价 `clean build`，含编译、测试与 `spotlessCheck`，失败返回非零且不改写源码）与 GitHub Actions 工作流（`macos-14`，走 `scripts/dev bootstrap`）。开发前跑 `./scripts/dev bootstrap` 准备项目内工具链，日常用 `./scripts/check`；格式修正仍需显式运行 `spotlessApply`。T08 状态 IN_PROGRESS。涉及“设计文档与阅读顺序”“开发与验证”。
@@ -67,7 +74,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 11. [T07 Core 边界定义与验收](docs/tasks/m1-t07/T07_Core边界定义与验收.md)：Storage / Repository 接口、事务与事件边界及修订后的 A01～A08 验收标准；当前 DONE，代码 `914615a` 已独立验收通过，完整构建及 120 个测试通过；真实存储和事务实现留后续任务，见同目录验收记录第 9 节。
 
-12. [T08 本地检查与 CI 配置及验收](docs/tasks/m1-t08/T08_本地检查与CI配置及验收.md)：本地检查入口、GitHub Actions、运行说明与 A01～A07 验收标准；当前 DONE，代码 `a993576` 已独立验收通过，120 个测试通过，**远端 CI 未运行**（无推送权限），见同目录验收记录。
+12. [T08 本地检查与 CI 配置及验收](docs/tasks/m1-t08/T08_本地检查与CI配置及验收.md)：本地检查入口、GitHub Actions、运行说明与 A01～A07 验收标准；基线 `a993576` 已独立验收通过，本轮新增 Linux 工具链支持与 `ubuntu-latest` 运行器，状态 IN_PROGRESS（120 个测试在 macOS 通过，**Linux 构建与远端 CI 均未验证**），见同目录验收记录第 5.1 节。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 

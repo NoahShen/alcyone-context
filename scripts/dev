@@ -4,6 +4,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 LOCAL="$ROOT/.local"
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
+# Verified targets: macOS arm64, Linux x64, Linux arm64. The JDK archive is picked per platform.
+PLATFORM="$(uname -s)/$(uname -m)"
+case "$PLATFORM" in
+    Darwin/arm64) JDK_OS=mac; JDK_ARCH=arm64 ;;
+    Linux/x86_64 | Linux/amd64) JDK_OS=linux; JDK_ARCH=x64 ;;
+    Linux/aarch64 | Linux/arm64) JDK_OS=linux; JDK_ARCH=arm64 ;;
+    *) fail "Unsupported platform: $PLATFORM. Verified targets: macOS arm64, Linux x64, Linux arm64." ;;
+esac
+
+# Linux ships sha256sum, macOS ships shasum; both read and emit the same "<hash>  <file>" lines.
+# Kept as an argv array, not a function: `find -exec` can only run real executables.
+if command -v sha256sum >/dev/null 2>&1; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
+
 # gradle/toolchain.versions is the single source for these versions; the root Gradle build reads it too.
 VERSIONS_FILE="$ROOT/gradle/toolchain.versions"
 [[ -f "$VERSIONS_FILE" ]] || fail "Missing $VERSIONS_FILE: it holds the JDK and Gradle versions and checksums."
@@ -14,17 +27,18 @@ version_value() {
     printf '%s' "$value"
 }
 JDK_VERSION="$(version_value jdk.version)"
-JDK_SHA="$(version_value jdk.sha256)"
-JDK_URL="$(version_value jdk.url)"
+JDK_SHA="$(version_value "jdk.$JDK_OS.$JDK_ARCH.sha256")"
+JDK_URL="$(version_value "jdk.$JDK_OS.$JDK_ARCH.url")"
 GRADLE_VERSION="$(version_value gradle.version)"
 GRADLE_SHA="$(version_value gradle.sha256)"
 GRADLE_URL="$(version_value gradle.url)"
 
 JDK_DIR="$LOCAL/jdk/jdk-$JDK_VERSION"
-JDK_HOME="$JDK_DIR/Contents/Home"
-[[ "$(uname -s)/$(uname -m)" == Darwin/arm64 ]] || fail 'T05 supports only verified macOS arm64; other native platforms are unverified.'
+# macOS bundles are wrapped in a .app-like Contents/Home; Linux tarballs are the JDK directory itself.
+if [[ "$JDK_OS" == mac ]]; then JDK_HOME="$JDK_DIR/Contents/Home"; else JDK_HOME="$JDK_DIR"; fi
+
 mkdir -p "$LOCAL/jdk" "$LOCAL/gradle-dist" "$LOCAL/gradle-user-home" "$LOCAL/tmp"
-verify() { echo "$2  $1" | shasum -a 256 -c - >/dev/null; }
+verify() { echo "$2  $1" | "${SHA[@]}" -c - >/dev/null; }
 fetch() {
     local url="$1" file="$2" sha="$3"
     echo "Source: $url; SHA-256: $sha"
@@ -39,26 +53,46 @@ fetch() {
 }
 check_install() {
     local dir="$1" manifest="$2"
-    [[ -d "$dir" && -f "$manifest" ]] || fail "Missing installation/manifest: $dir; run bootstrap (remove incomplete installation first)."
-    (cd "$dir" && shasum -a 256 -c "$manifest" >/dev/null) || fail "Damaged installation: $dir; remove it and rerun bootstrap."
+    # -s matters: GNU `sha256sum -c` on an empty manifest exits 0, which would report an
+    # unverified installation as healthy. An absent or empty manifest is never acceptable.
+    [[ -d "$dir" && -s "$manifest" ]] || fail "Missing installation/manifest: $dir; run bootstrap (remove incomplete installation first)."
+    (cd "$dir" && "${SHA[@]}" -c "$manifest" >/dev/null) || fail "Damaged installation: $dir; remove it and rerun bootstrap."
 }
-manifest() { (cd "$1" && find . -type f -exec shasum -a 256 {} +) > "$2"; }
+manifest() { (cd "$1" && find . -type f -exec "${SHA[@]}" {} +) > "$2"; }
+
+# Adoptium archives wrap the JDK in a versioned top-level directory whose name is not
+# guaranteed to match ours; extract to a staging dir so we can normalize it deterministically.
+unpack_jdk() {
+    local archive="$1" stage="$LOCAL/jdk/.unpack"
+    rm -rf "$stage"; mkdir -p "$stage"
+    tar -xzf "$archive" -C "$stage"
+    if [[ ! -d "$JDK_DIR" ]]; then
+        local candidate
+        candidate="$(find "$stage" -mindepth 1 -maxdepth 1 -type d)"
+        [[ -n "$candidate" && "$(printf '%s\n' "$candidate" | wc -l | tr -d ' ')" == 1 ]] \
+            || fail "JDK archive does not contain exactly one top-level directory; expected $JDK_DIR"
+        mv "$candidate" "$JDK_DIR"
+    fi
+    rm -rf "$stage"
+}
+
 case "${1:-}" in
 bootstrap)
     fetch "$JDK_URL" "$LOCAL/jdk/temurin-21.tar.gz" "$JDK_SHA"
-    if [[ ! -d "$JDK_DIR" ]]; then
-        tar -xzf "$LOCAL/jdk/temurin-21.tar.gz" -C "$LOCAL/jdk"
+    # A previous interrupted run can leave the directory without a usable manifest; rebuild both.
+    if [[ ! -d "$JDK_DIR" || ! -s "$LOCAL/jdk/install.sha256" ]]; then
+        unpack_jdk "$LOCAL/jdk/temurin-21.tar.gz"
         manifest "$JDK_DIR" "$LOCAL/jdk/install.sha256"
     fi
     check_install "$JDK_DIR" "$LOCAL/jdk/install.sha256"
     fetch "$GRADLE_URL" "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION-bin.zip" "$GRADLE_SHA"
-    if [[ ! -d "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" ]]; then
+    if [[ ! -d "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" || ! -s "$LOCAL/gradle-dist/install.sha256" ]]; then
         unzip -q "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION-bin.zip" -d "$LOCAL/gradle-dist"
         manifest "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" "$LOCAL/gradle-dist/install.sha256"
     fi
     check_install "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" "$LOCAL/gradle-dist/install.sha256"
     "$JDK_HOME/bin/java" -version
-    echo "Ready: JDK=$JDK_HOME; Gradle=$LOCAL/gradle-dist/gradle-$GRADLE_VERSION"
+    echo "Platform: $PLATFORM; Ready: JDK=$JDK_HOME; Gradle=$LOCAL/gradle-dist/gradle-$GRADLE_VERSION"
     ;;
 gradle)
     shift

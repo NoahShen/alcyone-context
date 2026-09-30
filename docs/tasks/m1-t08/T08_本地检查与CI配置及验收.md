@@ -7,11 +7,15 @@
 
 # T08 本地检查与 CI 配置及验收
 
+## 本次修改（2026-09-30，工具链支持 Linux，CI 改为 ubuntu-latest）
+
+- 需求变更：`scripts/dev` 与 `gradle/toolchain.versions` 支持 macOS arm64、Linux x64、Linux arm64；CI 运行器由 `macos-14` 改为 `ubuntu-latest`，为未来 Linux 部署环境做准备。涉及第 1～2 节。
+- 第 2.2 节“匹配 macOS arm64”的表述改为“匹配已验证平台”；Linux 完整构建未在真实 Linux 上跑过，限制写在使用说明与验收记录。
+- 状态回到 IN_PROGRESS（基线 `a993576` 已独立验收通过，保留为历史）。
+
+状态：**IN_PROGRESS（Linux 工具链扩展待验收）。** 前置 T05～T07 已完成；T07 代码基线 `914615a`，独立验收见 [T07 验收记录](../m1-t07/T07_验收记录.md) 第 9 节。本任务自测与未验证事项见 [T08 验收记录](T08_验收记录.md)。
+
 ## 本次修改（2026-09-30，进入开发）
-
-- 状态由 TODO 改为 IN_PROGRESS；交付物 `scripts/check`、`.github/workflows/check.yml`、使用说明与验收记录已落地。涉及第 1～6 节。
-
-状态：**IN_PROGRESS，开发中。** 前置 T05～T07 已完成；T07 代码基线 `914615a`，独立验收见 [T07 验收记录](../m1-t07/T07_验收记录.md) 第 9 节。本任务自测与未验证事项见 [T08 验收记录](T08_验收记录.md)。
 
 ## 1. 目标与现状
 
@@ -23,7 +27,7 @@
 | `scripts/dev gradle …` | 复用项目 JDK、Gradle 缓存及临时目录隔离 |
 | `gradle/toolchain.versions`、版本目录 | 保持版本单一来源，不升级依赖或在 workflow 复制版本号 |
 | `build` 已包含 `spotlessCheck` | 检查只报告错误，自动格式化仍由开发者显式运行 |
-| macOS arm64 支持范围 | CI 与此范围匹配；本轮不扩展 Linux / Windows / x64 |
+| macOS arm64 支持范围 | CI 与此范围匹配；本轮扩展到 Linux x64 / arm64 以适配未来部署环境 |
 | T07 已通过 120 个测试 | 作为当前参考数量，不能在脚本里写死；新增测试应自动纳入 |
 
 例：本地和 CI 都调用同一检查入口，格式不合格时返回失败，由开发 Agent 修正后重跑。
@@ -38,7 +42,7 @@
 
 ### 2.2 GitHub Actions 配置
 
-在 `.github/workflows/` 增加一个构建工作流，覆盖 PR、默认分支 push 和手动触发，执行“检出 → bootstrap → 本地检查入口”。开发时按官方文档核实可用的 macOS arm64 运行器标签及仓库适用条件，明确记录选择；不得用不同架构运行器绕过现有脚本的检查。
+在 `.github/workflows/` 增加一个构建工作流，覆盖 PR、默认分支 push 和手动触发，执行“检出 → bootstrap → 本地检查入口”。运行器必须落在 `scripts/dev` 支持的平台列表内（macOS arm64、Linux x64、Linux arm64），本轮选用 `ubuntu-latest`；不得用不同架构运行器绕过现有脚本的检查。
 
 例：CI 使用仓库内工具链，而不是调用运行器预装的默认 Java。若当前账号或仓库没有适用运行器，记录环境限制和所需条件，不为完成 T08 引入付费机器、自托管服务或多平台工具链改造。
 

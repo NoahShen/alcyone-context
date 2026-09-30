@@ -7,9 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# macos-14 is the Apple Silicon (arm64) runner: scripts/dev refuses any other platform,
-# and T05/T08 only verified macOS arm64. No preinstalled JDK is used — bootstrap installs
-# the project JDK from gradle/toolchain.versions, so no version is duplicated here.
+# ubuntu-latest is Linux x64; scripts/dev installs the matching project-local JDK and
+# refuses unlisted platforms, so no runner can silently build on a different architecture.
+# No preinstalled JDK is used — bootstrap installs the project JDK from
+# gradle/toolchain.versions, so no version is duplicated here.
 permissions:
   contents: read
 
@@ -19,8 +20,8 @@ concurrency:
 
 jobs:
   build:
-    name: build (macos-14 arm64)
-    runs-on: macos-14
+    name: build (ubuntu-latest, Linux x64)
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Checkout
