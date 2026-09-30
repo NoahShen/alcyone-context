@@ -1,0 +1,48 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# macos-14 is the Apple Silicon (arm64) runner: scripts/dev refuses any other platform,
+# and T05/T08 only verified macOS arm64. No preinstalled JDK is used — bootstrap installs
+# the project JDK from gradle/toolchain.versions, so no version is duplicated here.
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (macos-14 arm64)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bootstrap project toolchain
+        run: ./scripts/dev bootstrap
+
+      # shell: bash enables `-eo pipefail`, without it `| tee` would mask the check's exit code.
+      - name: Check (compile + test + format)
+        shell: bash
+        run: ./scripts/check 2>&1 | tee .local/tmp/ci-check.log
+
+      # Always upload: a failing build's logs are exactly what we need to diagnose.
+      # spotlessCheck reports through the console, so the log is the format report.
+      - name: Upload test and check reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-reports-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            **/build/test-results/test/*.xml
+            .local/tmp/ci-check.log

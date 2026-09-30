@@ -1,0 +1,23 @@
+#!/bin/bash
+# Unified check entry for humans and CI: compile + unit tests + format check.
+# Never formats automatically and never edits sources; a non-zero exit means "fix it, then rerun".
+# To apply formatting on purpose: ./scripts/dev gradle spotlessApply
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+LOCAL="$ROOT/.local"
+
+# Reuse scripts/dev's version source; only warn here, let scripts/dev own the hard failure.
+if [[ ! -f "$ROOT/gradle/toolchain.versions" ]]; then
+    echo "ERROR: missing $ROOT/gradle/toolchain.versions (JDK and Gradle versions live there)." >&2
+    exit 1
+fi
+version_value() { sed -n "s/^$1=\(.*\)$/\1/p" "$ROOT/gradle/toolchain.versions" | head -1; }
+JDK_HOME="$LOCAL/jdk/jdk-$(version_value jdk.version)/Contents/Home"
+
+if [[ ! -x "$JDK_HOME/bin/java" || ! -f "$LOCAL/jdk/install.sha256" ]]; then
+    echo "ERROR: project toolchain is not prepared. Run './scripts/dev bootstrap' first." >&2
+    exit 1
+fi
+
+cd "$ROOT"
+exec ./scripts/dev gradle clean build --console=plain "$@"
