@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## 本次修改（2026-09-30，远端 CI 通过，M1 收口）
+
+- GitHub Actions 首次实跑通过：运行 [36725260393](https://github.com/NoahShen/alcyone-context/actions/runs/36725260393)，提交 `227f526`，job `build (ubuntu-latest, Linux x64)` `success`，约 2 分钟。Linux x64 的工具链与统一检查已完整验证，R1～R3 修复经此次运行确认生效。T08 状态改为 DONE。
+- M1 四个任务（T05～T08）全部完成，阶段收口，下一步进入 M2（从 T09 Mount 路由开始）。涉及“项目定位与当前阶段”与“开发与验证”。
+- 仍未验证的边界已写入 T08 验收记录：Linux arm64 需 ARM runner；OpenDAL native 实际加载属 T12；`pull_request` / `workflow_dispatch` 触发未实跑。
+
 ## 本次修改（2026-09-30，T08 第二轮复核 R4 文档收尾）
 
 - 统一 T08 四份文档的当前有效说明：区分“已配置支持的平台”（macOS arm64 / Linux x64 / Linux arm64）与“已实跑验证的平台”（仅 macOS arm64），状态保持 IN_PROGRESS。涉及“设计文档与阅读顺序”。详见 T08 交付文档与验收记录。
@@ -79,7 +85,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 11. [T07 Core 边界定义与验收](docs/tasks/m1-t07/T07_Core边界定义与验收.md)：Storage / Repository 接口、事务与事件边界及修订后的 A01～A08 验收标准；当前 DONE，代码 `914615a` 已独立验收通过，完整构建及 120 个测试通过；真实存储和事务实现留后续任务，见同目录验收记录第 9 节。
 
-12. [T08 本地检查与 CI 配置及验收](docs/tasks/m1-t08/T08_本地检查与CI配置及验收.md)：本地检查入口、GitHub Actions、运行说明与 A01～A07 验收标准；基线 `a993576` 已独立验收通过，Linux 工具链支持与 `ubuntu-latest` 运行器已提交（`9bc4401`），状态 IN_PROGRESS（120 个测试在 macOS 通过，**Linux 完整构建与远端 CI 均未验证**），见同目录验收记录第 5.1 节。
+12. [T08 本地检查与 CI 配置及验收](docs/tasks/m1-t08/T08_本地检查与CI配置及验收.md)：本地检查入口、GitHub Actions、运行说明与 A01～A07 验收标准；**DONE**，提交 `a993576` 独立验收，Linux 扩展与 R1～R3 修复经远端 CI 运行 `36725260393`（`ubuntu-latest`，`success`）实跑通过。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
