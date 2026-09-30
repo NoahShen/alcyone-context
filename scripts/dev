@@ -62,31 +62,35 @@ manifest() { (cd "$1" && find . -type f -exec "${SHA[@]}" {} +) > "$2"; }
 
 # Adoptium archives wrap the JDK in a versioned top-level directory whose name is not
 # guaranteed to match ours; extract to a staging dir so we can normalize it deterministically.
+# Callers must remove any previous $JDK_DIR first: this always installs a fresh copy.
 unpack_jdk() {
     local archive="$1" stage="$LOCAL/jdk/.unpack"
     rm -rf "$stage"; mkdir -p "$stage"
     tar -xzf "$archive" -C "$stage"
-    if [[ ! -d "$JDK_DIR" ]]; then
-        local candidate
-        candidate="$(find "$stage" -mindepth 1 -maxdepth 1 -type d)"
-        [[ -n "$candidate" && "$(printf '%s\n' "$candidate" | wc -l | tr -d ' ')" == 1 ]] \
-            || fail "JDK archive does not contain exactly one top-level directory; expected $JDK_DIR"
-        mv "$candidate" "$JDK_DIR"
-    fi
+    local candidate
+    candidate="$(find "$stage" -mindepth 1 -maxdepth 1 -type d)"
+    [[ -n "$candidate" && "$(printf '%s\n' "$candidate" | wc -l | tr -d ' ')" == 1 ]] \
+        || fail "JDK archive does not contain exactly one top-level directory; expected $JDK_DIR"
+    mv "$candidate" "$JDK_DIR"
     rm -rf "$stage"
 }
 
 case "${1:-}" in
 bootstrap)
     fetch "$JDK_URL" "$LOCAL/jdk/temurin-21.tar.gz" "$JDK_SHA"
-    # A previous interrupted run can leave the directory without a usable manifest; rebuild both.
+    # A directory without a usable manifest is an incomplete install: a partial extraction, or a
+    # leftover from an earlier run. Never adopt it and write a fresh manifest over its old files —
+    # that would re-certify whatever happens to be sitting there. Rebuild from the verified archive.
     if [[ ! -d "$JDK_DIR" || ! -s "$LOCAL/jdk/install.sha256" ]]; then
+        rm -rf "$JDK_DIR"
         unpack_jdk "$LOCAL/jdk/temurin-21.tar.gz"
         manifest "$JDK_DIR" "$LOCAL/jdk/install.sha256"
     fi
     check_install "$JDK_DIR" "$LOCAL/jdk/install.sha256"
     fetch "$GRADLE_URL" "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION-bin.zip" "$GRADLE_SHA"
+    # Same rule as the JDK: a directory that cannot be verified is replaced, not adopted.
     if [[ ! -d "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" || ! -s "$LOCAL/gradle-dist/install.sha256" ]]; then
+        rm -rf "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION"
         unzip -q "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION-bin.zip" -d "$LOCAL/gradle-dist"
         manifest "$LOCAL/gradle-dist/gradle-$GRADLE_VERSION" "$LOCAL/gradle-dist/install.sha256"
     fi

@@ -31,9 +31,14 @@ jobs:
         run: ./scripts/dev bootstrap
 
       # shell: bash enables `-eo pipefail`, without it `| tee` would mask the check's exit code.
+      # ci-logs/ is deliberately outside build/: the check starts with `clean`, which would delete
+      # a log written under build/. It is also not hidden, so upload-artifact@v4 keeps it
+      # (that action skips hidden files and anything under hidden directories by default).
       - name: Check (compile + test + format)
         shell: bash
-        run: ./scripts/check 2>&1 | tee .local/tmp/ci-check.log
+        run: |
+          mkdir -p ci-logs
+          ./scripts/check 2>&1 | tee ci-logs/check.log
 
       # Always upload: a failing build's logs are exactly what we need to diagnose.
       # spotlessCheck reports through the console, so the log is the format report.
@@ -46,4 +51,4 @@ jobs:
           retention-days: 14
           path: |
             **/build/test-results/test/*.xml
-            .local/tmp/ci-check.log
+            ci-logs/check.log

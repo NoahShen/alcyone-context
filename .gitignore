@@ -40,3 +40,6 @@ Thumbs.db
 .gradle/
 build/
 !/gradle/wrapper/gradle-wrapper.jar
+
+# CI 检查日志（由 .github/workflows/check.yml 生成，不入库）
+/ci-logs/
