@@ -56,8 +56,8 @@ interface StorageStream : AutoCloseable {
 /**
  * 存储能力特征，严格只暴露 Core 关心的能力差异，不暴露 OpenDAL 原生 Capability。
  *
- * @property readOnly 存储只读。只读挂载的本地目录、服务器声明的 WebDAV 在**打开后端时即可得知**，
- * 预检据此在任何存储副作用之前拒绝变更（T10 §2.4）。默认 `false` 表示可写，不改变既有实现与既有测试。
+ * @property readOnly 这块盘是不是只读。挂只读目录的本地盘、服务器声明只读的 WebDAV，在打开后端时就能看出来，
+ *   所以预检能在动存储之前先拒掉（T10 §2.4）。默认 `false` 表示可写，不影响既有实现和既有测试。
  */
 data class StorageCapabilities(
     val nativeFileMove: Boolean = true,
