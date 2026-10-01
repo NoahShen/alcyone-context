@@ -6,7 +6,8 @@ import java.util.Collections
  * VFS 全局逻辑路径，形式为已解码的绝对路径，例如 `/resources/medical/ct/a.dcm`。
  *
  * 构造入口的输入是已解码文本，不再执行百分号解码，但仍执行与 [VfsUri] 相同的段边界检查；
- * 两个入口不允许使用不同的路径穿越规则。非法输入在本地被拒绝，不触发 Mount 或 Storage。
+ * 两个入口不允许使用不同的路径穿越规则，也不允许其中之一接受含字面 `%` 的段。
+ * 非法输入在本地被拒绝，不触发 Mount 或 Storage。
  *
  * 顶层目录名称不在这里校验：命名空间由后续 Runtime 配置提供，解析成功不表示路径存在、可访问或已挂载。
  * 本对象是不可变值对象：构造输入和 [segments] 都不能反向改写内部状态。
@@ -69,6 +70,9 @@ private fun validateSegment(
     }
     if (hasUnpairedSurrogate(segment)) {
         throw invalidPath(source, "path segment contains an unpaired surrogate")
+    }
+    if ('%' in segment) {
+        throw invalidPath(source, "path segment must not contain a literal '%'")
     }
     return segment
 }

@@ -75,10 +75,14 @@ class VfsUriTest {
     }
 
     @Test
-    fun `example 9 double encoding stays a literal file name`() {
-        val uri = VfsUri.parse("alcyone://resources/%252e%252e")
-        assertEquals("/resources/%2e%2e", uri.path.toString())
-        assertEquals("alcyone://resources/%252e%252e", uri.toString())
+    fun `example 9 double encoding is rejected`() {
+        assertInvalidUri("alcyone://resources/%252e%252e")
+    }
+
+    @Test
+    fun `example 9b encoded percent in a file name is rejected`() {
+        assertInvalidUri("alcyone://resources/a%25b")
+        assertInvalidUri("alcyone://resources/%61%25") // 解码后段为 "a%"
     }
 
     @Test
@@ -169,7 +173,8 @@ class VfsUriTest {
     @Test
     fun `serialization keeps unreserved characters and uses uppercase hex`() {
         assertEquals("alcyone://resources/a-._~0AZaz", VfsUri.parse("alcyone://resources/a-._~0AZaz").toString())
-        assertEquals("alcyone://resources/a%3Fb%23c%3Ad%2Be%3D%25", VfsUri.parse("alcyone://resources/a%3Fb%23c%3Ad%2Be%3D%25").toString())
+        assertEquals("alcyone://resources/a%3Fb%23c%3Ad%2Be%3D", VfsUri.parse("alcyone://resources/a%3Fb%23c%3Ad%2Be%3D").toString())
+        assertInvalidUri("alcyone://resources/a%3Fb%23c%3Ad%2Be%3D%25") // 解码后段尾为 '%'
     }
 
     @Test
@@ -188,7 +193,7 @@ class VfsUriTest {
                 "alcyone://resources/a",
                 "alcyone://resources/a%20b.txt",
                 "alcyone://resources/%E6%8A%A5%E5%91%8A.md",
-                "alcyone://resources/%252e%252e",
+                "alcyone://resources/a%20b%2Bc.txt",
                 "alcyone://memory/notes/2026/a%2Bb",
             )
         for (input in inputs) {

@@ -130,14 +130,27 @@ class StoragePathTest {
         assertEquals("smile_\uD83D\uDE0A.txt", validEmoji.name)
     }
 
-    // 4. 字面 %2e%2e 当普通文件名（不二次解码）
+    // 4. 正常段不做二次解码；含字面 % 的段拒绝（T02 §2.2 第 3 条）
     @Test
-    fun `literal percent encoded sequences are treated as plain text`() {
-        val path = StoragePath.parse("%2e%2e/test%20file.txt")
-        assertEquals(listOf("%2e%2e", "test%20file.txt"), path.segments)
-        assertEquals("test%20file.txt", path.name)
-        assertEquals("%2e%2e", path.parent.toRelativeString())
-        assertEquals("%2e%2e/test%20file.txt", path.toRelativeString())
+    fun `segments are taken literally without percent decoding`() {
+        val path = StoragePath.parse("test dir/test+file.txt")
+        assertEquals(listOf("test dir", "test+file.txt"), path.segments)
+        assertEquals("test+file.txt", path.name)
+        assertEquals("test dir", path.parent.toRelativeString())
+        assertEquals("test dir/test+file.txt", path.toRelativeString())
+    }
+
+    @Test
+    fun `reject segments containing a literal percent sign`() {
+        val ex = assertThrows(VfsException::class.java) { StoragePath.parse("a%25b") }
+        assertEquals(VfsErrorCode.INVALID_URI, ex.code)
+        assertTrue(ex.message!!.contains("must not contain a literal '%'"))
+
+        val exDouble = assertThrows(VfsException::class.java) { StoragePath.parse("%2e%2e/a") }
+        assertEquals(VfsErrorCode.INVALID_URI, exDouble.code)
+
+        val exSegment = assertThrows(VfsException::class.java) { StoragePath.of(listOf("a", "100%")) }
+        assertEquals(VfsErrorCode.INVALID_URI, exSegment.code)
     }
 
     // 5. 不可变性：改构造入参列表、改对外暴露的集合都不影响对象，equals / hashCode 稳定

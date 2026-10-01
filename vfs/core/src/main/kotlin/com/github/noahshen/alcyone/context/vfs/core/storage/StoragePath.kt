@@ -13,8 +13,8 @@ import java.util.Collections
  *
  * 规则来自 T02 §2.1～§2.2 与 T07 第 2.1 节：
  *
- * - 输入已解码，[parse] **不再执行**百分号解码，`%2e%2e` 是普通文件名；
- * - 拒绝绝对路径、空中间段、`.` / `..`、段内分隔符与控制字符、孤立代理字符；
+ * - 输入已解码，[parse] **不再执行**百分号解码；
+ * - 拒绝绝对路径、空中间段、`.` / `..`、段内分隔符与控制字符、孤立代理字符、字面 `%`；
  * - 接受合法 Unicode 与空格等普通字符；
  * - 非法输入抛 [VfsErrorCode.INVALID_URI]：与 [com.github.noahshen.alcyone.context.vfs.VfsPath] 同属路径格式错误。
  *
@@ -89,6 +89,8 @@ private fun validateSegment(
         throw invalidPath(source, "path segment contains '/', '\\', NUL or a control character")
     }
     if (hasUnpairedSurrogate(segment)) throw invalidPath(source, "path segment contains an unpaired surrogate")
+    // 与 VfsPath 一致（T02 §2.2 第 3 条）：适配层不再解码，段内不能留 `%` 以免后端再次解码产生歧义。
+    if ('%' in segment) throw invalidPath(source, "path segment must not contain a literal '%'")
     return segment
 }
 

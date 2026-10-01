@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## 本次修改（2026-09-30，T09 使用说明重写）
+
+- `T09_使用说明.md` 改为直白版：开头用大白话说明 MountRouter 解决什么问题，全文用「笔记本场景」贯穿，每个方法固定写「做什么 / 什么时候用 / 代码示例 / 边界情况」；新增「挂载位置的选择」，明确挂命名空间根（`/memory`）允许、挂逻辑根（`/`）拒绝。错误码表每行补了具体触发输入。涉及“设计文档与阅读顺序”第 13 条对应的配套文档。
+- 补用例 `A01 mounting a namespace root itself is allowed`，路由用例 23 → 24，`./scripts/check` 全绿（147 个测试）；实现未改动，T09 仍为 IN_REVIEW。
+
+## 本次修改（2026-09-30，T09 B / C 阶段完成，状态 IN_REVIEW）
+
+- T09 路径与挂载路由已实现并自测通过：Core 新增 `MountRouter` / `RouteMatch`（包 `core.router`），提供挂载配置校验、最长完整段匹配、相对 StoragePath 与配置目录查询；新增 24 个单元测试，`./scripts/check` 全绿（147 个测试）。T09 状态改为 IN_REVIEW，等待独立验收。涉及“设计文档与阅读顺序”“开发与验证”。
+- 路由是纯逻辑：不含 Storage / Repository，无匹配返回 `null`，`MOUNT_NOT_FOUND` 与目录合并由 T10 / T15 决定；物理根重叠与符号链接仍属 T12。涉及“模块职责与依赖”“VFS 必须保持的语义”。
+
 ## 本次修改（2026-09-30，T09 任务入口）
 
 - 在“设计文档与阅读顺序”新增 T09 路径与挂载路由开发文档，明确纯逻辑范围，任务尚未开始。
@@ -91,7 +101,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 12. [T08 本地检查与 CI 配置及验收](docs/tasks/m1-t08/T08_本地检查与CI配置及验收.md)：本地检查入口、GitHub Actions、运行说明与 A01～A07 验收标准；**DONE**，提交 `a993576` 独立验收，Linux 扩展与 R1～R3 修复经远端 CI 运行 `36725260393`（`ubuntu-latest`，`success`）实跑通过。
 
-13. [T09 路径与挂载路由开发及验收](docs/tasks/m2-t09/T09_路径与挂载路由开发及验收.md)：逻辑挂载校验、最长段匹配、StoragePath 与配置目录推导及 A01～A07 验收；当前 TODO。
+13. [T09 路径与挂载路由开发及验收](docs/tasks/m2-t09/T09_路径与挂载路由开发及验收.md)：逻辑挂载校验、最长段匹配、StoragePath 与配置目录推导及 A01～A07 验收；当前 **IN_REVIEW**，A 阶段（解码后段禁字面 `%`）已独立验收通过，B / C 阶段实现与自测完成待复核。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
@@ -131,7 +141,7 @@ OpenDAL 以 JVM 依赖嵌入运行，无需独立服务；构建发布时需处�
 | `docs/` | 设计与决策 |
 | `common/` | 与 `vfs/` 平级的公共工具库，供 `vfs`、`memory` 等业务模块共用；当前提供 UUIDv7 生成与校验 |
 | `vfs/api/` | 公共接口和领域类型，如 `Vfs`、`VfsUri`、`VfsPath`、`NodeInfo`、选项、事件与异常 |
-| `vfs/core/` | URI、Node、Metadata、Mount、Event 规则及文件操作编排；定义 Storage / Repository Port |
+| `vfs/core/` | URI、Node、Metadata、Mount、Event 规则及文件操作编排；定义 Storage / Repository Port；含挂载路由（`core.router`）与逻辑配置校验 |
 | `vfs/storage-opendal/` | 实现 Core 的 Storage Port，处理 OpenDAL 调用、后端能力与错误转换 |
 | `vfs/persistence-sqldelight/` | 实现 Core 的 Repository Port，保存 Node、Mount、Metadata、Event Log |
 | `vfs/runtime/` | SDK 入口与依赖组装，提供 `AlcyoneVfs`、配置及完整 VFS 实例 |
@@ -152,6 +162,7 @@ OpenDAL 以 JVM 依赖嵌入运行，无需独立服务；构建发布时需处�
 - `memory` / `resources` 是顶级命名空间示例，不是 API 白名单。VfsUri / VfsPath 仅校验路径语法，保留所有路径段的大小写；命名空间由后续 Runtime 配置提供。
 - 区分 `VfsUri`、`VfsPath` 和 `StoragePath`。例如 `alcyone://resources/medical/ct/a.dcm` 对应逻辑路径 `/resources/medical/ct/a.dcm`；挂载 `/resources/medical/` 后，Storage Path 为 `ct/a.dcm`。
 - URI 表示位置，Node ID 表示身份。移动、重命名和跨 Mount 移动均保持同一个 Node ID。
+- 挂载路由按已解码的完整路径段做最长前缀匹配（T09）：逻辑路径无法经路由逃出挂载相对路径，但这不代表已抵御真实文件系统的符号链接或外部并发替换。
 - Metadata 等逻辑信息绑定 Node ID；Node Registry 优先按全局 `VfsPath` 定位 Node，调用方无需预先知道 Mount。
 - 已确认保留 `VfsEntry` 和 `NodeInfo`：`list` 返回 Node ID 可空的 `VfsEntry`，不批量注册；`NodeInfo` 必须有稳定 Node ID。
 - 文件和目录都可成为 Node。目录内容由 Storage `list` 推导，不在数据库维护完整目录树，不强制注册所有目录。

@@ -6,7 +6,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
-/** T02 第 2.2 节规则 5、6 与第 2.3 节末段：VfsPath 入口执行同样的段边界检查，但不解码字面百分号。 */
+/** T02 第 2.2 节规则 3、5、6 与第 2.3 节末段：VfsPath 入口执行同样的段边界检查，不解码，但段内不允许字面 `%`。 */
 class VfsPathTest {
     @Test
     fun `root and single segment paths are represented`() {
@@ -27,9 +27,17 @@ class VfsPathTest {
 
     @Test
     fun `segments are taken literally without percent decoding`() {
-        val path = VfsPath.parse("/resources/a%20b/%252e%252e")
-        assertEquals(listOf("resources", "a%20b", "%252e%252e"), path.segments)
-        assertEquals("/resources/a%20b/%252e%252e", path.toString())
+        val path = VfsPath.parse("/resources/报告 md/a+b.txt")
+        assertEquals(listOf("resources", "报告 md", "a+b.txt"), path.segments)
+        assertEquals("/resources/报告 md/a+b.txt", path.toString())
+    }
+
+    @Test
+    fun `literal percent signs in segments are rejected`() {
+        assertInvalidPath("/resources/a%25b")
+        assertInvalidPath("/resources/%2e%2e")
+        assertFailsWith<VfsException> { VfsPath.of(listOf("resources", "a%b")) }
+        assertInvalidPath("/resources/a%2Fb") // 规则与 URI 入口一致
     }
 
     @Test

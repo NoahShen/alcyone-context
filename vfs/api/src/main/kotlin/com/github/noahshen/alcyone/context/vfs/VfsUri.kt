@@ -11,6 +11,7 @@ import java.nio.charset.CodingErrorAction
  *
  * 规范化、百分号编码、大小写、尾斜线与路径穿越规则见 T02 第 2 节：解析时每段严格解码一次，
  * 序列化时逐段编码并保留 unreserved 字符。`VfsUri` → [VfsPath] → `VfsUri` 结果稳定。
+ * 解码后的段不允许再出现字面 `%`，双重编码（如 `%252e`）在解析层拒绝（T02 §2.2 第 3 条）。
  * 第一段是普通路径段而非 authority，原样保留；其名称不构成白名单，
  * 解析成功不表示路径存在、可访问或已挂载。
  */
@@ -78,16 +79,20 @@ internal fun percentDecodeOnce(segment: String): String {
         out.write((high shl 4) or low)
         index += 3
     }
-    return try {
-        Charsets.UTF_8
-            .newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-            .decode(ByteBuffer.wrap(out.toByteArray()))
-            .toString()
-    } catch (e: CharacterCodingException) {
-        throw invalidUri("percent escapes are not valid UTF-8")
-    }
+    val decoded =
+        try {
+            Charsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(out.toByteArray()))
+                .toString()
+        } catch (e: CharacterCodingException) {
+            throw invalidUri("percent escapes are not valid UTF-8")
+        }
+    // 原始 '%' 必然来自 %25；解码后仍带 '%' 说明是双重编码，下游后端再次解码会得到另一层含义。
+    if ('%' in decoded) throw invalidUri("double encoding is rejected: decoded segment contains a literal '%'")
+    return decoded
 }
 
 /** 逐段编码：保留 unreserved 字符，其余按 UTF-8 百分号编码，十六进制大写。 */
