@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## 本次修改（2026-10-01，T10 独立复核通过，状态 DONE）
+
+- T10 架构与技术复核通过：代码与测试无必须修改项，`2de60b7` 注释直白化经验证零行为变化，R1 / R2 文档修正已落实，状态改为 **DONE**；详见 [T10 架构与技术复核](docs/tasks/m2-t10/T10_架构与技术复核.md)。
+- R3 传承：T15 / T20 编排层需先 stat 再构造 `OperationIntent`（`entryType` 是调用方声明，预检不校验类型事实）。涉及后续任务说明。
+
 ## 本次修改（2026-10-01，T10 实现完成，状态 IN_REVIEW）
 
 - T10 变更操作预检已交付：Core 新增包 `core.operation`（`OperationIntent` / `CapabilitySnapshot` / `PreconditionResult` / `ExecutionStrategy` / `OperationGuard`），按参数冲突 → 结构保护 → 路由判定 → 只读 → 能力组合的固定顺序在存储副作用前拒绝，并输出执行策略。结构保护归并为一次 `MountRouter.isConfiguredDirectory` 查询，未修改 T09 路由。涉及“模块职责与依赖”“VFS 必须保持的语义”“开发与验证”。
@@ -118,7 +123,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 13. [T09 路径与挂载路由开发及验收](docs/tasks/m2-t09/T09_路径与挂载路由开发及验收.md)：逻辑挂载校验、最长段匹配、StoragePath 与配置目录推导及 A01～A07 验收；**DONE**，交付 Commit `9e28b62` 独立复核通过，147 个测试全绿；详见同目录 [架构与技术复核](docs/tasks/m2-t09/T09_架构与技术复核.md) 与 [交付文档](docs/tasks/m2-t09/T09_交付文档.md)。
 
-14. [T10 存储约束与操作能力检查开发及验收](docs/tasks/m2-t10/T10_存储约束与操作能力检查开发及验收.md)：变更操作预检、结构保护、只读与能力检查、执行策略输出及 A01～A07 验收；**IN_REVIEW**，Core 新增包 `core.operation`（`OperationGuard` 等），新增 33 个测试，`./scripts/check` 全绿（180 个测试）；`StorageCapabilities` 增补 `readOnly`，能力快照缺 `storageKey` 判 `INVALID_ARGUMENT`，跨挂载一律复制语义；详见同目录 [使用说明](docs/tasks/m2-t10/T10_使用说明.md) 与 [验收记录](docs/tasks/m2-t10/T10_验收记录.md)。
+14. [T10 存储约束与操作能力检查开发及验收](docs/tasks/m2-t10/T10_存储约束与操作能力检查开发及验收.md)：变更操作预检、结构保护、只读与能力检查、执行策略输出及 A01～A07 验收；**DONE**，交付 Commit `79d2f04` / `8d39fc4` / `2de60b7`，独立复核通过，180 个测试全绿；Core 新增包 `core.operation`（`OperationGuard` 等）；详见同目录 [架构与技术复核](docs/tasks/m2-t10/T10_架构与技术复核.md) 与 [交付文档](docs/tasks/m2-t10/T10_交付文档.md)。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
