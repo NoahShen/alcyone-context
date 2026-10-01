@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## 本次修改（2026-10-01，T10 实现完成，状态 IN_REVIEW）
+
+- T10 变更操作预检已交付：Core 新增包 `core.operation`（`OperationIntent` / `CapabilitySnapshot` / `PreconditionResult` / `ExecutionStrategy` / `OperationGuard`），按参数冲突 → 结构保护 → 路由判定 → 只读 → 能力组合的固定顺序在存储副作用前拒绝，并输出执行策略。结构保护归并为一次 `MountRouter.isConfiguredDirectory` 查询，未修改 T09 路由。涉及“模块职责与依赖”“VFS 必须保持的语义”“开发与验证”。
+- 既有类型只做一处兼容性补充：`StorageCapabilities` 增补 `readOnly: Boolean = false`（T07 的 StorageFakeImpl 与既有测试无回归）。本阶段确定的决策：能力快照缺 `storageKey` → `INVALID_ARGUMENT`；跨挂载点一律复制语义，不因 `storageKey` 相同改用原生 move（留 T12 / T18 重估）。涉及“VFS 必须保持的语义”。
+- 新增 33 个单元测试（A01～A06 全覆盖，含检查顺序确定性），`./scripts/check` 全绿，测试总数 147 → **180**。同目录补 [使用说明](docs/tasks/m2-t10/T10_使用说明.md) 与 [验收记录](docs/tasks/m2-t10/T10_验收记录.md)；状态 IN_REVIEW，待独立复核。涉及“设计文档与阅读顺序”“开发与验证”。
+
 ## 本次修改（2026-10-01，T10 任务入口）
 
 - 在“设计文档与阅读顺序”新增 T10 存储约束与操作能力检查的开发与验收文档：定位为纯逻辑的变更操作预检（结构保护、参数 / 路由判定、只读与能力检查、执行策略输出），含 `StorageCapabilities` 增补 `readOnly` 的兼容性说明；任务尚未开始。
@@ -112,7 +118,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 13. [T09 路径与挂载路由开发及验收](docs/tasks/m2-t09/T09_路径与挂载路由开发及验收.md)：逻辑挂载校验、最长段匹配、StoragePath 与配置目录推导及 A01～A07 验收；**DONE**，交付 Commit `9e28b62` 独立复核通过，147 个测试全绿；详见同目录 [架构与技术复核](docs/tasks/m2-t09/T09_架构与技术复核.md) 与 [交付文档](docs/tasks/m2-t09/T09_交付文档.md)。
 
-14. [T10 存储约束与操作能力检查开发及验收](docs/tasks/m2-t10/T10_存储约束与操作能力检查开发及验收.md)：变更操作预检、结构保护、只读与能力检查及 A01～A07 验收；当前 TODO。
+14. [T10 存储约束与操作能力检查开发及验收](docs/tasks/m2-t10/T10_存储约束与操作能力检查开发及验收.md)：变更操作预检、结构保护、只读与能力检查、执行策略输出及 A01～A07 验收；**IN_REVIEW**，Core 新增包 `core.operation`（`OperationGuard` 等），新增 33 个测试，`./scripts/check` 全绿（180 个测试）；`StorageCapabilities` 增补 `readOnly`，能力快照缺 `storageKey` 判 `INVALID_ARGUMENT`，跨挂载一律复制语义；详见同目录 [使用说明](docs/tasks/m2-t10/T10_使用说明.md) 与 [验收记录](docs/tasks/m2-t10/T10_验收记录.md)。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
