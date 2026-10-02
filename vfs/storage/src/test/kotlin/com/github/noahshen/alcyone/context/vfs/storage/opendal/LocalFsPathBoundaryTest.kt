@@ -194,17 +194,99 @@ class LocalFsPathBoundaryTest {
         }
     }
 
+    /**
+     * 悬空符号链接不会被后端 `list` 返回（`fs` 对每个条目 `stat`，失败就静默跳过），
+     * 所以 Adapter 必须用 JDK 目录项补上这个盲区，否则「只看得见的才算数」的保证就是空的。
+     */
     @Test
-    fun `a dangling symlink entry is silently dropped by the backend listing`() {
+    fun `a dangling symlink entry is refused instead of silently disappearing`() {
         runBlocking {
             setUpRoots()
             Files.createDirectory(root.resolve("dir"))
             Files.createSymbolicLink(root.resolve("dir/dangling.txt"), root.resolve("never-created.txt"))
             openStorage().use { storage ->
-                // 记录后端事实：fs 列举会 stat 每个条目，悬空符号链接 stat 失败就被**静默跳过**，
-                // 调用方看不到这个条目。对可见的符号链接条目 Adapter 仍然报 STORAGE_ACCESS_DENIED。
-                assertEquals(emptyList<String>(), storage.list(StoragePath.parse("dir")).map { it.name })
+                val failure = assertFailsWith<VfsException> { storage.list(StoragePath.parse("dir")) }
+
+                assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, failure.code)
                 assertTrue(Files.isDirectory(root.resolve("dir")))
+                assertFalse(Files.exists(root.resolve("never-created.txt")), "不得创建链接目标")
+            }
+        }
+    }
+
+    /** 后端隐藏了悬空链接，所以非递归删除必须仍把它算作「非空」。 */
+    @Test
+    fun `a directory holding only a dangling symlink is not empty`() {
+        runBlocking {
+            setUpRoots()
+            Files.createDirectory(root.resolve("dir"))
+            Files.createSymbolicLink(root.resolve("dir/dangling.txt"), root.resolve("never-created.txt"))
+            openStorage().use { storage ->
+                val failure = assertFailsWith<VfsException> { storage.delete(StoragePath.parse("dir"), recursive = false) }
+
+                assertEquals(VfsErrorCode.DIRECTORY_NOT_EMPTY, failure.code)
+                assertTrue(Files.isDirectory(root.resolve("dir")))
+            }
+        }
+    }
+
+    /**
+     * 回归：「普通文件 + 悬空链接」的递归删除。
+     *
+     * 修复前规划阶段看不到悬空链接，普通文件被删完之后才在读属性时报 `STORAGE_ERROR`；现在拒绝发生在破坏性操作之前。
+     */
+    @Test
+    fun `recursive delete refuses a dangling symlink and deletes nothing at all`() {
+        runBlocking {
+            setUpRoots()
+            Files.createDirectory(root.resolve("dir"))
+            Files.writeString(root.resolve("dir/normal.txt"), "normal")
+            Files.createSymbolicLink(root.resolve("dir/dangling.txt"), root.resolve("never-created.txt"))
+            openStorage().use { storage ->
+                val failure = assertFailsWith<VfsException> { storage.delete(StoragePath.parse("dir"), recursive = true) }
+
+                assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, failure.code)
+                assertEquals(VfsEffect.NONE, failure.effect, "规划阶段失败，没有任何副作用")
+                assertTrue(Files.isRegularFile(root.resolve("dir/normal.txt")), "普通文件必须原样保留")
+                assertTrue(Files.isSymbolicLink(root.resolve("dir/dangling.txt")), "链接条目必须原样保留")
+                assertTrue(Files.isDirectory(root.resolve("dir")))
+            }
+        }
+    }
+
+    /** 同上，但普通文件位于子目录里：确认整棵子树的规划都排在删除之前。 */
+    @Test
+    fun `recursive delete refuses a dangling symlink deep in the subtree before deleting anything`() {
+        runBlocking {
+            setUpRoots()
+            Files.createDirectories(root.resolve("dir/sub"))
+            Files.writeString(root.resolve("dir/normal.txt"), "normal")
+            Files.writeString(root.resolve("dir/sub/inner.txt"), "inner")
+            Files.createSymbolicLink(root.resolve("dir/sub/dangling.txt"), root.resolve("never-created.txt"))
+            openStorage().use { storage ->
+                val failure = assertFailsWith<VfsException> { storage.delete(StoragePath.parse("dir"), recursive = true) }
+
+                assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, failure.code)
+                assertEquals(VfsEffect.NONE, failure.effect)
+                assertTrue(Files.isRegularFile(root.resolve("dir/normal.txt")))
+                assertTrue(Files.isRegularFile(root.resolve("dir/sub/inner.txt")))
+                assertTrue(Files.isDirectory(root.resolve("dir/sub")))
+            }
+        }
+    }
+
+    /** 悬空链接让 `list` 拒绝时，不得有任何条目被改动。 */
+    @Test
+    fun `list of a directory with a dangling symlink returns nothing at all`() {
+        runBlocking {
+            setUpRoots()
+            Files.createDirectory(root.resolve("dir"))
+            Files.writeString(root.resolve("dir/visible.txt"), "visible")
+            Files.createSymbolicLink(root.resolve("dir/dangling.txt"), root.resolve("never-created.txt"))
+            openStorage().use { storage ->
+                assertFailsWith<VfsException> { storage.list(StoragePath.parse("dir")) }
+
+                assertEquals("visible", Files.readString(root.resolve("dir/visible.txt")), "拒绝不得改动任何条目")
             }
         }
     }

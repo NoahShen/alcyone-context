@@ -89,13 +89,11 @@ class LocalFsStorageLifecycleTest {
                     },
                     assertFailsWith<VfsException> { storage.move(StoragePath.parse("dir/a.txt"), StoragePath.parse("dir/c.txt")) },
                     assertFailsWith<VfsException> { storage.delete(StoragePath.parse("dir"), recursive = true) },
+                    // 挂载根本身也不能绕过生命周期检查：不是「没有可新建的目录」就可以在已关闭实例上成功返回。
+                    assertFailsWith<VfsException> { storage.createDirectory(StoragePath.root) },
                 )
 
             failures.forEach { assertEquals(VfsErrorCode.CLOSED, it.code) }
-            assertEquals(
-                VfsErrorCode.CLOSED,
-                assertFailsWith<VfsException> { storage.createDirectory(StoragePath.parse("dir3")) }.code,
-            )
             assertFalse(Files.exists(tempDir.resolve("dir2")), "关闭后的调用不能产生任何副作用")
         }
 

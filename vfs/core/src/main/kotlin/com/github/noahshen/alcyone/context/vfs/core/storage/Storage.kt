@@ -125,6 +125,10 @@ interface Storage {
 
     /**
      * 原生移动。目标已存在抛 ALREADY_EXISTS；源不存在抛 NOT_FOUND；后端不支持抛 UNSUPPORTED_OPERATION。
+     *
+     * **前置条件：目标的父目录必须已存在。** Storage 是低层原语，不为 [target] 补父目录，
+     * 缺失时抛 NOT_FOUND。VFS 对调用方的自动补父目录要求（T02 §6.2）由 Core 编排层
+     * （T15 / T20～T22）在调用本方法之前完成。
      */
     suspend fun move(
         source: StoragePath,

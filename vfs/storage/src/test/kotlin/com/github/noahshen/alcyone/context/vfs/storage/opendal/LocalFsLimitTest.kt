@@ -11,8 +11,6 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
-import java.io.ByteArrayInputStream
-import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertFailsWith
@@ -20,7 +18,7 @@ import kotlin.test.assertFailsWith
 /**
  * A05：限额按**实际读取**生效，流生命周期明确（T12 §2.4）。
  *
- * 后端不支持 range read，所以有界读取只能靠包装流计数；`BoundedInputStreamTest` 直接对这个机制做白盒验证。
+ * 后端不支持 range read，所以有界读取只能靠包装流计数；`StorageInputStreamTest` 直接对这个机制做白盒验证。
  */
 class LocalFsLimitTest {
     @TempDir
@@ -224,65 +222,5 @@ class LocalFsLimitTest {
         val failure = assertFailsWith<VfsException> { LocalFsOptions(defaultWriteLimitBytes = -1) }
 
         assertEquals(VfsErrorCode.INVALID_ARGUMENT, failure.code)
-    }
-}
-
-/**
- * 白盒验证限额机制本身：这里既没有文件也没有 `stat`，所以超限判断不可能来自元数据。
- */
-class BoundedInputStreamTest {
-    @Test
-    fun `the limit is charged on actual reads, not on any known length`() {
-        val source = ByteArrayInputStream(ByteArray(50) { it.toByte() })
-
-        val failure =
-            assertFailsWith<VfsException> {
-                BoundedInputStream(source, limitBytes = 8).readAllBytes()
-            }
-
-        assertEquals(VfsErrorCode.LIMIT_EXCEEDED, failure.code)
-    }
-
-    @Test
-    fun `a source that lies about its size still cannot exceed the limit`() {
-        // available() 报告 1 MiB，实际只有 10 字节：只信 available 就会把限额放过去。
-        val source =
-            object : InputStream() {
-                private val delegate = ByteArrayInputStream(ByteArray(10) { it.toByte() })
-
-                override fun read(): Int = delegate.read()
-
-                override fun read(
-                    buffer: ByteArray,
-                    offset: Int,
-                    length: Int,
-                ): Int = delegate.read(buffer, offset, length)
-
-                override fun available(): Int = 1024 * 1024
-            }
-
-        val bounded = BoundedInputStream(source, limitBytes = 4)
-
-        assertEquals(4, bounded.available())
-        assertFailsWith<VfsException> { bounded.readAllBytes() }
-    }
-
-    @Test
-    fun `counted bytes include skipped ones`() {
-        val bounded = BoundedInputStream(ByteArrayInputStream(ByteArray(20) { 1 }), limitBytes = 5)
-
-        bounded.skip(4)
-
-        assertEquals(4L, bounded.consumedBytes())
-        assertEquals(1, bounded.read())
-        assertFailsWith<VfsException> { bounded.read() }
-    }
-
-    @Test
-    fun `mark and reset are refused because they would break accounting`() {
-        val bounded = BoundedInputStream(ByteArrayInputStream(ByteArray(10)), limitBytes = 10)
-
-        assertFalse(bounded.markSupported())
-        assertFailsWith<java.io.IOException> { bounded.reset() }
     }
 }

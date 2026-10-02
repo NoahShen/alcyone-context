@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## 本次修改（2026-10-02，T12 第一轮独立复核）
+
+- T12 `a8a08a6` 已交付但独立复核未通过，状态 **IN_REVIEW，待修复 R1～R6**；303 个正式测试全绿，额外探针发现流所有权 / 关闭、取消资源泄漏、流契约与悬空链接问题，effect 与文档边界也需修正。涉及阅读顺序第 16 条，见 [T12 复核记录](docs/tasks/m2-t12/T12_架构与技术复核.md)。
+- 不开始 T13，不将 native 生命周期缺陷归为外部竞争或延后恢复；当前对话只审查与维护文档，不修改实现。
+
 ## 本次修改（2026-10-02，T12 任务入口）
 
 - 用户已要求开始 T12，新增 [Local FS 存储适配开发及验收](docs/tasks/m2-t12/T12_LocalFS存储适配开发及验收.md)，含物理根 / 符号链接、三种写入模式、有界读取与流生命周期、能力 / 错误及 A01～A08。涉及阅读顺序第 16 条；任务 TODO，待开发 Agent 实现。
@@ -179,7 +184,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 15. [T11 SQLDelight Schema、Repository、事务与数据库生命周期开发及验收](docs/tasks/m2-t11/T11_SQLDelight存储事务与生命周期开发及验收.md)：状态库四表 Schema 与唯一约束、Repository 与事务实现、生命周期与迁移及 A01～A07 验收；当前 **DONE**（修复 `6fe4878` / `d5b33f8` 第二轮独立复核通过，R1～R4 关闭），227 个测试全绿，模块为 `vfs/persistence`；详见同目录 [使用说明](docs/tasks/m2-t11/T11_使用说明.md) 与[验收记录](docs/tasks/m2-t11/T11_验收记录.md)。 **补充 F1～F4 已全部复核关闭，F4 修正提交 `2e35b79`；不自动开始 T12。**
 
-16. [T12 Local FS 存储适配开发及验收](docs/tasks/m2-t12/T12_LocalFS存储适配开发及验收.md)：实现 `vfs/storage` 的 OpenDAL Local FS Adapter，含真实文件操作、物理路径检查、流与限额、能力和错误映射；当前 **TODO**，已安排开发，完成后交回独立复核。
+16. [T12 Local FS 存储适配开发及验收](docs/tasks/m2-t12/T12_LocalFS存储适配开发及验收.md)：实现 `vfs/storage` 的 OpenDAL Local FS Adapter，含真实文件操作、物理路径检查、流与限额、能力和错误映射；当前 **IN_REVIEW**，`a8a08a6` 第一轮独立复核待修复 R1～R6，303 个正式测试通过，详见同目录架构与技术复核。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
