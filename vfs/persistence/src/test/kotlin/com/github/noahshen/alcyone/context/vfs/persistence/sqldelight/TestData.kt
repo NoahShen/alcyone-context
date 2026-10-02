@@ -125,6 +125,9 @@ internal fun VfsStateDatabase.insertMount(
  *
  * 为什么拦在这一层：`JdbcDriver.execute` 的默认实现是 final 的，它直接调 `Connection.prepareStatement`，
  * 没有可覆盖的钩子。取消与失败路径靠自然调度抢不出来，只能在这个点上确定性地放行或抛错。
+ *
+ * **控制点是「语句已准备好」这一刻**：JDBC 已经返回 [java.sql.PreparedStatement]，但 `execute()` 还没发生，
+ * 真正的执行在钩子放行之后由 `JdbcDriver.execute` 发出。别把这个时刻当成「语句已执行」。
  */
 internal fun hookedConnection(
     delegate: Connection,
@@ -139,7 +142,11 @@ internal fun hookedConnection(
         }
     } as Connection
 
-/** 真实 SQLite + 带钩子的连接，供需要控制语句时机的用例使用；已建好当前版本 Schema。 */
+/**
+ * 真实 SQLite + 带钩子的连接，供需要控制语句时机的用例使用；已建好当前版本 Schema。
+ *
+ * [aroundPrepare] 只作用在 `prepareStatement` 上，控制点是语句准备完成、尚未 `execute()` 的那一刻。
+ */
 internal fun hookedState(aroundPrepare: (sql: String, prepare: () -> Any?) -> Any?): VfsStateDatabase {
     val driver =
         SingleConnectionJdbcDriver(

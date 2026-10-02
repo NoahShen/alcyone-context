@@ -20,7 +20,8 @@ import java.sql.Connection
 internal class SingleConnectionJdbcDriver(
     private val connection: Connection,
 ) : JdbcDriver() {
-    // 状态库没有查询监听者；Query 缓存失效靠生成代码自己的通知，不需要驱动转发。
+    // 实现 SQLDelight 查询变化通知接口；当前 Repository 未注册查询监听者。
+    // 裸 SQL 事务下该通知不代表事务已提交，不能用来分发 VFS 业务事件。
     private val listeners = mutableMapOf<String, MutableSet<Query.Listener>>()
 
     override fun addListener(
