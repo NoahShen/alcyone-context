@@ -19,6 +19,15 @@ import kotlin.test.assertSame
  * 这里**没有文件也没有 native**：所有断言只依赖 [StorageInputStream] 自身，因此不会靠「赌 native 崩溃」制造失败。
  */
 class StorageInputStreamTest {
+    /** 白盒用例不需要真的 Adapter 生命周期：给一个永不释放的 [NativeLifetime]。 */
+    private val testLifetime = NativeLifetime { }
+
+    /** 把替身流包成被测对象，避开与 reader 所有权无关的样板。 */
+    private fun wrapStream(
+        native: java.io.InputStream,
+        limitBytes: Long?,
+    ): StorageInputStream = StorageInputStream(ReaderHandle(native), limitBytes, testLifetime)
+
     /** 计数替身流：记录每次 delegate 调用，用来证明包装流「没再碰过 delegate」。 */
     private open class CountingInputStream(
         private var remaining: Int = Int.MAX_VALUE,
@@ -86,14 +95,14 @@ class StorageInputStreamTest {
     fun `the limit is charged on actual reads, not on any known length`() {
         val source = ByteArrayInputStream(ByteArray(50) { it.toByte() })
 
-        val failure = assertFailsWith<VfsException> { StorageInputStream(source, limitBytes = 8).readAllBytes() }
+        val failure = assertFailsWith<VfsException> { wrapStream(source, limitBytes = 8).readAllBytes() }
 
         assertEquals(VfsErrorCode.LIMIT_EXCEEDED, failure.code)
     }
 
     @Test
     fun `a source that lies about its size still cannot exceed the limit`() {
-        val bounded = StorageInputStream(LyingAboutSizeStream(), limitBytes = 4)
+        val bounded = wrapStream(LyingAboutSizeStream(), limitBytes = 4)
 
         assertEquals(4, bounded.available())
         assertFailsWith<VfsException> { bounded.readAllBytes() }
@@ -101,7 +110,7 @@ class StorageInputStreamTest {
 
     @Test
     fun `counted bytes include skipped ones`() {
-        val bounded = StorageInputStream(ByteArrayInputStream(ByteArray(20) { 1 }), limitBytes = 5)
+        val bounded = wrapStream(ByteArrayInputStream(ByteArray(20) { 1 }), limitBytes = 5)
 
         bounded.skip(4)
 
@@ -112,7 +121,7 @@ class StorageInputStreamTest {
 
     @Test
     fun `mark and reset are refused because they would break accounting`() {
-        val bounded = StorageInputStream(ByteArrayInputStream(ByteArray(10)), limitBytes = 10)
+        val bounded = wrapStream(ByteArrayInputStream(ByteArray(10)), limitBytes = 10)
 
         assertFalse(bounded.markSupported())
         assertFailsWith<IOException> { bounded.reset() }
@@ -121,7 +130,7 @@ class StorageInputStreamTest {
     /** 超限是**粘性**的：之后每一次 read / skip / available 都报同一个错，不回退到可读。 */
     @Test
     fun `after a limit failure every read skip and available reports LIMIT_EXCEEDED`() {
-        val bounded = StorageInputStream(CountingInputStream(remaining = 10), limitBytes = 4)
+        val bounded = wrapStream(CountingInputStream(remaining = 10), limitBytes = 4)
 
         repeat(4) { assertEquals(97, bounded.read(), "额度内的字节正常返回") }
         assertFailsWith<VfsException> { bounded.read() } // 第 5 个字节：超限，进入 LIMIT_FAILED // 第 5 个字节超限
@@ -140,7 +149,7 @@ class StorageInputStreamTest {
     /** 曾经的缺陷：超限后 `remaining` 变负，`available()` 返回 -1。 */
     @Test
     fun `available is never negative and never exceeds the remaining allowance`() {
-        val bounded = StorageInputStream(CountingInputStream(remaining = 100), limitBytes = 10)
+        val bounded = wrapStream(CountingInputStream(remaining = 100), limitBytes = 10)
 
         assertTrue(bounded.available() in 1..10)
         bounded.readNBytes(4)
@@ -154,7 +163,7 @@ class StorageInputStreamTest {
     /** 曾经的缺陷：额度不足时 `read` 返回 0，调用方（readAllBytes / transferTo）会陷入无进展循环。 */
     @Test
     fun `a positive length read never returns zero`() {
-        val bounded = StorageInputStream(CountingInputStream(remaining = 64), limitBytes = 4)
+        val bounded = wrapStream(CountingInputStream(remaining = 64), limitBytes = 4)
         val buffer = ByteArray(32)
 
         // 每次请求都裁到「剩余额度 + 1」：要么读满该请求，要么真正到流尾（-1），绝不会是 0。
@@ -170,7 +179,7 @@ class StorageInputStreamTest {
     @Test
     fun `a stream closed by the caller never touches the delegate again`() {
         val delegate = CountingInputStream(remaining = 64)
-        val bounded = StorageInputStream(delegate, limitBytes = null)
+        val bounded = wrapStream(delegate, limitBytes = null)
 
         assertEquals(97, bounded.read())
         bounded.close()
@@ -191,7 +200,7 @@ class StorageInputStreamTest {
     @Test
     fun `close is idempotent and closes the delegate exactly once`() {
         val delegate = CountingInputStream(remaining = 4)
-        val bounded = StorageInputStream(delegate, limitBytes = 2)
+        val bounded = wrapStream(delegate, limitBytes = 2)
 
         bounded.read()
         bounded.close()
@@ -204,7 +213,7 @@ class StorageInputStreamTest {
     @Test
     fun `close is the only cleanup path and it works after a limit failure`() {
         val delegate = CountingInputStream(remaining = 32)
-        val bounded = StorageInputStream(delegate, limitBytes = 1)
+        val bounded = wrapStream(delegate, limitBytes = 1)
 
         bounded.read()
         assertFailsWith<VfsException> { bounded.read() } // 第 2 个字节超限，进入 LIMIT_FAILED
@@ -218,7 +227,7 @@ class StorageInputStreamTest {
     @Test
     fun `a null limit reads everything and behaves like a plain stream`() {
         val payload = ByteArray(200) { it.toByte() }
-        val bounded = StorageInputStream(ByteArrayInputStream(payload), limitBytes = null)
+        val bounded = wrapStream(ByteArrayInputStream(payload), limitBytes = null)
 
         assertTrue(bounded.readAllBytes().contentEquals(payload))
         assertEquals(200L, bounded.consumedBytes())
@@ -228,7 +237,7 @@ class StorageInputStreamTest {
     @Test
     fun `a zero length read is allowed and charges nothing`() {
         val delegate = CountingInputStream(remaining = 8)
-        val bounded = StorageInputStream(delegate, limitBytes = 4)
+        val bounded = wrapStream(delegate, limitBytes = 4)
 
         assertEquals(0, bounded.read(ByteArray(4), 0, 0))
         assertEquals(0L, bounded.consumedBytes())
@@ -237,7 +246,7 @@ class StorageInputStreamTest {
     @Test
     fun `an out of range offset or length is rejected before the delegate is touched`() {
         val delegate = CountingInputStream(remaining = 8)
-        val bounded = StorageInputStream(delegate, limitBytes = null)
+        val bounded = wrapStream(delegate, limitBytes = null)
         val buffer = ByteArray(4)
 
         assertFailsWith<IndexOutOfBoundsException> { bounded.read(buffer, 0, -1) }
@@ -254,7 +263,7 @@ class StorageInputStreamTest {
     @Test
     fun `a negative length never reaches the delegate`() {
         val delegate = CountingInputStream(remaining = 8)
-        val bounded = StorageInputStream(delegate, limitBytes = null)
+        val bounded = wrapStream(delegate, limitBytes = null)
 
         assertFailsWith<IndexOutOfBoundsException> { bounded.read(ByteArray(8), 0, -1) }
         assertEquals(0, delegate.readCalls)
@@ -263,7 +272,7 @@ class StorageInputStreamTest {
     @Test
     fun `a negative skip is refused instead of silently succeeding`() {
         val delegate = CountingInputStream(remaining = 8)
-        val bounded = StorageInputStream(delegate, limitBytes = 4)
+        val bounded = wrapStream(delegate, limitBytes = 4)
 
         assertFailsWith<IllegalArgumentException> { bounded.skip(-1) }
         assertEquals(0, delegate.skipCalls, "非法入参不得触碰 delegate")
@@ -272,7 +281,7 @@ class StorageInputStreamTest {
 
     @Test
     fun `skip beyond the allowance charges exactly the allowance plus the detecting byte`() {
-        val bounded = StorageInputStream(CountingInputStream(remaining = 100), limitBytes = 5)
+        val bounded = wrapStream(CountingInputStream(remaining = 100), limitBytes = 5)
 
         // 跳到额度边界后仍多读 1 字节用于判定超限；这一次调用当场抛错，不返回「跳过了多少」。
         assertEquals(VfsErrorCode.LIMIT_EXCEEDED, assertFailsWith<VfsException> { bounded.skip(50) }.code)
@@ -291,7 +300,7 @@ class StorageInputStreamTest {
                 override fun read(): Int = throw cause
             }
 
-        val failure = assertFailsWith<VfsException> { StorageInputStream(delegate, limitBytes = null).read() }
+        val failure = assertFailsWith<VfsException> { wrapStream(delegate, limitBytes = null).read() }
 
         assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
         assertSame(cause, failure.cause)
@@ -306,7 +315,7 @@ class StorageInputStreamTest {
                 override fun read(): Int = throw original
             }
 
-        val failure = assertFailsWith<VfsException> { StorageInputStream(delegate, limitBytes = null).read() }
+        val failure = assertFailsWith<VfsException> { wrapStream(delegate, limitBytes = null).read() }
 
         assertSame(original, failure)
     }
@@ -319,7 +328,7 @@ class StorageInputStreamTest {
                 override fun read(): Int = throw cancellation
             }
 
-        val failure = assertFailsWith<java.util.concurrent.CancellationException> { StorageInputStream(delegate, limitBytes = null).read() }
+        val failure = assertFailsWith<java.util.concurrent.CancellationException> { wrapStream(delegate, limitBytes = null).read() }
 
         assertSame(cancellation, failure)
     }
@@ -330,7 +339,7 @@ class StorageInputStreamTest {
             object : CountingInputStream(remaining = 1) {
                 override fun close(): Unit = throw IOException("close failed")
             }
-        val bounded = StorageInputStream(delegate, limitBytes = null)
+        val bounded = wrapStream(delegate, limitBytes = null)
 
         val failure = assertFailsWith<VfsException> { bounded.close() }
         assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)

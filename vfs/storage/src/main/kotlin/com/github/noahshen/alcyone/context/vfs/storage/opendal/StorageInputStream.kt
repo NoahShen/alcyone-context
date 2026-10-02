@@ -14,29 +14,33 @@ import java.io.InputStream
  *
  * | 状态 | read / skip / available | close |
  * | --- | --- | --- |
- * | `ACTIVE` | 正常；越界的那一次读取当场抛 `LIMIT_EXCEEDED` | 关闭 delegate，转 `CLOSED` |
- * | `LIMIT_FAILED` | 一律抛 `LIMIT_EXCEEDED` | 幂等清理 delegate，转 `CLOSED` |
+ * | `ACTIVE` | 正常；越界的那一次读取当场抛 `LIMIT_EXCEEDED` | 释放 reader，转 `CLOSED` |
+ * | `LIMIT_FAILED` | 一律抛 `LIMIT_EXCEEDED` | 幂等清理 reader，转 `CLOSED` |
  * | `CLOSED` | 一律抛 `CLOSED` | 幂等空操作 |
  *
  * 四条不变量：
  *
- * 1. **自己关闭后不再触碰 delegate**。检查自身状态发生在任何一次 delegate 调用之前；
+ * 1. **自己关闭后不再触碰 reader**。检查自身状态发生在任何一次 native 调用之前；
  *    之前分开实现时漏了这条，`StorageStream.close()` 之后已打开的流仍能读出字节。
  * 2. **`available()` 在任何状态下都不为负**。`LIMIT_FAILED` 抛异常而不是返回负数；
- *    `delegate.available()` 为负时归零，调用方不会陷入无进展循环。
+ *    `available()` 为负时归零，调用方不会陷入无进展循环。
  * 3. **正长度读永不返回 0**。额度不足时至少放行 1 字节用于判定超限，读到 0 一定是真的到流尾
  *    （委托给 `InputStream.readAllBytes` / `transferTo`，它们在返回 0 时会继续读，直接返回 0 会死循环）。
  * 4. **计费包含 skip**。跳过的字节同样消耗额度，否则可以跳过整个文件再读 1 字节绕过限额。
  *
- * [scope] 在**每一次** delegate 调用前执行：`LocalFsStorage` 传 `lifetime`，此时已持有读锁，
- * 每次读取都与 [NativeLifetime.close] 的写锁互斥，Adapter 不会在流还在被读时释放 native 句柄。
+ * **关闭语义**：底层 reader 由 [ReaderHandle] 持有，本类只是它的一层包装。
+ * [close] 转调 [ReaderHandle.release]，而同一个句柄也被 [StorageStream.close] 与 Adapter 的排空使用，
+ * 三者共用一把闸门，所以「谁先关都行，且恰好释放一次」；正在进行的读取不会被并发释放打断。
  *
- * 例：`StorageInputStream(source, limitBytes = 8, scope = lifetime)`，读到第 9 个字节抛 `LIMIT_EXCEEDED`。
+ * [lifetime] 在**每一次** delegate 调用前执行：先取 Adapter 读锁，再取 [ReaderHandle] 闸门，
+ * 与 Adapter 排空时的「写锁 → 闸门」同序。Adapter 因此不会在流还被读时释放 Operator。
+ *
+ * 例：`StorageInputStream(handle, limitBytes = 8, lifetime = lifetime)`，读到第 9 个字节抛 `LIMIT_EXCEEDED`。
  */
 internal class StorageInputStream(
-    private val delegate: InputStream,
+    private val handle: ReaderHandle,
     private val limitBytes: Long?,
-    private val scope: NativeCallScope = NativeCallScope.Direct,
+    private val lifetime: NativeLifetime,
 ) : InputStream() {
     private var consumed = 0L
     private var state = State.ACTIVE
@@ -56,7 +60,7 @@ internal class StorageInputStream(
 
     override fun read(): Int {
         beforeRead("read")
-        val byte = mapped("read stream") { delegate.read() }
+        val byte = mapped("read stream") { handle.read { handle.native.read() } }
         if (byte >= 0) charge(1)
         return byte
     }
@@ -69,7 +73,7 @@ internal class StorageInputStream(
         // 先校验入参：负 length 传进 native 流的行为未定义，可能直接崩 JVM。
         requireRange(offset, length, buffer)
         beforeRead("read")
-        val read = mapped("read stream") { delegate.read(buffer, offset, requestLimit(length)) }
+        val read = mapped("read stream") { handle.read { handle.native.read(buffer, offset, requestLimit(length)) } }
         if (read > 0) charge(read.toLong())
         return read
     }
@@ -84,14 +88,14 @@ internal class StorageInputStream(
         require(count >= 0) { "skip count must not be negative: $count" }
         beforeRead("skip")
         val request = requestLimit(if (count > Int.MAX_VALUE) Int.MAX_VALUE else count.toInt()).toLong()
-        val skipped = mapped("skip read stream") { delegate.skip(request) }
+        val skipped = mapped("skip read stream") { handle.read { handle.native.skip(request) } }
         if (skipped > 0) charge(skipped)
         return skipped
     }
 
     override fun available(): Int {
         beforeRead("available")
-        val available = mapped("check read stream") { delegate.available() }.coerceAtLeast(0)
+        val available = mapped("check read stream") { handle.read { handle.native.available() } }.coerceAtLeast(0)
         val limit = limitBytes ?: return available
         return if (available > remaining()) remaining().toInt() else available
     }
@@ -100,24 +104,25 @@ internal class StorageInputStream(
     override fun markSupported(): Boolean = false
 
     /**
-     * 幂等。`LIMIT_FAILED` 也必须走到这里：超限后流已经不可用，但仍需释放 delegate 持有的 native 句柄。
+     * 幂等。`LIMIT_FAILED` 也必须走到这里：超限后流已经不可用，但仍需释放它持有的 native reader。
      */
     override fun close() {
         if (state == State.CLOSED) return
         state = State.CLOSED
-        // 先置 CLOSED 再关：即使 delegate.close() 抛错，本流也已经不可用，重试 close 是幂等空操作。
-        mapped("close read stream") { delegate.close() }
+        // 先置 CLOSED 再关：即使释放抛错，本流也已经不可用，重试 close 是幂等空操作。
+        // 不经过 lifetime：Adapter 先关时这里也必须能正常释放或空转，见 ReaderHandle 的 Kdoc。
+        mapStorageErrors("close read stream") { handle.release() }
     }
 
     /**
-     * 每次 delegate 调用都先经 [scope] 再经 [mapStorageErrors]：
+     * 每次 native 调用都先经 [NativeLifetime.call] 再经 [mapStorageErrors]：
      * 前者保证与 Adapter 关闭互斥，后者把后端异常转成 `STORAGE_ERROR` 且保留 `cause`。
      * 公开消息只说「读流的哪一步失败」，不拼接物理路径或后端原始响应。
      */
     private fun <T> mapped(
         operation: String,
         block: () -> T,
-    ): T = mapStorageErrors(operation) { scope.call(block) }
+    ): T = mapStorageErrors(operation) { lifetime.call(block) }
 
     private fun beforeRead(operation: String) {
         when (state) {

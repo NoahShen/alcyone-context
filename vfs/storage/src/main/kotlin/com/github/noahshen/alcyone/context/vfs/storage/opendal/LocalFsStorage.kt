@@ -20,6 +20,7 @@ import org.apache.opendal.WriteOptions
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Core Storage Port 的首个真实实现：OpenDAL Local FS（T12）。
@@ -78,7 +79,21 @@ class LocalFsStorage private constructor(
      * 「Operator 还可用」与「释放 Operator」互斥：所有存储操作取读锁，[close] 取写锁。
      * 已进入的操作做完才释放，释放后不再有操作进入——这是唯一能挡住 SIGSEGV 的办法。
      */
-    private val lifetime = NativeLifetime { operator.close() }
+    private val lifetime =
+        NativeLifetime {
+            // 排空必须发生在**写锁内、Operator 释放之前**：这样 reader 一定在 Operator 还活着时被关闭，
+            // 不会去操作一个已 dispose 的 Operator。写锁同时保证没有读取正在使用这些 reader。
+            drainReaders()
+            operator.close()
+        }
+
+    /**
+     * 尚未释放的 reader 登记表。
+     *
+     * 实测 Operator 释放**不会**连带释放 reader，所以每个建出来的 reader 都必须登记；
+     * 首次释放时由 [ReaderHandle] 的回调摘除。Adapter 关闭时在写锁内排空，调用方之后再关流是幂等空操作。
+     */
+    private val liveReaders = ConcurrentHashMap.newKeySet<ReaderHandle>()
 
     companion object {
         /**
@@ -203,7 +218,7 @@ class LocalFsStorage private constructor(
         return call("read") {
             lifetime.call {
                 // 后端不支持 range read，只能边读边计数；StorageInputStream 保证内存不超过 maxBytes + 1 字节。
-                StorageInputStream(operator.createInputStream(plain(path)), maxBytes, NativeCallScope.Direct).use { bounded ->
+                StorageInputStream(newReader(plain(path)), maxBytes, lifetime).use { bounded ->
                     StorageContent(bounded.readAllBytes(), attributes)
                 }
             }
@@ -233,16 +248,31 @@ class LocalFsStorage private constructor(
         return handoffOrRelease(release = { opened?.close() }) {
             call("open read stream") {
                 lifetime.call {
-                    val native = readerFactory(plain(path))
+                    val handle = newReader(plain(path))
                     try {
-                        LocalFsStream(attributes, native, maxBytes)
+                        LocalFsStream(attributes, handle, maxBytes)
                     } catch (e: Throwable) {
-                        native.close()
+                        handle.release()
                         throw e
                     }.also { opened = it }
                 }
             }
         }
+    }
+
+    /** 建一个 reader 并登记：它随后要么被流释放，要么被 [drainReaders] 排空，不会漏。 */
+    private fun newReader(backendPath: String): ReaderHandle {
+        val handle = ReaderHandle(readerFactory(backendPath)) { liveReaders.remove(it) }
+        liveReaders += handle
+        return handle
+    }
+
+    /** 在写锁内释放所有未释放的 reader（由 [lifetime] 的 release 回调调用）。 */
+    private fun drainReaders() {
+        liveReaders.forEach { handle ->
+            mapStorageErrors("close read stream") { handle.release() }
+        }
+        liveReaders.clear()
     }
 
     /**
@@ -572,19 +602,22 @@ class LocalFsStorage private constructor(
     /**
      * 单次打开的流：重复打开报状态错误，关闭后打开报 CLOSED。
      *
-     * 句柄所有权只有一个：[StorageInputStream] 拿到 [native] 之后就不再交回本类。
-     * 这样两种关闭顺序都不会漏关：
+     * **关闭语义**：reader 由 [ReaderHandle] 持有，本类与 [StorageInputStream] 都不是所有者，
+     * 只是两个都可以触发释放的入口，而 [ReaderHandle] 的闸门保证**恰好释放一次**。
      *
-     * - 流已打开 → `StorageInputStream.close` 关 native；
-     * - 流未打开 → 这里的 [close] 在读锁内关 native（若 Adapter 已先关闭，读锁会抛 `CLOSED`，
-     *   此时 Operator 关闭已连带释放该句柄，**不是**泄漏）。
+     * 三种关闭顺序的确定结果：
+     *
+     * 1. 先关流、再关 Adapter：`openStream()` 的返回值或本类的 `close()` 释放 reader；
+     *    Adapter 关闭时登记表已空，排空是空操作。
+     * 2. Adapter 先关：写锁内先排空释放全部 reader，再释放 Operator——reader 一定在 Operator 还活着时关闭。
+     *    之后调用方再 `close()` 是**幂等空操作，不报错也不泄漏**。
+     * 3. 流没打开就关 Adapter：reader 同样由排空释放；本类的 `close()` 之后是空操作。
      */
     private inner class LocalFsStream(
         override val attributes: StorageAttributes,
-        native: InputStream,
+        private val handle: ReaderHandle,
         private val limitBytes: Long?,
     ) : StorageStream {
-        private var native: InputStream? = native
         private var opened = false
         private var finished = false
 
@@ -593,17 +626,14 @@ class LocalFsStorage private constructor(
                 if (finished) throw VfsException(VfsErrorCode.CLOSED, "storage stream is closed")
                 if (opened) throw VfsException(VfsErrorCode.STATE_ERROR, "storage stream is single-shot; call readStream again to reopen")
                 opened = true
-                val stream = native ?: throw VfsException(VfsErrorCode.STATE_ERROR, "storage stream is already consumed")
-                native = null
-                StorageInputStream(stream, limitBytes, lifetime)
+                StorageInputStream(handle, limitBytes, lifetime)
             }
 
         override fun close() {
             if (finished) return
             finished = true
-            val stream = native ?: return // 已交给 [StorageInputStream]，由它负责关闭
-            native = null
-            mapStorageErrors("close read stream") { lifetime.call { stream.close() } }
+            // 不经过 lifetime：Adapter 已关闭时这仍必须能释放或空转，否则 reader 就漏了。
+            mapStorageErrors("close read stream") { handle.release() }
         }
     }
 }

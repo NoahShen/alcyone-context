@@ -4,6 +4,10 @@ import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -11,6 +15,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayInputStream
+import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
@@ -27,6 +32,60 @@ import kotlin.test.assertFailsWith
 class LocalFsStorageLifetimeTest {
     @TempDir
     lateinit var tempDir: Path
+
+    /** 记录关闭次数的替身 reader：释放证据直接看它，不碰 native。 */
+    private class RecordingReader(
+        payload: ByteArray,
+    ) : InputStream() {
+        private val source = ByteArrayInputStream(payload)
+
+        var closeCalls = 0
+            private set
+
+        override fun read(): Int = source.read()
+
+        override fun read(
+            buffer: ByteArray,
+            offset: Int,
+            length: Int,
+        ): Int = source.read(buffer, offset, length)
+
+        override fun close() {
+            closeCalls++
+        }
+    }
+
+    /**
+     * 可控时序的替身：native 读会阻塞在 [allowReadExit] 上。
+     *
+     * [closedWhileReading] 由替身自己记录，所以「关是否插进读中间」不依赖主线程何时去看。
+     */
+    private class BlockingReader : InputStream() {
+        val readEntered = CountDownLatch(1)
+        val allowReadExit = CountDownLatch(1)
+        val closeAttempted = CountDownLatch(1)
+
+        @Volatile
+        var closedWhileReading = false
+        var closeCalls = 0
+            private set
+
+        @Volatile
+        private var reading = false
+
+        override fun read(): Int {
+            reading = true
+            readEntered.countDown()
+            allowReadExit.await(5, TimeUnit.SECONDS)
+            reading = false
+            return 'a'.code
+        }
+
+        override fun close() {
+            if (reading) closedWhileReading = true
+            closeCalls++
+        }
+    }
 
     @Test
     fun `close waits for an in-flight native operation instead of releasing under it`() {
@@ -103,12 +162,11 @@ class LocalFsStorageLifetimeTest {
             storage.close()
             // 流的后续读取必须变成 VfsException，而不是碰到已释放的 native 句柄。
             assertEquals(VfsErrorCode.CLOSED, assertFailsWith<VfsException> { opened.read() }.code)
-            // 先关流：此时 Operator 已释放，包装流直接把关闭报告为 CLOSED，仍然幂等、不碰 native。
-            assertEquals(VfsErrorCode.CLOSED, assertFailsWith<VfsException> { opened.close() }.code)
+            // Adapter 关闭时已在写锁内排空 reader，所以这里再关是**幂等空操作，不报错也不泄漏**。
             opened.close()
-            opened.close() // 幂等
+            opened.close()
             stream.close()
-            stream.close() // 幂等
+            stream.close()
 
             // 顺序三：流根本没打开就关 Adapter。
             LocalFsStorage.create(root).use { fresh ->
@@ -217,7 +275,7 @@ class LocalFsStorageLifetimeTest {
 
                 override fun close() = Unit
             }
-        val bounded = StorageInputStream(delegate, limitBytes = null)
+        val bounded = StorageInputStream(ReaderHandle(delegate), limitBytes = null, lifetime = NativeLifetime { })
 
         assertEquals('a'.code, bounded.read())
         bounded.close()
@@ -226,4 +284,160 @@ class LocalFsStorageLifetimeTest {
 
         assertEquals(readsAtClose, reads, "关闭后不得再读底层流")
     }
+
+    /**
+     * R1 核心证据（本轮修复的原缺陷）：reader 必须**真正释放且恰好一次**。
+     *
+     * 修复前 `StorageStream.close()` 把 `native` 置空后就不再持有它，于是关谁都不释放——
+     * 实测 `readerCloseCalls = 0`，而且 `StorageStream.close()` 连错误都不报。
+     * 断言用的是替身的关闭次数，不是「之后还能打开」那种对泄漏恒真的弱断言。
+     */
+    @Test
+    fun `closing the StorageStream closes the stream it handed out`() =
+        runBlocking {
+            val root = Files.createDirectory(tempDir.resolve("root"))
+            Files.writeString(root.resolve("a.txt"), "0123456789")
+            val reader = RecordingReader("0123456789".toByteArray())
+            val storage = LocalFsStorage.open(root, LocalFsOptions(), readerFactory = { _ -> { reader } })
+
+            val stream = storage.readStream(StoragePath.parse("a.txt"))
+            val opened = stream.openStream()
+            assertEquals(0, reader.closeCalls, "打开不等于关闭")
+
+            // 只关 StorageStream（openStream 已调用），不关 returned InputStream。
+            stream.close()
+
+            assertEquals(1, reader.closeCalls, "StorageStream.close 必须释放它交出去的流")
+            storage.close()
+            assertEquals(1, reader.closeCalls, "Adapter 关闭不能重复释放")
+        }
+
+    /** Adapter 先关 + 流已打开：写锁内排空释放，事后 close() 是幂等空操作。 */
+    @Test
+    fun `closing the adapter first releases an opened reader exactly once and later close is a no-op`() =
+        runBlocking {
+            val root = Files.createDirectory(tempDir.resolve("root"))
+            Files.writeString(root.resolve("a.txt"), "0123456789")
+            val reader = RecordingReader("0123456789".toByteArray())
+            val storage = LocalFsStorage.open(root, LocalFsOptions(), readerFactory = { _ -> { reader } })
+
+            val stream = storage.readStream(StoragePath.parse("a.txt"))
+            val opened = stream.openStream()
+            storage.close()
+
+            assertEquals(1, reader.closeCalls, "Adapter 关闭时必须在写锁内排空 reader")
+            assertEquals(VfsErrorCode.CLOSED, assertFailsWith<VfsException> { opened.read() }.code)
+
+            opened.close()
+            opened.close()
+            stream.close()
+            stream.close()
+            assertEquals(1, reader.closeCalls, "事后关流是幂等空操作：不报错，也不重复释放")
+        }
+
+    /** Adapter 先关 + 流尚未打开：同样由排空释放。 */
+    @Test
+    fun `closing the adapter first releases a never opened reader exactly once`() =
+        runBlocking {
+            val root = Files.createDirectory(tempDir.resolve("root"))
+            Files.writeString(root.resolve("a.txt"), "0123456789")
+            val reader = RecordingReader("0123456789".toByteArray())
+            val storage = LocalFsStorage.open(root, LocalFsOptions(), readerFactory = { _ -> { reader } })
+
+            val stream = storage.readStream(StoragePath.parse("a.txt"))
+            storage.close()
+
+            assertEquals(1, reader.closeCalls, "未打开的 reader 也必须被排空释放")
+            stream.close()
+            assertEquals(1, reader.closeCalls)
+        }
+
+    /**
+     * 同一 reader 上的「读」与「关」必须互斥。
+     *
+     * 双向闩锁编排，不用 `Thread.sleep` 判时序：
+     * 1. 读线程进入 native 读并阻塞在 `allowReadExit`；
+     * 2. 关线程**已经发起** `close()`（`closeAttempted` 放行）；
+     * 3. 主线程才放行读返回。
+     *
+     * 没有闸门时，关线程会在第 2、3 步之间进入 `native.close()`，替身自己把
+     * `closedWhileReading` 记为 true——这个标记由替身记录，不依赖主线程的观察时机。
+     */
+    @Test
+    fun `a read in flight is never released by a concurrent close`() {
+        val reader = BlockingReader()
+
+        runBlocking {
+            val root = Files.createDirectory(tempDir.resolve("root"))
+            Files.writeString(root.resolve("a.txt"), "0123456789")
+            LocalFsStorage.open(root, LocalFsOptions(), readerFactory = { _ -> { reader } }).use { storage ->
+                val stream = storage.readStream(StoragePath.parse("a.txt"))
+                val opened = stream.openStream()
+
+                val readerThread = Thread { opened.read() }
+                readerThread.start()
+                assertTrue(reader.readEntered.await(5, TimeUnit.SECONDS), "读没有进入 native")
+
+                val closerThread =
+                    Thread {
+                        reader.closeAttempted.countDown()
+                        opened.close()
+                    }
+                closerThread.start()
+                assertTrue(reader.closeAttempted.await(5, TimeUnit.SECONDS), "关没有发起")
+
+                reader.allowReadExit.countDown()
+                readerThread.join(5_000)
+                closerThread.join(5_000)
+
+                assertFalse(reader.closedWhileReading, "读取还没返回就释放了 reader")
+                assertEquals(1, reader.closeCalls, "恰好释放一次")
+                stream.close()
+            }
+        }
+    }
+
+    /** `readStream` 交接取消与 Adapter 关闭**重合**：释放结果确定，仍是恰好一次。 */
+    @Test
+    fun `a cancelled handoff overlapping an adapter close still releases the reader exactly once`() =
+        runBlocking {
+            val root = Files.createDirectory(tempDir.resolve("root"))
+            Files.writeString(root.resolve("a.txt"), "0123456789")
+            val reader = RecordingReader("0123456789".toByteArray())
+            val inFactory = CountDownLatch(1)
+            val allowFactory = CountDownLatch(1)
+            val delivered = AtomicBoolean(false)
+
+            val storage =
+                LocalFsStorage.open(
+                    root,
+                    LocalFsOptions(),
+                    readerFactory = { _ ->
+                        { _ ->
+                            // reader 已建好、IO 块还没跑完：此时 Adapter 关闭会等写锁。
+                            inFactory.countDown()
+                            allowFactory.await(5, TimeUnit.SECONDS)
+                            reader
+                        }
+                    },
+                )
+
+            val job =
+                CoroutineScope(Dispatchers.Default).launch(start = CoroutineStart.UNDISPATCHED) {
+                    storage.readStream(StoragePath.parse("a.txt"))
+                    delivered.set(true)
+                }
+            assertTrue(inFactory.await(5, TimeUnit.SECONDS), "没有进入 reader 工厂")
+
+            // 两个并发事件同时发生：取消协程 + 关闭 Adapter。
+            val closer = Thread { storage.close() }
+            closer.start()
+            job.cancel()
+            allowFactory.countDown()
+            job.join()
+            closer.join(5_000)
+
+            assertFalse(delivered.get(), "取消后调用方不能拿到成功结果")
+            assertEquals(1, reader.closeCalls, "交接取消与 Adapter 关闭重合时仍恰好释放一次")
+        }
 }
