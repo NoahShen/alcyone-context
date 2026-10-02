@@ -1,5 +1,9 @@
 # Alcyone Context 项目搭建说明
 
+## 本次修改（2026-10-02，模块更名同步当前目录）
+
+- 当前有效目录树、模块清单、依赖图、测试路径与模块章节标题统一为 `vfs/storage` 与 `vfs/persistence`（原 `vfs/storage-opendal` / `vfs/persistence-sqldelight`），与 T11 交付的重命名结果一致。涉及第 2、4、7、8、9.1、10、11、12、13 节。
+
 ## 本次修改（2026-09-29，工具链版本单一来源）
 
 - 声明 `gradle/toolchain.versions` 为 JDK 与 Gradle 版本、下载地址和 SHA-256 的单一来源，`scripts/dev` 与根构建守卫均从它读取。涉及第 2 节。
@@ -53,8 +57,8 @@ alcyone-context/
 ├── vfs/
 │   ├── api/
 │   ├── core/
-│   ├── storage-opendal/
-│   ├── persistence-sqldelight/
+│   ├── storage/
+│   ├── persistence/
 │   └── runtime/
 │
 └── integration-tests/
@@ -76,11 +80,11 @@ vfs/api
 vfs/core
 → VFS 核心业务逻辑
 
-vfs/storage-opendal
-→ 底层 Storage 实现
+vfs/storage
+→ 底层 Storage 实现（原 vfs/storage-opendal）
 
-vfs/persistence-sqldelight
-→ VFS 关键状态持久化
+vfs/persistence
+→ VFS 关键状态持久化（原 vfs/persistence-sqldelight）
 
 vfs/runtime
 → VFS SDK 入口与运行时组装
@@ -162,8 +166,8 @@ VFS 本身采用模块化设计：
 vfs/
 ├── api/
 ├── core/
-├── storage-opendal/
-├── persistence-sqldelight/
+├── storage/
+├── persistence/
 └── runtime/
 ```
 
@@ -323,8 +327,8 @@ interface Storage {
 真正的实现分别由：
 
 ```text
-storage-opendal
-persistence-sqldelight
+storage
+persistence
 ```
 
 提供。
@@ -364,9 +368,9 @@ delete
 
 ---
 
-# 7. `vfs/storage-opendal`
+# 7. `vfs/storage`
 
-`vfs/storage-opendal` 是 VFS 的 Storage 基础设施实现模块。
+`vfs/storage`（原 `vfs/storage-opendal`）是 VFS 的 Storage 基础设施实现模块。
 
 它回答：
 
@@ -381,7 +385,7 @@ VFS Core
     │
     │ Storage Port
     ▼
-storage-opendal
+storage
     │
     ▼
 OpenDAL
@@ -435,9 +439,9 @@ OSS
 
 ---
 
-# 8. `vfs/persistence-sqldelight`
+# 8. `vfs/persistence`
 
-`vfs/persistence-sqldelight` 是 VFS 关键状态的持久化实现模块。
+`vfs/persistence`（原 `vfs/persistence-sqldelight`）是 VFS 关键状态的持久化实现模块。
 
 它回答：
 
@@ -547,11 +551,11 @@ vfs-core
 
 +
 
-storage-opendal
+storage
 
 +
 
-persistence-sqldelight
+persistence
 ```
 
 并隐藏内部实现细节。
@@ -668,8 +672,8 @@ AlcyoneVfs
 ```text
 vfs/api/src/test/
 vfs/core/src/test/
-vfs/storage-opendal/src/test/
-vfs/persistence-sqldelight/src/test/
+vfs/storage/src/test/
+vfs/persistence/src/test/
 vfs/runtime/src/test/
 ```
 
@@ -755,7 +759,7 @@ VFS 内部总体依赖关系：
                 ▲        ▲
                 │        │
                 │        │
- storage-opendal      persistence-sqldelight
+ storage                persistence
                 ▲        ▲
                 └────┬───┘
                      │
@@ -771,10 +775,10 @@ vfs-api
 vfs-core
 → 核心规则
 
-storage-opendal
+storage
 → Storage 实现
 
-persistence-sqldelight
+persistence
 → Repository 实现
 
 vfs-runtime
@@ -807,8 +811,8 @@ alcyone-context/
 ├── vfs/
 │   ├── api/
 │   ├── core/
-│   ├── storage-opendal/
-│   ├── persistence-sqldelight/
+│   ├── storage/
+│   ├── persistence/
 │   └── runtime/
 └── integration-tests/
     └── vfs/
@@ -865,10 +869,10 @@ vfs-api
 vfs-core
 → 实现 VFS 的核心规则
 
-vfs-storage-opendal
+vfs-storage
 → 访问实际文件
 
-vfs-persistence-sqldelight
+vfs-persistence
 → 保存 VFS 关键状态
 
 vfs-runtime

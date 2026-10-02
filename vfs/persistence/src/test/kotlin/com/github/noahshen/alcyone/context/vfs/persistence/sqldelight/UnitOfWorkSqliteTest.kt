@@ -2,16 +2,21 @@ package com.github.noahshen.alcyone.context.vfs.persistence.sqldelight
 
 import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.NodeMetadata
+import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
+import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.core.transaction.TransactionScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -19,6 +24,10 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * A03：状态与事件在同一 SQLite 事务内全有或全无。
@@ -94,7 +103,7 @@ class UnitOfWorkSqliteTest {
         }
     }
 
-    // A03-2：同一个事务内多次写入一起提交，事务外看不到中间状态
+    // A03-2：同一个事务内多次写入一起提交
     @Test
     fun `several writes in one transaction share a single commit`() =
         runBlocking {
@@ -247,4 +256,86 @@ class UnitOfWorkSqliteTest {
                 assertEquals(1L, state.activeNodeCount())
             }
         }
+
+    /**
+     * R1 回归：BEGIN 已在 IO 线程上执行成功后取消调用协程，事务必须被回滚掉。
+     *
+     * 控制顺序：BEGIN 真的执行 → `job.cancel()` → 放行 IO 执行块。于是 `withContext` 切回已取消的协程时
+     * 抛 CancellationException，修复前它发生在回滚与 `finally` 之前，连接上就留下一个开着的事务，
+     * 下一个 `inTransaction` 直接报 "cannot start a transaction within a transaction"。
+     */
+    @Test
+    fun `cancelling the coroutine after BEGIN succeeded leaves no open transaction`() =
+        runBlocking {
+            val beginExecuted = CountDownLatch(1)
+            val releaseBegin = CountDownLatch(1)
+            val gated = AtomicBoolean(false)
+            hookedState { sql, prepare ->
+                if (sql == BEGIN_SQL && gated.compareAndSet(false, true)) {
+                    val statement = prepare() // BEGIN 在这条连接上确实执行了
+                    beginExecuted.countDown()
+                    check(releaseBegin.await(30, TimeUnit.SECONDS)) { "测试没有放行 BEGIN 的 IO 执行块" }
+                    statement
+                } else {
+                    prepare()
+                }
+            }.use { state ->
+                val uow = SqliteUnitOfWork(state)
+                var blockRan = false
+
+                val job = launch { uow.inTransaction { blockRan = true } }
+                // 等 BEGIN 与取消必须在 IO 线程上做：直接 await 会把 runBlocking 的事件循环线程卡住，
+                // launch 的协程根本没机会开始跑。
+                withContext(Dispatchers.IO) {
+                    assertTrue(beginExecuted.await(30, TimeUnit.SECONDS), "BEGIN 没有在 IO 线程上执行")
+                    job.cancel()
+                    releaseBegin.countDown()
+                }
+                job.join()
+
+                assertTrue(job.isCancelled)
+                // 取消落在 BEGIN 之后、业务回调之前：回调没跑，事务里也没留下任何写入。
+                assertFalse(blockRan)
+                assertEquals(0L, state.activeNodeCount())
+
+                // 关键断言：连接上不再挂着事务，下一次事务能正常提交。
+                val committed = uow.inTransaction { scope -> scope.nodes.register(testRecord("/notes/a.txt")) }
+                assertEquals(committed, SqliteNodeRepository(state).findByPath(path))
+                assertEquals(1L, state.activeNodeCount())
+            }
+        }
+
+    /**
+     * R1 回归：本次调用没拿到事务（BEGIN 失败）时不得回滚——那个事务是别人的。
+     *
+     * 用真实的 SQLite 拒绝制造这个场景：先手动开一个事务并写入，再让 `inTransaction` 撞上去。
+     */
+    @Test
+    fun `a failed BEGIN does not roll back the transaction that is already open`() {
+        val statements = CopyOnWriteArrayList<String>()
+        hookedState { sql, prepare ->
+            statements += sql
+            prepare()
+        }.use { state ->
+            val record = testRecord("/notes/held.txt")
+            // 别人的事务：直接在驱动上 BEGIN，绕开 UnitOfWork。
+            state.driver.execute(null, BEGIN_SQL, 0)
+            runBlocking { SqliteNodeRepository(state).register(record) }
+
+            val failure =
+                assertThrows(VfsException::class.java) {
+                    runBlocking { SqliteUnitOfWork(state).inTransaction<Unit> { error("不该进回调") } }
+                }
+
+            assertEquals(VfsErrorCode.STATE_ERROR, failure.code)
+            // 两个 BEGIN 都发生过（手动一个 + 被拒一个），但没有一次 ROLLBACK。
+            assertEquals(2, statements.count { it == BEGIN_SQL })
+            assertFalse(statements.contains(ROLLBACK_SQL), "失败的 BEGIN 不该发出 ROLLBACK")
+
+            // 别人的事务还活着：提交后数据在，自动提交写入也照常可用。
+            state.driver.execute(null, COMMIT_SQL, 0)
+            runBlocking { assertEquals(record, SqliteNodeRepository(state).findByPath(record.path)) }
+            assertEquals(1L, state.activeNodeCount())
+        }
+    }
 }

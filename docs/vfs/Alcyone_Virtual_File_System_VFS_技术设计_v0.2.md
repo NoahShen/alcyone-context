@@ -1,5 +1,9 @@
 # Alcyone Virtual File System (VFS) 技术设计 v0.2
 
+## 本次修改（2026-10-02，模块更名同步）
+
+- 第 12 节工程模块表按 T11 交付的重命名结果改为 `vfs/storage` 与 `vfs/persistence`，保留原名说明。涉及第 12 节。
+
 ## 本次修改（2026-09-28，T03 审阅通过）
 
 - 衔接已确认的状态与事务基线，明确懒注册不发布事件。涉及文首衔接说明及第 11 节。
@@ -198,8 +202,8 @@ Git Sync 单独按 E1 交付，届时定义配置、同步状态查询、重试�
 | --- | --- |
 | vfs/api | 文件契约、路径、Node、Metadata、事件、异常 |
 | vfs/core | 文件编排、Registry、Mount、Metadata、事件及 Port |
-| vfs/storage-opendal | OpenDAL Adapter |
-| vfs/persistence-sqldelight | 状态库与 Repository 实现 |
+| vfs/storage | OpenDAL Adapter（原 vfs/storage-opendal） |
+| vfs/persistence | 状态库与 Repository 实现（原 vfs/persistence-sqldelight） |
 | vfs/runtime | SDK 入口、配置、资源生命周期及扩展组装 |
 | integration-tests/vfs | 完整 SDK 集成测试 |
 

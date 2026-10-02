@@ -123,4 +123,18 @@ class StateErrorMappingTest {
                 assertSame("TransactionScope used outside of inTransaction block", failure.message)
             }
         }
+
+    /** S3：关闭失败同样走统一映射，不把底层异常直接抛给调用方。 */
+    @Test
+    fun `a failing close is reported as STATE_ERROR`() {
+        val state = VfsStateDatabase.inMemory()
+        val failing = VfsStateDatabase(state.database, CloseFailingDriver(state.driver))
+
+        val failure = assertThrows(VfsException::class.java) { failing.close() }
+
+        assertEquals(VfsErrorCode.STATE_ERROR, failure.code)
+        assertNotNull(failure.cause)
+        // 钩子是在真正关闭连接之前抛的，所以底层连接还开着。
+        state.close()
+    }
 }

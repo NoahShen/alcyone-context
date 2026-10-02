@@ -1,6 +1,8 @@
 package com.github.noahshen.alcyone.context.vfs.persistence.sqldelight
 
+import app.cash.sqldelight.Query
 import app.cash.sqldelight.db.QueryResult
+import app.cash.sqldelight.driver.jdbc.JdbcDriver
 import com.github.noahshen.alcyone.context.common.newUuidV7
 import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.NodeType
@@ -10,7 +12,11 @@ import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
+import java.lang.reflect.Proxy
+import java.sql.Connection
+import java.sql.DriverManager
 import java.time.Instant
+import java.util.Properties
 
 /** 测试基线时间；表里按 epoch 毫秒存储，用它才能得到稳定的回读值。 */
 internal val TEST_NOW: Instant = Instant.parse("2026-10-01T10:00:00Z")
@@ -112,4 +118,60 @@ internal fun VfsStateDatabase.insertMount(
         bindString(0, path)
         bindString(1, storageKey)
     }
+}
+
+/**
+ * 代理真实 [Connection]：每条 `prepareStatement(sql)` 交给 [aroundPrepare]，其余方法原样转发。
+ *
+ * 为什么拦在这一层：`JdbcDriver.execute` 的默认实现是 final 的，它直接调 `Connection.prepareStatement`，
+ * 没有可覆盖的钩子。取消与失败路径靠自然调度抢不出来，只能在这个点上确定性地放行或抛错。
+ */
+internal fun hookedConnection(
+    delegate: Connection,
+    aroundPrepare: (sql: String, prepare: () -> Any?) -> Any?,
+): Connection =
+    Proxy.newProxyInstance(Connection::class.java.classLoader, arrayOf(Connection::class.java)) { _, method, args ->
+        val prepare = { method.invoke(delegate, *(args ?: emptyArray())) }
+        if (method.name == "prepareStatement" && args != null) {
+            aroundPrepare(args[0] as String, prepare)
+        } else {
+            prepare()
+        }
+    } as Connection
+
+/** 真实 SQLite + 带钩子的连接，供需要控制语句时机的用例使用；已建好当前版本 Schema。 */
+internal fun hookedState(aroundPrepare: (sql: String, prepare: () -> Any?) -> Any?): VfsStateDatabase {
+    val driver =
+        SingleConnectionJdbcDriver(
+            hookedConnection(DriverManager.getConnection("jdbc:sqlite:", Properties()), aroundPrepare),
+        )
+    VfsDatabase.Schema.create(driver).value
+    return VfsStateDatabase(VfsDatabase(driver), driver)
+}
+
+/** 只为「关闭失败」构造的驱动：其他调用一律转给真实驱动。 */
+internal class CloseFailingDriver(
+    private val delegate: JdbcDriver,
+) : JdbcDriver() {
+    override fun getConnection(): Connection = delegate.getConnection()
+
+    override fun closeConnection(connection: Connection) = delegate.closeConnection(connection)
+
+    override fun addListener(
+        vararg queryKeys: String,
+        listener: Query.Listener,
+    ) {
+        delegate.addListener(*queryKeys, listener = listener)
+    }
+
+    override fun removeListener(
+        vararg queryKeys: String,
+        listener: Query.Listener,
+    ) {
+        delegate.removeListener(*queryKeys, listener = listener)
+    }
+
+    override fun notifyListeners(vararg queryKeys: String) = delegate.notifyListeners(*queryKeys)
+
+    override fun close(): Unit = throw IllegalStateException("close boom")
 }

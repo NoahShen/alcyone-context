@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## 本次修改（2026-10-02，T11 第一轮复核 R1～R4 已修复，待复核）
+
+- 已复核 `ff7ed1f` / `041c95f` / `7b41734`；R1～R4 已落实：BEGIN 纳入事务生命周期且仅在本次确实取得事务时回滚、库版本高于代码时拒绝打开、迁移文件按升级前版本号命名、两份当前架构文档模块名同步并订正交付口径；`./scripts/check` 全绿，测试总数 223 → **227**（`vfs/persistence` 47 个）。T11 仍为 **IN_REVIEW**，DONE 由复核方标记。涉及“设计文档与阅读顺序”第 15 条与“开发与验证”，详见 [T11 架构与技术复核](docs/tasks/m2-t11/T11_架构与技术复核.md)。
+- 单连接允许普通查询读取尚未提交的状态，后续 T13 / T15 需明确读取和自动提交写入的串行边界；本轮未修改实现，不开始 T12。涉及“VFS 必须保持的语义”的后续承接说明。
+
 ## 本次修改（2026-10-02，T11 实现完成，状态 IN_REVIEW）
 
 - T11 状态库已交付：模块 `vfs/persistence`（由 `vfs/persistence-sqldelight` 更名，Kotlin 包名不变）实现四表 SQLDelight Schema、数据库级路径唯一约束、T07 四个 Repository、`UnitOfWork` 事务与数据库打开 / 关闭 / 迁移生命周期，全部用真实 SQLite 验证。新增 43 个测试（A01～A06 全覆盖），`./scripts/check` 全绿，测试总数 180 → **223**。同目录补齐 [使用说明](docs/tasks/m2-t11/T11_使用说明.md) 与[验收记录](docs/tasks/m2-t11/T11_验收记录.md)。涉及“设计文档与阅读顺序”第 15 条与“开发与验证”。
@@ -147,7 +152,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 14. [T10 存储约束与操作能力检查开发及验收](docs/tasks/m2-t10/T10_存储约束与操作能力检查开发及验收.md)：变更操作预检、结构保护、只读与能力检查、执行策略输出及 A01～A07 验收；**DONE**，交付链 `79d2f04` / `8d39fc4` / `2de60b7`（含修正 `956e1c4` / `ef272ef`），独立复核通过并由复核方收口，180 个测试全绿；详见同目录 [架构与技术复核](docs/tasks/m2-t10/T10_架构与技术复核.md) 与 [交付文档](docs/tasks/m2-t10/T10_交付文档.md)。
 
-15. [T11 SQLDelight Schema、Repository、事务与数据库生命周期开发及验收](docs/tasks/m2-t11/T11_SQLDelight存储事务与生命周期开发及验收.md)：状态库四表 Schema 与唯一约束、Repository 与事务实现、生命周期与迁移及 A01～A07 验收；当前 **IN_REVIEW**（待独立复核，未提交），223 个测试全绿，模块为 `vfs/persistence`；详见同目录 [使用说明](docs/tasks/m2-t11/T11_使用说明.md) 与[验收记录](docs/tasks/m2-t11/T11_验收记录.md)。
+15. [T11 SQLDelight Schema、Repository、事务与数据库生命周期开发及验收](docs/tasks/m2-t11/T11_SQLDelight存储事务与生命周期开发及验收.md)：状态库四表 Schema 与唯一约束、Repository 与事务实现、生命周期与迁移及 A01～A07 验收；当前 **IN_REVIEW**（`ff7ed1f` / `041c95f` / `7b41734` 已提交，第一轮复核 R1～R4 已修复、待复核收口），227 个测试全绿，模块为 `vfs/persistence`；详见同目录 [使用说明](docs/tasks/m2-t11/T11_使用说明.md) 与[验收记录](docs/tasks/m2-t11/T11_验收记录.md)。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
@@ -275,4 +280,4 @@ VfsUri / 参数校验 → VfsPath → Mount / StoragePath → 存储约束检查
 - 正常关闭后重启可读取已提交的 SQLite 状态，不要求修复中断操作，事件对应成功变更，Consumer 失败不影响已完成操作。
 - 通过 Runtime 组合真实 SQLite 与 Local FS / WebDAV 的集成行为。
 
-T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前 `common` / `vfs/api` / `vfs/core` / `vfs/persistence` 共 223 个单元测试通过（T11 交付后，180 → 223，其中 `vfs/persistence` 43 个）；T06 的 R1～R5 边界复核与完整构建均通过。状态库已实现并用真实 SQLite 验证，但 Runtime 编排、真实后端 Adapter 与 SDK 入口尚未实现，不得声称 SDK 文件操作已验收。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。
+T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前 `common` / `vfs/api` / `vfs/core` / `vfs/persistence` 共 227 个单元测试通过（T11 交付后，180 → 227，其中 `vfs/persistence` 47 个）；T06 的 R1～R5 边界复核与完整构建均通过。状态库已实现并用真实 SQLite 验证，但 Runtime 编排、真实后端 Adapter 与 SDK 入口尚未实现，不得声称 SDK 文件操作已验收。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。

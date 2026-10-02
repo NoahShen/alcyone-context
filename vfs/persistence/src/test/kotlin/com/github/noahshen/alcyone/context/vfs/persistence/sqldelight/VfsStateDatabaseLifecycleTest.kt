@@ -1,8 +1,10 @@
 package com.github.noahshen.alcyone.context.vfs.persistence.sqldelight
 
 import com.github.noahshen.alcyone.context.vfs.NodeMetadata
+import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsEventId
 import com.github.noahshen.alcyone.context.vfs.VfsEventType
+import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
@@ -11,10 +13,12 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.DriverManager
 
 /**
  * A04 / A05：真实 SQLite 文件上的打开、关闭、重开与版本管理。
@@ -159,6 +163,40 @@ class VfsStateDatabaseLifecycleTest {
         assertEquals(1L, VfsDatabase.Schema.version)
     }
 
+    /**
+     * A05 / R2：库版本比代码新时拒绝打开，原文件的版本号与数据都不许动。
+     *
+     * 修复前 `currentVersion != schema.version` 会把新版库也送进 `migrate`（当前是空操作），
+     * 随后无条件写回 `PRAGMA user_version = 1`，用户的新版库被旧代码静默改低版本号。
+     */
+    @Test
+    fun `a database newer than the code is rejected and left untouched`() =
+        runBlocking {
+            withTempFile { file ->
+                val registered =
+                    VfsStateDatabase.file(file).use { state ->
+                        SqliteNodeRepository(state).register(testRecord("/notes/a.txt"))
+                    }
+                val newerVersion = VfsDatabase.Schema.version + 1
+
+                // 模拟「新版本代码写出来的库」：结构不变，只把版本号抬高。
+                assertEquals(1L, rawLong(file, "PRAGMA user_version"))
+                rawStatement(file, "PRAGMA user_version = $newerVersion")
+
+                val failure = assertThrows(VfsException::class.java) { VfsStateDatabase.file(file) }
+
+                assertEquals(VfsErrorCode.STATE_ERROR, failure.code)
+                assertEquals(newerVersion, rawLong(file, "PRAGMA user_version"), "被拒绝后不允许改写原库版本号")
+                assertEquals(1L, rawLong(file, "SELECT count(*) FROM node"), "被拒绝后不允许改动原库数据")
+
+                // 把版本号放回当前版本后照常打开：数据确实一个字节没少。
+                rawStatement(file, "PRAGMA user_version = ${VfsDatabase.Schema.version}")
+                VfsStateDatabase.file(file).use { state ->
+                    assertEquals(registered, SqliteNodeRepository(state).findByPath(registered.path))
+                }
+            }
+        }
+
     /** close 之后可以再次打开同一文件；文件也能被删除，说明没有留下写句柄（A04）。 */
     @Test
     fun `a closed database can be opened again and releases its file`() =
@@ -176,4 +214,27 @@ class VfsStateDatabaseLifecycleTest {
                 assertTrue(!Files.exists(file))
             }
         }
+
+    /** 直连读一个标量（`PRAGMA user_version`、`count(*)`），绕开 VFS 打开逻辑检查文件本身。 */
+    private fun rawLong(
+        file: Path,
+        sql: String,
+    ): Long =
+        DriverManager.getConnection("jdbc:sqlite:$file").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery(sql).use { cursor ->
+                    check(cursor.next()) { "查询无结果：$sql" }
+                    cursor.getLong(1)
+                }
+            }
+        }
+
+    private fun rawStatement(
+        file: Path,
+        sql: String,
+    ) {
+        DriverManager.getConnection("jdbc:sqlite:$file").use { connection ->
+            connection.createStatement().use { it.execute(sql) }
+        }
+    }
 }

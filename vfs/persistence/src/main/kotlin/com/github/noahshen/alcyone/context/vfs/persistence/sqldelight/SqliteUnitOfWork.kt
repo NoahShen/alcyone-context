@@ -13,6 +13,7 @@ import com.github.noahshen.alcyone.context.vfs.core.transaction.UnitOfWork
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 单个 SQLite 事务（T11 §2.3、T03 §4）。
@@ -26,6 +27,10 @@ import java.time.Instant
  * 加显式 SQL 事务控制。
  *
  * 回滚包在 [NonCancellable] 里：协程已被取消时也必须执行，否则事务与写锁会留在库里。
+ *
+ * **BEGIN 也在事务生命周期内**：`BEGIN` 是在 IO 线程上真正执行的，切回调用协程时如果它已被取消，
+ * [withContext] 会抛 CancellationException。所以 BEGIN 必须在 `try` 之内，并且只有本次调用**确实取得**了事务
+ * （标志在同一个 IO 执行块里置位）才回滚：BEGIN 自己失败时事务属于别人，回滚它等于破坏别人的数据。
  *
  * **并发边界**（首版不支持）：整库只有一条连接，多个协程并发调用 [inTransaction] 会在同一连接上交错，
  * 第二个 `BEGIN` 直接被 SQLite 拒绝，以 STATE_ERROR 失败（不会静默写坏数据）。
@@ -45,17 +50,26 @@ class SqliteUnitOfWork(
                 override val events: EventRepository = TransactionEventRepository(state.database.eventQueries, guard)
             }
         val driver = state.driver
-        // IMMEDIATE 立即取写锁：延迟升级锁在并发写入时会中途失败，不如一开始就失败得明确。
-        stateCall { driver.execute(null, BEGIN_SQL, 0) }
+        // BEGIN 真的在 IO 线程上执行成功了吗？只有那里知道，所以标志在同一个执行块里置位。
+        // 用 AtomicBoolean 是因为 IO 线程与调用协程不在同一个线程，局部捕获变量没有可见性保证。
+        val transactionStarted = AtomicBoolean(false)
         return try {
+            // IMMEDIATE 立即取写锁：延迟升级锁在并发写入时会中途失败，不如一开始就失败得明确。
+            stateCall {
+                driver.execute(null, BEGIN_SQL, 0)
+                transactionStarted.set(true)
+            }
             val result = block(scope)
             stateCall { driver.execute(null, COMMIT_SQL, 0) }
             result
         } catch (failure: Throwable) {
-            // 回滚是非挂起的 JDBC 调用，NonCancellable 保证取消路径也能执行；它失败不掩盖原始异常。
-            runCatching { withContext(NonCancellable) { stateCall { driver.execute(null, ROLLBACK_SQL, 0) } } }
-                .exceptionOrNull()
-                ?.let { failure.addSuppressed(it) }
+            // 只有本次调用真的开过事务才回滚：BEGIN 失败时连接上的事务不是本次的。
+            if (transactionStarted.get()) {
+                // 回滚是非挂起的 JDBC 调用，NonCancellable 保证取消路径也能执行；它失败不掩盖原始异常。
+                runCatching { withContext(NonCancellable) { stateCall { driver.execute(null, ROLLBACK_SQL, 0) } } }
+                    .exceptionOrNull()
+                    ?.let { failure.addSuppressed(it) }
+            }
             throw failure
         } finally {
             // 无论提交还是回滚，作用域都失效：逃逸到回调外只会拿到 IllegalStateException，
