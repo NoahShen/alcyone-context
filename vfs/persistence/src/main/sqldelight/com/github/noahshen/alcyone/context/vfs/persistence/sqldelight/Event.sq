@@ -1,0 +1,17 @@
+-- 事件日志表：随成功的状态变更在同一事务写入，事件永远引用当时的 Node ID。
+-- occurred_at 与 node 表一致，存 epoch 毫秒。
+CREATE TABLE event (
+    event_id TEXT NOT NULL PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    node_id TEXT,
+    occurred_at INTEGER NOT NULL,
+    uri TEXT NOT NULL,
+    operation_id TEXT,
+    source_uri TEXT,
+    target_uri TEXT
+);
+
+-- 普通 INSERT：事件主键重复是错误，交给调用方映射 STATE_ERROR。
+insertEvent:
+INSERT INTO event (event_id, event_type, node_id, occurred_at, uri, operation_id, source_uri, target_uri)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);

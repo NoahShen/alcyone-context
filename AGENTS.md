@@ -1,5 +1,18 @@
 # AGENTS.md
 
+## 本次修改（2026-10-02，T11 实现完成，状态 IN_REVIEW）
+
+- T11 状态库已交付：模块 `vfs/persistence`（由 `vfs/persistence-sqldelight` 更名，Kotlin 包名不变）实现四表 SQLDelight Schema、数据库级路径唯一约束、T07 四个 Repository、`UnitOfWork` 事务与数据库打开 / 关闭 / 迁移生命周期，全部用真实 SQLite 验证。新增 43 个测试（A01～A06 全覆盖），`./scripts/check` 全绿，测试总数 180 → **223**。同目录补齐 [使用说明](docs/tasks/m2-t11/T11_使用说明.md) 与[验收记录](docs/tasks/m2-t11/T11_验收记录.md)。涉及“设计文档与阅读顺序”第 15 条与“开发与验证”。
+- 本阶段确定的实现要点：有效路径唯一由部分唯一索引保证、`register` 竞争复用；时间戳 epoch 毫秒；子树查询用 `instr` 精确前缀规避 `LIKE` 通配符与大小写不敏感；事务为整库单连接 + 显式 `BEGIN IMMEDIATE`（不使用 `runBlocking` 驱动挂起回调）。涉及“VFS 必须保持的语义”。
+- 保留边界：并发 `inTransaction` 不支持（第二个 `BEGIN` 被 SQLite 拒绝报 `STATE_ERROR`），状态变更需由编排层串行；跨进程独占检测不做；Mount 写入属 T18、事件分发属 T14。涉及“VFS 必须保持的语义”与“开发与验证”。
+
+## 本次修改（2026-10-01，模块解耦重命名）
+
+- 模块名由按技术实现命名调整为按领域职责命名：
+  - `vfs/storage-opendal` → `vfs/storage`：定位为文件物理读写与存储适配层。首发基于 Apache OpenDAL，但模块设计需具备多引擎扩展能力，预留接入其他数据访问层或自研存储引擎的空间。
+  - `vfs/persistence-sqldelight` → `vfs/persistence`：负责 VFS 状态、Node、元数据与事件的持久化。
+- 涉及工程构建配置 `settings.gradle.kts`、`vfs/runtime/build.gradle.kts` 及“模块职责与依赖”表。
+
 ## 本次修改（2026-10-01，T11 任务入口）
 
 - 在“设计文档与阅读顺序”新增 T11 任务文档：`vfs/persistence-sqldelight` 的 Schema 与唯一约束、四个 Repository 实现、`UnitOfWork` 事务与数据库生命周期，全部用真实 SQLite 验证；含 SQLite 大小写敏感与子树查询两个已知陷阱的处理要求。任务尚未开始。涉及“设计文档与阅读顺序”。
@@ -134,7 +147,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 14. [T10 存储约束与操作能力检查开发及验收](docs/tasks/m2-t10/T10_存储约束与操作能力检查开发及验收.md)：变更操作预检、结构保护、只读与能力检查、执行策略输出及 A01～A07 验收；**DONE**，交付链 `79d2f04` / `8d39fc4` / `2de60b7`（含修正 `956e1c4` / `ef272ef`），独立复核通过并由复核方收口，180 个测试全绿；详见同目录 [架构与技术复核](docs/tasks/m2-t10/T10_架构与技术复核.md) 与 [交付文档](docs/tasks/m2-t10/T10_交付文档.md)。
 
-15. [T11 SQLDelight Schema、Repository、事务与数据库生命周期开发及验收](docs/tasks/m2-t11/T11_SQLDelight存储事务与生命周期开发及验收.md)：状态库四表 Schema 与唯一约束、Repository 与事务实现、生命周期与迁移及 A01～A07 验收；当前 TODO。
+15. [T11 SQLDelight Schema、Repository、事务与数据库生命周期开发及验收](docs/tasks/m2-t11/T11_SQLDelight存储事务与生命周期开发及验收.md)：状态库四表 Schema 与唯一约束、Repository 与事务实现、生命周期与迁移及 A01～A07 验收；当前 **IN_REVIEW**（待独立复核，未提交），223 个测试全绿，模块为 `vfs/persistence`；详见同目录 [使用说明](docs/tasks/m2-t11/T11_使用说明.md) 与[验收记录](docs/tasks/m2-t11/T11_验收记录.md)。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
@@ -175,8 +188,8 @@ OpenDAL 以 JVM 依赖嵌入运行，无需独立服务；构建发布时需处�
 | `common/` | 与 `vfs/` 平级的公共工具库，供 `vfs`、`memory` 等业务模块共用；当前提供 UUIDv7 生成与校验 |
 | `vfs/api/` | 公共接口和领域类型，如 `Vfs`、`VfsUri`、`VfsPath`、`NodeInfo`、选项、事件与异常 |
 | `vfs/core/` | URI、Node、Metadata、Mount、Event 规则及文件操作编排；定义 Storage / Repository Port；含挂载路由（`core.router`）与逻辑配置校验 |
-| `vfs/storage-opendal/` | 实现 Core 的 Storage Port，处理 OpenDAL 调用、后端能力与错误转换 |
-| `vfs/persistence-sqldelight/` | 实现 Core 的 Repository Port，保存 Node、Mount、Metadata、Event Log |
+| `vfs/storage/` | 实现 Core 的 Storage Port，负责文件内容的物理存储访问。首发基于 OpenDAL，设计上需支持未来扩展/替换其他存储引擎或数据访问层 |
+| `vfs/persistence/` | 实现 Core 的 Repository Port，保存 Node、Mount、Metadata、Event Log（当前基于 SQLite + SQLDelight） |
 | `vfs/runtime/` | SDK 入口与依赖组装，提供 `AlcyoneVfs`、配置及完整 VFS 实例 |
 | `integration-tests/vfs/` | 组合 Runtime、Core、真实 SQLite 与 Storage 的跨模块测试 |
 
@@ -230,6 +243,7 @@ VfsUri / 参数校验 → VfsPath → Mount / StoragePath → 存储约束检查
 - 成功的状态变更产生标准 VFS Event，包括创建、写入、移动、删除、Metadata 更新；首版不对外发布 `NODE_REGISTERED`。
 - 实时分发使用 Coroutine Flow / Channel；首版保留 Event Log，不实现持久化消费进度或重启重放，可靠消费列为后续 E05。
 - 状态与事件在同一事务中提交，提交后通知；首版不承诺可靠投递，不从示意图推断未实现的保证。
+- 状态库实现（T11）：当前有效路径唯一由数据库部分唯一索引保证，`markDeleted` 释放路径后新 Node 可立即复用；时间戳统一 epoch 毫秒；子树查询按完整段边界且大小写敏感（不用 `LIKE`）；事务为整库单连接 + 显式 `BEGIN IMMEDIATE`，**并发 `inTransaction` 不支持**，状态变更需由编排层串行。
 - Git Sync、Index、Audit 属于外围 Event Consumer，其失败不改变已成功的 VFS 操作结果。
 - Git 不是 Storage Backend；需要 Git Sync 时优先使用 Git CLI。同步扩展由 SDK / Runtime 通过配置接入，普通文件调用不需要操作 Worker；同步失败可重试，不回滚已成功文件操作。Git Sync 仍按 E1 单独交付，不承诺通用双向同步。
 - 第一阶段仅覆盖经由 VFS 发起的变更事件，不保证发现绕过 VFS 的外部文件变化。
@@ -261,4 +275,4 @@ VfsUri / 参数校验 → VfsPath → Mount / StoragePath → 存储约束检查
 - 正常关闭后重启可读取已提交的 SQLite 状态，不要求修复中断操作，事件对应成功变更，Consumer 失败不影响已完成操作。
 - 通过 Runtime 组合真实 SQLite 与 Local FS / WebDAV 的集成行为。
 
-T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前 common / API 有 72 个单元测试通过，T06 的 R1～R5 边界复核与完整构建均通过；其余业务模块尚无完整实现，不得声称 SDK 文件操作已验收。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。
+T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前 `common` / `vfs/api` / `vfs/core` / `vfs/persistence` 共 223 个单元测试通过（T11 交付后，180 → 223，其中 `vfs/persistence` 43 个）；T06 的 R1～R5 边界复核与完整构建均通过。状态库已实现并用真实 SQLite 验证，但 Runtime 编排、真实后端 Adapter 与 SDK 入口尚未实现，不得声称 SDK 文件操作已验收。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。

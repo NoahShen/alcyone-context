@@ -1,0 +1,10 @@
+-- 挂载点映射表：路径为主键，storage_key 只存实例标识，不存凭据或具体 URL。本轮只读（T18 负责写入）。
+CREATE TABLE mount (
+    vfs_path TEXT NOT NULL PRIMARY KEY,
+    storage_key TEXT NOT NULL
+);
+
+-- 本轮严格只读（T18 负责写入），只暴露全量读取。
+selectAllMounts:
+SELECT * FROM mount
+ORDER BY vfs_path;

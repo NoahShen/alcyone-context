@@ -1,0 +1,63 @@
+-- 节点表。当前有效 = deleted_at IS NULL；被删除的记录保留以便历史事件仍引用原 Node ID。
+-- 所有时间戳统一存 epoch 毫秒（INTEGER，UTC），精度毫秒；换算在 Kotlin 侧的 Instant 映射完成。
+-- 文本列使用 SQLite 默认 BINARY 比较（大小写敏感），与 VfsPath 保留大小写的规则一致；
+-- 不用 LIKE、不加 COLLATE NOCASE：`/` 与 `_` 是合法路径字符却是 LIKE 通配符。
+CREATE TABLE node (
+    id TEXT NOT NULL PRIMARY KEY,
+    vfs_path TEXT NOT NULL,
+    node_type TEXT NOT NULL,
+    physical INTEGER NOT NULL CHECK (physical IN (0, 1)),
+    registered_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER
+);
+
+-- 当前有效路径唯一由数据库裁定：deleted_at 一旦非空，占用立即释放，路径可被新 Node 复用。
+-- 不靠调用方先查后插，register 竞争时由这条索引决定谁生效。
+CREATE UNIQUE INDEX node_active_path ON node (vfs_path) WHERE deleted_at IS NULL;
+
+-- 先写后读：冲突时这条 INSERT 被忽略，随后按路径读回的就是竞争获胜的既有记录。
+insertActive:
+INSERT OR IGNORE INTO node (id, vfs_path, node_type, physical, registered_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?);
+
+selectActiveByPath:
+SELECT *
+FROM node
+WHERE vfs_path = ? AND deleted_at IS NULL;
+
+selectActiveById:
+SELECT *
+FROM node
+WHERE id = ? AND deleted_at IS NULL;
+
+markNodesDeleted:
+UPDATE node
+SET deleted_at = ?
+WHERE id IN ? AND deleted_at IS NULL;
+
+updatePathUpdatedAt:
+UPDATE node
+SET vfs_path = ?, updated_at = ?
+WHERE id = ? AND deleted_at IS NULL;
+
+touchUpdatedAt:
+UPDATE node
+SET updated_at = ?
+WHERE id = ? AND deleted_at IS NULL;
+
+-- 子树查询：等值命中自身，instr 精确前缀命中后代，段边界由第二个参数 path + '/' 保证。
+-- 不用 LIKE：`_` 是合法路径字符却是 LIKE 通配符，LIKE 对 ASCII 也不区分大小写；
+-- 不用 substr + length：length() 会让参数退化成整型，且与 UTF-16 长度不一致。
+-- 传空前缀时 instr 恒为 1，等价于查询全部有效节点（逻辑根的子树）。
+selectSubtree:
+SELECT *
+FROM node
+WHERE deleted_at IS NULL
+  AND (vfs_path = ? OR instr(vfs_path, ?) = 1)
+ORDER BY vfs_path;
+
+selectActiveByPaths:
+SELECT *
+FROM node
+WHERE deleted_at IS NULL AND vfs_path IN ?;

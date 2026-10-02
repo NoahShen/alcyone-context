@@ -1,15 +1,22 @@
 # T11 SQLDelight Schema、Repository、事务与数据库生命周期开发及验收
 
+## 本次修改（2026-10-02，实现完成，状态 IN_REVIEW）
+
+- 交付 `vfs/persistence` 状态库：四表 SQLDelight Schema、数据库级路径唯一约束、T07 四个 Repository 实现、`UnitOfWork` 事务、数据库打开 / 关闭 / 迁移生命周期，全部用真实 SQLite 验证。新增 43 个测试（A01～A06 全覆盖），`./scripts/check` 全绿，测试总数 180 → **223**。同目录补齐 [使用说明](T11_使用说明.md) 与[验收记录](T11_验收记录.md)。涉及全文。
+- **模块更名**：正文与命令中出现的 `vfs/persistence-sqldelight` 均为旧名，模块已更名为 `vfs/persistence`（Kotlin 包名 `com.github.noahshen.alcyone.context.vfs.persistence.sqldelight` 不变），本任务文档文件名保持不变以兼容既有链接。涉及第 1、4、6 节。
+- 本阶段确定的实现要点：当前有效路径唯一由部分唯一索引 `node_active_path ... WHERE deleted_at IS NULL` 保证、`register` 竞争复用；时间戳统一 epoch 毫秒；子树查询用 `instr` 精确前缀规避 `LIKE` 通配符与大小写不敏感；事务用整库单连接 + 显式 `BEGIN IMMEDIATE`，不套 `runBlocking`。涉及第 2.1～2.5 节与验收记录第 3 节。
+- 保留边界：并发 `inTransaction` 不支持（调用方串行）、跨进程独占检测不做、Mount 写入属 T18、事件分发属 T14。涉及第 2.3、3 节。
+
 ## 本次修改（2026-10-01，任务计划初稿）
 
 - 定义 `vfs/persistence-sqldelight` 的开发内容、边界和三个实施步骤：Schema 与唯一约束、Repository 实现、事务与数据库生命周期。涉及第 1～4 节。
 - 给出 A01～A07 验收标准，全部用真实 SQLite 验证（内存 + 临时文件），不引入 mock driver。涉及第 5～6 节。
 
-状态：**TODO，计划已准备，尚未开始实现。** 前置 T03、T07 已完成；任务进度以 [开发计划](../../开发计划与进度.md) 为准。
+状态：**IN_REVIEW。** 实现、自测与交付文档已完成，等待独立复核；DONE 由复核方标记。本轮未提交。前置 T03、T07 已完成；任务进度以 [开发计划](../../开发计划与进度.md) 为准。
 
 ## 1. 目标与依据
 
-在 `vfs/persistence-sqldelight` 实现状态库基础设施：SQLDelight Schema（Node / Metadata / Event / Mount 四张表）、T07 四个 Repository 接口的实现、`UnitOfWork` 事务实现与数据库打开 / 关闭 / 迁移生命周期。本轮是纯基础设施：不编排文件操作、不分发事件、不读取配置。
+在 `vfs/persistence` 实现状态库基础设施：SQLDelight Schema（Node / Metadata / Event / Mount 四张表）、T07 四个 Repository 接口的实现、`UnitOfWork` 事务实现与数据库打开 / 关闭 / 迁移生命周期。本轮是纯基础设施：不编排文件操作、不分发事件、不读取配置。
 
 依据：[T03 状态与恢复设计](../../vfs/VFS_状态与恢复设计_v0.1.md) 第 1～4、7～9 节，T07 的 `Repositories` / `RepositoryModels` / `UnitOfWork` 接口，T04 已验证的 SQLDelight 2.1.0 + JDBC `sqlite-driver` 组合（版本已在 `gradle/libs.versions.toml` 声明）。状态库只服务 VFS，不与未来 Memory 查询库共享（AGENTS 约束）。
 
@@ -55,7 +62,7 @@
 | Mount 表的 Schema 与读取（`MountRepository.list`） | T18 首次启动写入 Mount 映射与"已有映射被修改时拒绝"的校验（T03 §8）、多 Runtime 独占检测 |
 | 模块内真实 SQLite 测试（内存 + 临时文件） | T19 通过 Runtime 组合真实 SQLite 与 Local FS 的集成验证 |
 
-不修改 T07 接口与 API 类型（2.5 说明无需兼容性补充）；不实现事件分发、消费进度、操作恢复日志；不实现文件操作编排。测试放在 `vfs/persistence-sqldelight/src/test/`，用真实 SQLite 驱动，不为验收额外构建内存假驱动。同目录补齐 `T11_使用说明.md` 与 `T11_验收记录.md`。
+不修改 T07 接口与 API 类型（2.5 说明无需兼容性补充）；不实现事件分发、消费进度、操作恢复日志；不实现文件操作编排。测试放在 `vfs/persistence/src/test/`，用真实 SQLite 驱动，不为验收额外构建内存假驱动。同目录补齐 `T11_使用说明.md` 与 `T11_验收记录.md`。
 
 ## 4. 实施顺序
 
@@ -85,10 +92,10 @@
 
 ```sh
 ./scripts/dev gradle spotlessApply
-./scripts/dev gradle :vfs:persistence-sqldelight:test --console=plain
+./scripts/dev gradle :vfs:persistence:test --console=plain
 ./scripts/check
 ```
 
 沿用项目内 Java / Gradle，依赖齐全且离线时可加 `--offline`。开始时标为 IN_PROGRESS，完成实现、自测和提交后标为 IN_REVIEW（状态由复核方标 DONE）；独立验收通过后才收口，不自动继续 T12。
 
-> 按 AGENTS.md、开发计划与本文件执行 T11。在 `vfs/persistence-sqldelight` 实现四张表的 Schema 与唯一约束、T07 四个 Repository、`UnitOfWork` 事务与数据库生命周期，全部用真实 SQLite 验证。只实现本任务基础设施，不实现事件分发、Mount 写入编排或文件操作；完成 A01～A07，补充本目录使用说明和验收记录，提交后等待独立复核。
+> 按 AGENTS.md、开发计划与本文件执行 T11。在 `vfs/persistence` 实现四张表的 Schema 与唯一约束、T07 四个 Repository、`UnitOfWork` 事务与数据库生命周期，全部用真实 SQLite 验证。只实现本任务基础设施，不实现事件分发、Mount 写入编排或文件操作；完成 A01～A07，补充本目录使用说明和验收记录，提交后等待独立复核。

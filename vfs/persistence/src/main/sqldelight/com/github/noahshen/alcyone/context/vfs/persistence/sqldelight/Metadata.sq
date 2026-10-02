@@ -1,0 +1,15 @@
+-- 元数据表：只按 Node ID 存取，不含路径，因此移动后无需更新（NodeMetadata 以 JsonObject 文本整体序列化）。
+CREATE TABLE metadata (
+    node_id TEXT NOT NULL PRIMARY KEY,
+    payload TEXT NOT NULL
+);
+
+-- put 是整体替换：载荷不可合并，INSERT OR REPLACE 直接覆盖整行。
+selectPayloadByNodeId:
+SELECT payload FROM metadata WHERE node_id = ?;
+
+insertOrReplaceMetadata:
+INSERT OR REPLACE INTO metadata (node_id, payload) VALUES (?, ?);
+
+deleteMetadataByNodeId:
+DELETE FROM metadata WHERE node_id = ?;
