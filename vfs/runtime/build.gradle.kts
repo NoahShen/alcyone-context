@@ -6,6 +6,6 @@ plugins {
 dependencies {
     api(project(":vfs:api"))
     implementation(project(":vfs:core"))
-    implementation(project(":vfs:storage-opendal"))
-    implementation(project(":vfs:persistence-sqldelight"))
+    implementation(project(":vfs:storage"))
+    implementation(project(":vfs:persistence"))
 }
