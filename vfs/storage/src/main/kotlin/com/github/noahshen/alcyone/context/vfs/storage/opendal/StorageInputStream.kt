@@ -5,37 +5,32 @@ import com.github.noahshen.alcyone.context.vfs.VfsException
 import java.io.InputStream
 
 /**
- * 读流包装：可选限额 + 生命周期守卫，三态确定（T12 R1 / R3）。
+ * 读文件时套在外面的一层：数着读了多少字节，超了上限就报错。
  *
- * `limitBytes = null` 表示调用方不设上限；非 null 时按**实际读取量**计费。`BoundedInputStream` 与
- * `GuardedInputStream` 已合并为这一个类，两者行为逐条一致。
+ * 场景：调用方想读 `notes/todo.md`，但只允许读 8 个字节。
+ * 读到第 9 个字节时抛 `LIMIT_EXCEEDED`，并且不会把整个文件读进内存。
+ * `limitBytes` 传 `null` 表示不限量。
  *
- * 三态（状态一旦离开 [ACTIVE] 就不再回去）：
+ * 三个状态，只能往前走不能回头：
  *
  * | 状态 | read / skip / available | close |
  * | --- | --- | --- |
- * | `ACTIVE` | 正常；越界的那一次读取当场抛 `LIMIT_EXCEEDED` | 释放 reader，转 `CLOSED` |
- * | `LIMIT_FAILED` | 一律抛 `LIMIT_EXCEEDED` | 幂等清理 reader，转 `CLOSED` |
- * | `CLOSED` | 一律抛 `CLOSED` | 幂等空操作 |
+ * | 正在读 | 正常；超限的那一次读取当场抛 `LIMIT_EXCEEDED` | 关闭底层流，转「已关闭」 |
+ * | 已超限 | 一律抛 `LIMIT_EXCEEDED` | 关闭底层流，转「已关闭」 |
+ * | 已关闭 | 一律抛 `CLOSED` | 什么都不做 |
  *
- * 四条不变量：
+ * 四条要守住的规则：
  *
- * 1. **自己关闭后不再触碰 reader**。检查自身状态发生在任何一次 native 调用之前；
- *    之前分开实现时漏了这条，`StorageStream.close()` 之后已打开的流仍能读出字节。
- * 2. **`available()` 在任何状态下都不为负**。`LIMIT_FAILED` 抛异常而不是返回负数；
- *    `available()` 为负时归零，调用方不会陷入无进展循环。
- * 3. **正长度读永不返回 0**。额度不足时至少放行 1 字节用于判定超限，读到 0 一定是真的到流尾
- *    （委托给 `InputStream.readAllBytes` / `transferTo`，它们在返回 0 时会继续读，直接返回 0 会死循环）。
- * 4. **计费包含 skip**。跳过的字节同样消耗额度，否则可以跳过整个文件再读 1 字节绕过限额。
+ * 1. 关掉之后不再碰底层流。
+ * 2. `available()` 不会返回负数：超限时直接抛异常，后端报了负数也归零。调用方拿到负数容易写出死循环。
+ * 3. 正常读取不会返回 0（除非真的读完）。`readAllBytes()` 这类方法遇到 0 会继续读，
+ *    返回 0 就转圈出不来了。所以额度快用完时至少放行 1 个字节，用来判断是不是超限。
+ * 4. `skip` 跳过的字节也算进额度。不然「先跳过整个文件再读 1 个字节」就能绕过限制。
  *
- * **关闭语义**：底层 reader 由 [ReaderHandle] 持有，本类只是它的一层包装。
- * [close] 转调 [ReaderHandle.release]，而同一个句柄也被 [StorageStream.close] 与 Adapter 的排空使用，
- * 三者共用一把闸门，所以「谁先关都行，且恰好释放一次」；正在进行的读取不会被并发释放打断。
+ * 底层文件流由 [ReaderHandle] 持有，本类只是它的一层包装。[close] 会转调 [ReaderHandle.release]，
+ * 所以外层 [StorageStream] 和 [ReaderHandle] 谁先关都行，文件流只会被关一次。
  *
- * [lifetime] 在**每一次** delegate 调用前执行：先取 Adapter 读锁，再取 [ReaderHandle] 闸门，
- * 与 Adapter 排空时的「写锁 → 闸门」同序。Adapter 因此不会在流还被读时释放 Operator。
- *
- * 例：`StorageInputStream(handle, limitBytes = 8, lifetime = lifetime)`，读到第 9 个字节抛 `LIMIT_EXCEEDED`。
+ * 每次读之前都先经过 [lifetime]：这样存储正在关闭时，本次读取不会和关闭撞在一起。
  */
 internal class StorageInputStream(
     private val handle: ReaderHandle,
@@ -79,10 +74,10 @@ internal class StorageInputStream(
     }
 
     /**
-     * 跳过的字节同样计费。
+     * 跳过一些字节，跳过的也算进额度。
      *
-     * 负 `count` 抛 `IllegalArgumentException`，这是对 `InputStream.skip`「负数返回 0」宽松契约的**有意偏离**：
-     * 限额流里「负数静默成功」会让调用方以为跳过了内容，实际一个字节都没跳，计费与实际位置脱节。
+     * `count` 为负数时报 `IllegalArgumentException`。`InputStream.skip` 原本允许负数返回 0，
+     * 这里故意不同：调用方以为跳过了内容、实际一个字节没跳，额度就和实际位置对不上了。
      */
     override fun skip(count: Long): Long {
         require(count >= 0) { "skip count must not be negative: $count" }
@@ -100,24 +95,22 @@ internal class StorageInputStream(
         return if (available > remaining()) remaining().toInt() else available
     }
 
-    /** `mark` / `reset` 会让「已读取量」失去意义，直接不支持。 */
+    /** 不支持 `mark` / `reset`：回退之后「已经读了多少」就说不清了，限额没法算。 */
     override fun markSupported(): Boolean = false
 
-    /**
-     * 幂等。`LIMIT_FAILED` 也必须走到这里：超限后流已经不可用，但仍需释放它持有的 native reader。
-     */
+    /** 关闭底层流，只能生效一次；已经超限时也要走这里，否则文件句柄会漏掉。 */
     override fun close() {
         if (state == State.CLOSED) return
         state = State.CLOSED
-        // 先置 CLOSED 再关：即使释放抛错，本流也已经不可用，重试 close 是幂等空操作。
-        // 不经过 lifetime：Adapter 先关时这里也必须能正常释放或空转，见 ReaderHandle 的 Kdoc。
+        // 先标记已关闭再关：万一关闭失败，再调一次也不会有别的动作。
+        // 不经过 lifetime：外层存储已经关闭时，这里也要能正常关掉或者什么都不做。
         mapStorageErrors("close read stream") { handle.release() }
     }
 
     /**
-     * 每次 native 调用都先经 [NativeLifetime.call] 再经 [mapStorageErrors]：
-     * 前者保证与 Adapter 关闭互斥，后者把后端异常转成 `STORAGE_ERROR` 且保留 `cause`。
-     * 公开消息只说「读流的哪一步失败」，不拼接物理路径或后端原始响应。
+     * 先经过 [NativeLifetime.call] 再经过 [mapStorageErrors]：
+     * 前者避免和关闭撞车，后者把后端异常转成 `STORAGE_ERROR` 并保留 `cause`。
+     * 错误消息只说读流的哪一步失败，不带磁盘路径或后端原文。
      */
     private fun <T> mapped(
         operation: String,
@@ -138,10 +131,8 @@ internal class StorageInputStream(
     }
 
     /**
-     * 记账并在**越界的那一次读取上立即抛错**。
-     *
-     * 不延迟到下一次调用：否则调用方会先拿到超出额度的那个字节，再在下一次读取才知道超限。
-     * 状态先置 [State.LIMIT_FAILED] 再抛，抛完之后 [close] 仍是唯一能释放句柄的路径。
+     * 记账；超了就在**这一次读取上**立刻抛错，不拖到下一次。
+     * 拖到下一次的话，调用方会先拿到超出额度的那个字节才被告知超限。
      */
     private fun charge(count: Long) {
         consumed += count
@@ -157,7 +148,7 @@ internal class StorageInputStream(
 
     private fun remaining(): Long = (limitBytes ?: Long.MAX_VALUE) - consumed
 
-    /** 额度不足时只多读 1 字节用于判定超限：永远不会把整个文件读进内存。 */
+    /** 额度快用完时只多要 1 个字节来判断超限，不会把整个文件读进内存。 */
     private fun requestLimit(length: Int): Int {
         val limit = limitBytes ?: return length
         val remaining = remaining()
@@ -167,8 +158,8 @@ internal class StorageInputStream(
     }
 
     /**
-     * `length > buffer.size - offset` 写法而不是 `offset + length > buffer.size`：后者在 offset + length
-     * 溢出时会被绕过，正是把负 length 递进 native 的入口。
+     * 用 `length > buffer.size - offset` 判断，而不是 `offset + length > buffer.size`：
+     * 后者在相加溢出时会漏判，负数就会一路传到后端去。
      */
     private fun requireRange(
         offset: Int,

@@ -7,19 +7,21 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 
 /**
- * 挂载根内的相对路径到物理文件的定位与符号链接闸门（T12 §2.2）。
+ * 把挂载根内的相对路径变成磁盘上的真实文件，并在每一级做安全检查。
  *
- * 只用 JDK 本地路径 API 做**路径检查**：文件访问仍然走 OpenDAL。
- * [StoragePath] 已拒绝 `/`、`\`、`.`、`..` 等段内非法字符，所以逐段 `resolve` 不会逃出根目录。
+ * 例：`root = /data/reports`、路径 `ct/a.dcm` → `/data/reports/ct/a.dcm`。
+ *
+ * 只用 JDK 的路径接口做检查，真正的读写仍然交给 OpenDAL。[StoragePath] 已经拒绝
+ * `/`、`\`、`.`、`..` 这些字符，所以逐层拼接不会跑出根目录。
  */
 internal object LocalPath {
     /**
-     * 逐级定位物理路径，并在每一级做两项检查：
+     * 逐层拼出真实路径，每层检查两件事：
      *
-     * 1. 该级是符号链接 → `STORAGE_ACCESS_DENIED`，**不跟随**，不修改链接目标；
-     * 2. 该级是中间组件且已存在但不是目录 → `TYPE_MISMATCH`（可确认的文件 / 目录类型冲突）。
+     * 1. 这一层是符号链接（快捷方式）→ 报 `STORAGE_ACCESS_DENIED`，不跟过去，也不改它指向的文件；
+     * 2. 这一层是中间目录但实际是个文件 → 报 `TYPE_MISMATCH`。
      *
-     * 错误消息只给组件序号，不含物理路径与路径段名称。
+     * 错误消息只说第几层出问题，不告诉调用方磁盘路径。
      */
     fun resolve(
         root: Path,

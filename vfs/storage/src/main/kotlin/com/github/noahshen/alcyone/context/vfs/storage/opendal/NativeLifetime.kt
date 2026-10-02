@@ -6,23 +6,21 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantReadWriteLock
 
 /**
- * Adapter 生命周期守卫（T12 R1）：把「Operator 还可用」与「释放 Operator」变成互斥。
+ * 保证「存储还能用」和「把存储关掉」不会同时发生。
  *
- * 为什么不能只用一个布尔标志：实测 OpenDAL 0.50.6 在 Operator 关闭后调用 `stat` 直接 SIGSEGV，
- * 所以「检查通过」和「真正使用」之间必须有锁——本类用一把读写锁表达这件事：
+ * 为什么不用一个布尔标志：OpenDAL 的 [org.apache.opendal.Operator] 一旦关闭，
+ * 再拿它做任何操作都会让 JVM 直接崩溃。所以必须用锁把「先检查、后使用」框起来：
  *
- * - 存储操作与每次流读取持**读锁**：已经进入的操作做完，[close] 才能拿到写锁释放 Operator；释放后不再有操作进入。
- * - [close] 持**写锁**：等进行中的操作收尾，然后幂等释放。
+ * - [call]：每个存储操作都拿读锁。已经在进行的操作会先做完。
+ * - [close]：拿写锁，等所有操作收尾，然后关闭 [org.apache.opendal.Operator]。
  *
- * 例：线程 A 正在 `stat`，线程 B 调 [close]，B 会等到 A 的 `stat` 返回。
+ * 例：线程 A 正在读文件，线程 B 调 [close]，B 会一直等到 A 读完。
  *
- * **可重入**：读锁本身可重入，同一线程可以嵌套 `call { call { … } }`——JDK 对排队中的写者有专门放行分支，
- * 不会自锁。所以不存在「嵌套取读锁会死锁」，**不要**为了规避并不存在的风险去绕开 [call]。
- * 真正不可行的是**持读锁再升级写锁**：同一线程先拿读锁、再要写锁会死锁（本类没有任何这种用法）。
+ * **警告：不要在任何存储操作内部调用 [close]** —— 那等于拿着读锁去等写锁，会死锁。
  *
- * **取舍**：阻塞的 native 调用期间 [close] 会短暂阻塞，这是有意为之——本任务不要求 native 调用
- * 可被即时中断（阻塞调用本来就不响应协程取消），而错误的「立即释放」会直接崩 JVM。
- * 因此**不要**在任何存储操作内部调用 [close]：那会拿写锁去等自己持有的读锁。
+ * [call] 可以嵌套调用自己（同一线程重复拿读锁是安全的），但**读锁不能升级成写锁**。
+ *
+ * [close] 会等在进行的操作做完，这是有意的：宁可多等一下，也不要强杀正在用的句柄。
  * 停机超时策略由 T18 / T27 承接，本轮不做。
  */
 internal class NativeLifetime(
@@ -31,7 +29,7 @@ internal class NativeLifetime(
     private val lock = ReentrantReadWriteLock()
     private val closed = AtomicBoolean(false)
 
-    /** 执行一次 native 操作；Adapter 已关闭时抛 `CLOSED`，不进 native。可重入。 */
+    /** 执行一次存储操作；已关闭时抛 `CLOSED`，不进入操作本身。 */
     fun <T> call(block: () -> T): T {
         lock.readLock().lock()
         try {
@@ -42,7 +40,7 @@ internal class NativeLifetime(
         }
     }
 
-    /** 幂等；等待进行中的操作结束后才真正释放。 */
+    /** 关闭，只能生效一次；会等在进行的操作结束。 */
     fun close() {
         lock.writeLock().lock()
         try {

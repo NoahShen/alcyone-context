@@ -7,33 +7,28 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * 一个 native reader 的**唯一所有者**，自带释放闸门（T12 R1）。
+ * 存放一个还没读完的文件流，并保证它只被关闭一次。
  *
- * 之前是「谁后拿到谁负责关」，结果出现空档：`StorageStream` 把 reader 交给 `StorageInputStream` 之后
- * 就不再持有它，于是关谁都不释放——实测 `readerCloseCalls = 0`，Operator 释放也不会连带释放 reader。
+ * 场景：调用方拿到 [StorageInputStream] 之后只关闭了外层的 [StorageStream]，
+ * 底层这个流也必须跟着关掉，否则文件句柄会一直被占着。
  *
- * 现在三处入口（[StorageInputStream] 的读与关、[StorageStream.close]、[LocalFsStorage.close] 的排空）
- * 都走同一个句柄，闸门保证：
- *
- * 1. **恰好释放一次**：[release] 幂等，谁先到谁关，后到的都是空操作。
- * 2. **读与关互斥**：[read] 与 [release] 抢同一把锁，正在进行的读取返回之后才可能释放，
- *    不会出现「close 进入时 read 还没返回」。
- * 3. **释放不依赖 Adapter 生命周期**：闸门是 reader 自己的，不看 [NativeLifetime]。
- *    所以 Adapter 先关时，调用方后续 `close()` 仍然是合法的幂等空操作，不会被 `CLOSED` 挡住。
- *
- * **锁顺序**：`NativeLifetime` 锁 → 本闸门。Adapter 的排空持写锁再取本闸门，与读取路径同序，
- * 不会互相死锁。
+ * 三条约定：
+ * 1. 关闭是幂等的。谁先调用 [release] 谁关，后面再调用没有效果。
+ * 2. 正在读的时候不关闭。[read] 和 [release] 用同一把锁排队，
+ *    正在进行的读取结束后才轮到关闭。
+ * 3. 它不看 [NativeLifetime]。锁是自己的，所以外层存储已经关闭时，
+ *    调用方再关闭流依然是合法的空操作。
  */
 internal class ReaderHandle(
-    /** 后端创建的 native reader；只有持有闸门时才允许触碰。 */
+    /** OpenDAL 创建的文件流。只有拿到下面的锁才能碰它。 */
     val native: InputStream,
-    /** 首次释放后的回调，用来把它从 Adapter 的登记表里摘掉。 */
+    /** 关闭之后回调，用来把它从 [LocalFsStorage] 的待关闭列表里摘掉。 */
     private val onReleased: (ReaderHandle) -> Unit = {},
 ) {
     private val gate = ReentrantLock()
     private var released = false
 
-    /** 持闸门执行一次读取。已释放则抛 `CLOSED`，不碰 native。 */
+    /** 排队执行一次读取；已经关闭就直接报 `CLOSED`，不碰底层。 */
     fun <T> read(block: () -> T): T =
         gate.withLock {
             if (released) throw VfsException(VfsErrorCode.CLOSED, "local storage read stream is closed")
@@ -41,9 +36,10 @@ internal class ReaderHandle(
         }
 
     /**
-     * 幂等：第一次真正关掉 native 并回调，之后是空操作。抛出的异常由调用方映射。
+     * 关闭底层文件流，只能生效一次。
      *
-     * `native.close()` 刻意留在闸门内：正在进行的读取必须先返回，才可能走到这里。
+     * 关闭动作刻意留在锁里面，这样「读取还没返回就关掉了」不会发生。
+     * 抛出的异常由调用方转成 VFS 错误码。
      */
     fun release() {
         gate.lock()

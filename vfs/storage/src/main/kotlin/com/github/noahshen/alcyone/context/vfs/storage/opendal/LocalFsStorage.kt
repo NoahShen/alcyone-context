@@ -23,85 +23,55 @@ import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Core Storage Port 的首个真实实现：OpenDAL Local FS（T12）。
+ * 把 VFS 的文件操作落到本地磁盘上，底层用 Apache OpenDAL。
  *
- * 用法：挂载根 `data/reports` + 相对路径 `a.txt` → 物理文件 `<root>/a.txt`。
- * Adapter 只做「物理读写 + 物理边界」，不生成 Node ID、不写 Event、不碰 SQLite。
+ * 例：挂载根是 `data/reports`、路径是 `a.txt`，那么实际动的就是 `data/reports/a.txt` 这个文件。
+ * 它只管读写磁盘，不生成 Node ID、不写事件、不碰数据库。
  *
- * 后端差异（T04 §5 + 本轮在 macOS arm64 实测确认）：
+ * OpenDAL 的默认行为和 VFS 的要求对不上，所以每个操作前都自己先查一遍：
  *
- * | 后端行为 | 本 Adapter 的适配 |
- * | --- | --- |
- * | `write` 自动补父目录 | 写前先 `stat` 父级，缺失即 NOT_FOUND，Storage 不隐式建目录 |
- * | `rename` 覆盖已有目标 | 写前先 `stat` 目标，存在即 ALREADY_EXISTS |
- * | 删除不存在的路径返回成功 | 删前先 `stat`，缺失即 NOT_FOUND |
- * | 删除非空目录返回 `Unexpected`（os error 66） | 删前列举子项，非空即 DIRECTORY_NOT_EMPTY |
- * | 目录 `rename` 返回 `IsADirectory` | 直接判为 UNSUPPORTED_OPERATION，且 `nativeDirectoryMove = false` |
- * | `list` 把目录自身也放进结果 | 过滤自身条目，只保留相对单段名字 |
- * | `list` 不带尾斜杠时只返回自身 | 目录路径统一补尾斜杠 |
- * | `fs` 不支持 range read | 有界读取改为「包装流 + 按实际读取计数」，不依赖 `stat` 大小 |
- * | Operator 关闭后继续使用会让 JVM 崩溃 | 每次存储操作与每次流读取都持 [NativeLifetime] 读锁，与释放互斥 |
+ * - 写文件、改名时目标已存在 → 报 `ALREADY_EXISTS`（OpenDAL 本来会直接覆盖）。
+ * - 上级目录不存在 → 报 `NOT_FOUND`（OpenDAL 本来会顺手建出来）。
+ * - 要删的东西不存在 → 报 `NOT_FOUND`（OpenDAL 本来会当成功）。
+ * - 删非空目录 → 报 `DIRECTORY_NOT_EMPTY`（OpenDAL 只会报一个看不懂的 `Unexpected`）。
+ * - 改目录名 → 报 `UNSUPPORTED_OPERATION`（OpenDAL 只会报 `IsADirectory`）。
+ * - 列举目录时会多返回它自己 → 过滤掉；目录路径统一带上结尾的 `/`，否则后端只会返回它自己。
+ * - 后端不能只读文件的一段，所以限量读取靠 [StorageInputStream] 数着实际读了多少。
+ * - **Operator 一旦关闭再使用会让 JVM 崩溃**，所以每个操作都经 [NativeLifetime] 加锁。
  *
- * 已知限制见 `docs/tasks/m2-t12/T12_使用说明.md`：不抵御「检查后外部进程替换路径」的竞争，
- * 不防护硬链接与不可识别的别名，阻塞 native 调用不能被协程取消即时中断。
+ * 已知限制见 `docs/tasks/m2-t12/T12_使用说明.md`。
  */
 class LocalFsStorage private constructor(
     private val operator: Operator,
-    /** 规范化后的物理根（已消解符号链接）。 */
+    /** 挂载根，已把符号链接换成它指向的真实目录。 */
     val root: Path,
     private val options: LocalFsOptions,
     private val capabilities: StorageCapabilities,
-    /**
-     * 为一个相对路径打开 native reader。生产固定走 `operator.createInputStream`。
-     *
-     * 存在的唯一理由是让测试能在**不碰 native** 的前提下拿到 [LocalFsStream]，直接断言它到底
-     * 释放没释放那个流句柄：OpenDAL 的 reader 泄漏不会让后续读取失败，“还能读”恒真，证明不了任何事。
-     */
+    /** 打开文件流。生产固定用 OpenDAL；留成参数是为了测试能换成计数用的替身流。 */
     private val readerFactory: (String) -> InputStream = { path -> operator.createInputStream(path) },
-    /**
-     * 为一个相对路径取元数据。生产固定走 `operator.stat`。
-     *
-     * 与 [readerFactory] 同款的测试缝隙：effect 分阶段的断言必须能精确地让**某一次** `stat` 失败，
-     * 而不能用 [onNativeCall]——它在 `mapStorageErrors` 之前抛，异常不会被映射，测不到阶段差别。
-     */
+    /** 查文件信息。生产固定用 OpenDAL；留成参数是为了测试能让其中一次查询失败。 */
     private val statFactory: (String) -> Metadata = { path -> operator.stat(path) },
-    /**
-     * 测试专用可观测点，收到 [storageCall] 的操作名。生产恒为 `null`。
-     *
-     * 阻塞调用是否离开调用方线程、以及「资源已取得但交回前被取消」这两个窗口都发生在
-     * [storageCall] 的 `withContext` 边界上，别处没有能挂上去的点。构造参数注入而不是全局变量：
-     * 测试之间不会互相污染，并发跑也不会互相踩。
-     */
+    /** 测试用的观察点，每次进入 [storageCall] 会被叫一次。生产恒为 `null`。 */
     private val onNativeCall: ((String) -> Unit)?,
 ) : Storage,
     AutoCloseable {
-    /**
-     * 「Operator 还可用」与「释放 Operator」互斥：所有存储操作取读锁，[close] 取写锁。
-     * 已进入的操作做完才释放，释放后不再有操作进入——这是唯一能挡住 SIGSEGV 的办法。
-     */
+    /** 防止「一边操作一边关闭」。 */
     private val lifetime =
         NativeLifetime {
-            // 排空必须发生在**写锁内、Operator 释放之前**：这样 reader 一定在 Operator 还活着时被关闭，
-            // 不会去操作一个已 dispose 的 Operator。写锁同时保证没有读取正在使用这些 reader。
+            // 顺序很重要：先关掉所有还开着的文件流，再关 Operator。
+            // 这样文件流一定是在 Operator 还有效的时候关掉的，不会去操作一个已经销毁的 Operator。
             drainReaders()
             operator.close()
         }
 
-    /**
-     * 尚未释放的 reader 登记表。
-     *
-     * 实测 Operator 释放**不会**连带释放 reader，所以每个建出来的 reader 都必须登记；
-     * 首次释放时由 [ReaderHandle] 的回调摘除。Adapter 关闭时在写锁内排空，调用方之后再关流是幂等空操作。
-     */
+    /** 已经打开、但还没关闭的文件流。关闭存储时要把它们都关掉。 */
     private val liveReaders = ConcurrentHashMap.newKeySet<ReaderHandle>()
 
     companion object {
         /**
-         * 打开一个 Local FS Storage。物理根必须**已存在**且是目录，否则 `INVALID_ARGUMENT`。
+         * 打开一个本地磁盘存储。挂载根必须已经存在且是个目录，否则报 `INVALID_ARGUMENT`。
          *
          * 例：`LocalFsStorage.create(Path.of("/data/reports"))`。
-         *
-         * [handoffOrRelease] 保证「Operator 已建好、但协程在交回结果前被取消」时它仍被释放。
          */
         suspend fun create(
             root: Path,
@@ -109,13 +79,8 @@ class LocalFsStorage private constructor(
         ): LocalFsStorage = open(root, options)
 
         /**
-         * 内部入口：可替换 Operator 工厂与 reader 工厂。
-         *
-         * 两个工厂都只为测试存在：OpenDAL 的 Operator 与 reader 都不是可注入的接口，
-         * 而「交接失败时到底释没释放」这种断言必须看**实际对象**的关闭次数——
-         * 「之后还能打开」这种间接证据对 Operator 泄漏恒真（已实测）。
-         *
-         * [readerFactory] 放在最后，调用方可以用尾随 lambda 写。
+         * 测试用的入口，可以把打开 Operator、打开文件流、查文件信息这几步换成自己的实现。
+         * 生产代码请用 [create]。
          */
         internal suspend fun open(
             root: Path,
@@ -151,10 +116,10 @@ class LocalFsStorage private constructor(
         }
 
         /**
-         * 创建 Operator 本身就是 native 调用（[Operator.of] 会加载并打开后端），
-         * 所以它必须在 [storageCall] 的 IO 执行环境里，而不是由 `create` 在调用方线程上直接开。
+         * 打开 OpenDAL 后端。它是阻塞调用，所以由调用方放进 [storageCall] 里执行。
          *
-         * 不用 [storageCall] 包自己，而是交给调用方套：只有这样 `opened = …` 的登记才在同一个 IO 块内完成。
+         * 之所以不自己套 [storageCall]：只有这样「记住已打开的 Operator」这一行
+         * 才和打开动作在同一个后台任务里，取消时才能关掉它。
          */
         private fun openOperatorInBlock(root: Path): Operator =
             Operator.of(
@@ -165,11 +130,10 @@ class LocalFsStorage private constructor(
             )
 
         /**
-         * 能力值按**实际适配效果**给，不按后端声明照抄。
+         * 声明这个存储支持哪些操作。宁可报少也不要多报：后端说支持不代表这里能用。
          *
-         * 目录移动恒为 `false`：fs 的目录 rename 返回 `IsADirectory`（T04 实测 + 本轮复测），
-         * 复制删除回退留给 T20～T22。`readOnly` 也恒为 `false`：一次权限检查不能承诺以后总能写入，
-         * 可写目录挂只读盘的情况由真实写失败暴露（映射为 STORAGE_ACCESS_DENIED）。
+         * `nativeDirectoryMove` 恒为 `false`：后端改目录名会返回 `IsADirectory`。
+         * `readOnly` 恒为 `false`：权限随时可能变，写失败时自然会给调用方报错。
          */
         private fun capabilitiesOf(operator: Operator): StorageCapabilities {
             val capability = operator.info.capability
@@ -183,19 +147,17 @@ class LocalFsStorage private constructor(
         }
     }
 
-    /** 幂等；等在进行中的操作和流读取收尾后才释放 native 句柄；关闭后任何新调用抛 `CLOSED`。 */
+    /** 关闭存储。会等在进行的操作做完；关过之后再调用任何方法都报 `CLOSED`。 */
     override fun close() = lifetime.close()
 
     fun isClosed(): Boolean = lifetime.isClosed()
 
-    /** 内部诊断：native 句柄是否已释放。用来区分「文件可删」与「Operator 确实关闭」。 */
+    /** 内部诊断用：Operator 是不是真的关掉了。不能拿「文件还能删」当证据。 */
     internal fun nativeHandleDisposed(): Boolean = operator.isDisposed
 
     /**
-     * 有意的例外：**不**取 [NativeLifetime] 读锁。
-     *
-     * 能力值是打开后端时算好的不可变快照，不触碰任何 native 句柄，所以「Adapter 已关闭」对它没有意义。
-     * 取读锁反而会让「`close()` 正在等某个慢操作」时，纯读的能力查询也被一起挡住。
+     * 返回能力值。存的是打开时就定好的常量，不碰后端，所以这里故意不加锁，
+     * 关闭之后也能查——否则一次慢操作就能把能力查询一起堵住。
      */
     override fun capabilities(): StorageCapabilities = capabilities
 
@@ -217,7 +179,7 @@ class LocalFsStorage private constructor(
         if (attributes.type == NodeType.DIRECTORY) throw VfsException(VfsErrorCode.TYPE_MISMATCH, "read target is a directory")
         return call("read") {
             lifetime.call {
-                // 后端不支持 range read，只能边读边计数；StorageInputStream 保证内存不超过 maxBytes + 1 字节。
+                // 后端不能只读一段，所以边读边数；内存最多多占 1 个字节。
                 StorageInputStream(newReader(plain(path)), maxBytes, lifetime).use { bounded ->
                     StorageContent(bounded.readAllBytes(), attributes)
                 }
@@ -226,14 +188,11 @@ class LocalFsStorage private constructor(
     }
 
     /**
-     * 返回的流**只能打开一次**，由调用方关闭；每个流独立计数。
+     * 打开文件流，调用方用完自己关闭。同一个流只能打开一次，要重读就再调一次本方法。
      *
-     * 底层 native 句柄的**唯一所有者**是返回的 [StorageStream]：[LocalFsStream.openStream] 之后
-     * [LocalFsStream.close] 不再经手，[StorageInputStream.close] 负责关掉它。因此「流没打开就关 Adapter」
-     * 不会泄漏——那一份 native 句柄仍由 [LocalFsStream.close] 在读锁内释放。
-     *
-     * 关闭顺序：先关流、再关 Adapter 最自然，但反过来也安全。已打开的流与 `close` 争用写锁时，
-     * 一次读取要么做完、要么抛 `CLOSED`，不会释放在读中的句柄。
+     * 关流的顺序没有要求，两种都行：
+     * - 先关流再关存储：一切正常。
+     * - 先关存储：存储关闭时会把还开着的文件流都关掉，之后再关流是空操作，不报错。
      */
     override suspend fun readStream(
         path: StoragePath,
@@ -243,7 +202,7 @@ class LocalFsStorage private constructor(
         if (maxBytes != null && maxBytes < 0) throw VfsException(VfsErrorCode.INVALID_ARGUMENT, "maxBytes must not be negative")
         val attributes = precheckForRead(path)
         if (attributes.type == NodeType.DIRECTORY) throw VfsException(VfsErrorCode.TYPE_MISMATCH, "read target is a directory")
-        // 与 create 同一模式：native reader 在 IO 块内取得，交给调用方之前被取消则在这里释放。
+        // 文件流在后台任务里打开。万一交到调用方手上之前协程被取消，就在这里关掉。
         var opened: StorageStream? = null
         return handoffOrRelease(release = { opened?.close() }) {
             call("open read stream") {
@@ -260,14 +219,14 @@ class LocalFsStorage private constructor(
         }
     }
 
-    /** 建一个 reader 并登记：它随后要么被流释放，要么被 [drainReaders] 排空，不会漏。 */
+    /** 打开文件流并记进 [liveReaders]，保证关闭存储时不会漏掉它。 */
     private fun newReader(backendPath: String): ReaderHandle {
         val handle = ReaderHandle(readerFactory(backendPath)) { liveReaders.remove(it) }
         liveReaders += handle
         return handle
     }
 
-    /** 在写锁内释放所有未释放的 reader（由 [lifetime] 的 release 回调调用）。 */
+    /** 把所有还开着的文件流都关掉。由 [lifetime] 在关闭存储时调用。 */
     private fun drainReaders() {
         liveReaders.forEach { handle ->
             mapStorageErrors("close read stream") { handle.release() }
@@ -276,9 +235,10 @@ class LocalFsStorage private constructor(
     }
 
     /**
-     * 限额在任何存储副作用之前判断；不截断，也不「先写再报错」。
+     * 写文件。超限在动手写之前就拒绝，不会写一半再报错。
      *
-     * 模式预检用 `stat` 实现，**不是原子操作**；CREATE_NEW 另外使用后端 `if_not_exists` 条件写兜底。
+     * 三个模式靠提前查文件信息来判断，这一步**不是原子的**：查完之后到真正写入之前，
+     * 别的进程可能已经改了文件。所以 `CREATE_NEW` 还额外用了后端的「不存在才写」条件来兜底。
      */
     override suspend fun write(
         path: StoragePath,
@@ -293,7 +253,7 @@ class LocalFsStorage private constructor(
             )
         }
         // effect 按**阶段**给，不按方法给。
-        // 阶段一（预检）：路径闸门、父目录、模式判定，一个字节都没写 → 失败一律 NONE。
+        // 第一步：先检查，一个字节都还没写。这时失败就是「什么都没做」。
         call("write", VfsEffect.NONE) {
             lifetime.call {
                 LocalPath.resolve(root, path.segments)
@@ -315,7 +275,7 @@ class LocalFsStorage private constructor(
                 }
             }
         }
-        // 阶段二（写入）：调用后端后无法断定文件是否已创建或截断 → UNKNOWN。
+        // 第二步：动手写。写失败时分不清文件是没建还是建了一半，所以只能说「结果不明」。
         call("write content", VfsEffect.UNKNOWN) {
             lifetime.call {
                 if (mode == StorageWriteMode.CREATE_NEW && conditionalCreateAvailable) {
@@ -325,20 +285,20 @@ class LocalFsStorage private constructor(
                 }
             }
         }
-        // 阶段三（回读属性）：写入已成功，读不回来不再是「什么都没做」→ PARTIAL。
+        // 第三步：再查一次文件信息确认。写入已经成功了，读不到就说「已经改了东西」。
         return call("write attributes", VfsEffect.PARTIAL) {
             lifetime.call { statOrFail(plain(path), "write") }
         }
     }
 
     /**
-     * 目录已存在视为成功；父目录由后端逐级创建（与 Core 的 StorageFakeImpl 一致）。
+     * 建目录。已经存在就算成功；上级目录不存在时后端会一层层补出来。
      *
-     * effect：预检失败 → `NONE`（什么都没建）；进入 `operator.createDir` 后失败 → `UNKNOWN`
-     * （后端会逐级补目录，失败时无法断定建到了哪一层）。
+     * 检查阶段失败是「什么都没建」；进了后端再失败就是「结果不明」——
+     * 后端会自己补目录，失败时说不清建到了哪一层。
      */
     override suspend fun createDirectory(path: StoragePath) {
-        // 挂载根本身没有可新建的目录，但「已关闭」仍然必须先报：不能因为是根就绕开生命周期检查。
+        // 挂载根本身不用建，但「已关闭」还是要照报。
         if (path.isRoot) return lifetime.call { }
         val existing =
             call("create directory", VfsEffect.NONE) {
@@ -358,13 +318,13 @@ class LocalFsStorage private constructor(
         }
     }
 
-    /** 目录移动不覆盖，且不由本 Adapter 兜底：T04 实测目录 rename 返回 `IsADirectory`。 */
+    /** 改名 / 移动。目标已存在就报错，不覆盖；改目录名不支持（后端只会返回 `IsADirectory`）。 */
     override suspend fun move(
         source: StoragePath,
         target: StoragePath,
     ): StorageAttributes {
         if (source.isRoot || target.isRoot) throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "cannot move the mount root")
-        // 阶段一（预检）：两端路径闸门、源类型、目标是否已存在、目标父目录 → 失败 NONE。
+        // 第一步：检查两端路径、源是什么、目标在不在、上级目录在不在。
         call("move", VfsEffect.NONE) {
             lifetime.call {
                 LocalPath.resolve(root, source.segments)
@@ -379,21 +339,21 @@ class LocalFsStorage private constructor(
                 requireExistingParentDirectory(target)
             }
         }
-        // 阶段二（改名）：调用后无法断定是否已改名 → UNKNOWN。
+        // 第二步：真正改名。失败时分不清改了没改，所以只能说「结果不明」。
         call("move content", VfsEffect.UNKNOWN) {
             lifetime.call { operator.rename(plain(source), plain(target)) }
         }
-        // 阶段三（回读属性）：改名已成功 → PARTIAL。
+        // 第三步：再查一次目标确认。改名已经成功了，读不到就说「已经改了东西」。
         return call("move attributes", VfsEffect.PARTIAL) {
             lifetime.call { statOrFail(plain(target), "move") }
         }
     }
 
     /**
-     * 非递归删除非空目录 → `DIRECTORY_NOT_EMPTY`；缺失 → `NOT_FOUND`。
+     * 删除文件或目录。不存在报 `NOT_FOUND`；目录不递归删时里面还有东西报 `DIRECTORY_NOT_EMPTY`。
      *
-     * 递归删除先规划整棵子树（此时拒绝符号链接，一个字节都没删），再自底向上删除；
-     * 中途失败时 effect 由**已成功删除的条目数**推导：有就 `PARTIAL`，没有就 `NONE`。
+     * 递归删分两步：先把整棵子树的删除顺序排好（这一步遇到符号链接就停，一个字节都还没删），
+     * 再从最深的往上删。中途失败时，已经删掉几个就报 `PARTIAL`，一个没删掉就报 `NONE`。
      */
     override suspend fun delete(
         path: StoragePath,
@@ -412,17 +372,17 @@ class LocalFsStorage private constructor(
                     }
                     operator.delete(dirPath(path))
                 } else {
-                    // 规划阶段先走完整棵子树（此时拒绝符号链接，一个字节都没删），再按最深在前执行。
+                    // 先走完整棵子树排出删除顺序，此时还没删任何东西。
                     val plan = mutableListOf<Pair<StoragePath, NodeType>>()
                     collectForDeletion(path, plan)
                     plan += path to NodeType.DIRECTORY
                     var removed = 0
                     plan.forEach { (target, type) ->
                         mapStorageErrors("delete", if (removed == 0) VfsEffect.NONE else VfsEffect.PARTIAL) {
-                            // 目录要带尾斜杠：不带时后端按文件删除，空目录也会失败（实测 Unexpected）。
+                            // 目录必须带结尾的 /，否则后端会当成文件去删，空目录也会失败。
                             operator.delete(if (type == NodeType.DIRECTORY) dirPath(target) else plain(target))
                         }
-                        // 证据：已成功删除的条目数。effect 由这个事实推导，而不是「大概是第一条吧」。
+                        // 已经删掉几个是唯一的事实依据，效果就按它来定。
                         removed++
                     }
                 }
@@ -443,20 +403,20 @@ class LocalFsStorage private constructor(
             }
         }
 
-    /** 后端是否支持条件创建（`if_not_exists`）；不支持时 CREATE_NEW 只靠预检。 */
+    /** 后端支不支持「不存在才写」。不支持的话，CREATE_NEW 只能靠提前查。 */
     private val conditionalCreateAvailable: Boolean = operator.info.capability.writeWithIfNotExists
 
-    /** 所有存储调用的唯一入口：上 IO 调度器、带错误映射，并带上本实例的 [onNativeCall] 观测点。 */
+    /** 每个存储操作都从这里走：换到后台线程、把异常翻译成 VFS 错误码。 */
     private suspend fun <T> call(
         operation: String,
         effect: VfsEffect = VfsEffect.NONE,
         block: () -> T,
     ): T = storageCall(operation, effect, onNativeCall, block)
 
-    /** 文件 / 通用路径：根是空串。 */
+    /** 交给后端的文件路径。 */
     private fun plain(path: StoragePath): String = path.toRelativeString()
 
-    /** 目录路径必须带尾斜杠：不带时后端只把目录自身当作列举结果。 */
+    /** 交给后端的目录路径，必须带结尾的 `/`，否则后端只认得出它自己。 */
     private fun dirPath(path: StoragePath): String = if (path.isRoot) "/" else "${path.toRelativeString()}/"
 
     private fun metadataOrNull(backendPath: String): Metadata? =
@@ -473,7 +433,7 @@ class LocalFsStorage private constructor(
         metadataOrNull(backendPath)?.let { attributesOf(it) }
             ?: throw VfsException(VfsErrorCode.NOT_FOUND, "local storage $operation target does not exist")
 
-    /** 后端写了但读不出元数据属于后端异常，不再猜类型。 */
+    /** 查文件类型。后端说不上来是什么就报错，不猜。 */
     private fun typeOf(metadata: Metadata): NodeType =
         when (metadata.mode) {
             Metadata.EntryMode.FILE -> NodeType.FILE
@@ -488,7 +448,7 @@ class LocalFsStorage private constructor(
             modifiedAt = metadata.lastModified,
         )
 
-    /** 父目录必须已存在：Storage 不隐式为 write / move 补父目录（补齐属 Core 编排，T15）。 */
+    /** 上级目录必须已经存在。这里不替调用方补目录，补目录是上层的事（T15）。 */
     private fun requireExistingParentDirectory(path: StoragePath) {
         val parent = metadataOrNull(plain(path.parent)) ?: throw VfsException(VfsErrorCode.NOT_FOUND, "parent directory does not exist")
         if (typeOf(parent) == NodeType.FILE) {
@@ -497,14 +457,10 @@ class LocalFsStorage private constructor(
     }
 
     /**
-     * 读取前的闸门：拒绝符号链接与中间组件类型冲突，再取目标元数据。
+     * 读文件前的检查：拒绝符号链接和「拿文件当前目录」的情况，然后查出文件信息。
      *
-     * 两层都必要：
-     *
-     * - [LocalPath.resolve] 走 JDK 本地路径 API，不碰 native，但 [Files] 也会阻塞，所以整体在
-     *   [storageCall] 的 IO 执行环境里跑——否则阻塞的 `stat` / `isSymbolicLink` 会占用调用方线程。
-     * - 只有 `stat` 需要 [lifetime] 读锁，而且闸门刻意放在长读的读锁**之外**：
-     *   IO 往返不占用读锁、不挡住 `close`，同时保证 `read` / `readStream` 两条路径的边界规则完全一致。
+     * 查磁盘这一步也是阻塞的，所以放在后台线程里，否则会把调用方的线程占住。
+     * 它刻意放在长时间读文件的锁外面，免得一次慢查询挡住关闭操作。
      */
     private suspend fun precheckForRead(path: StoragePath): StorageAttributes =
         call("read precheck") {
@@ -513,19 +469,13 @@ class LocalFsStorage private constructor(
         }
 
     /**
-     * 单层列举：过滤后端放进结果的目录自身，只保留相对单段名字，并对每个条目做符号链接检查。
+     * 列出一个目录里的东西。只列一层，不含目录自己和更深层，顺序不保证。
      *
-     * 物理目录会额外核对一遍，因为 `fs` 后端对每个条目做 `stat`，**悬空符号链接 `stat` 失败就被静默跳过**。
-     * 只遍历后端条目的话，“先规划后删除”的拒绝保证会失效：普通文件已被删完才报 `STORAGE_ERROR`。
-     * 核对规则（物理目录里有、但后端没返回的条目）：
+     * 还要用 JDK 直接读一遍磁盘做核对，因为后端列举时会跳过「指向已删除文件的符号链接」，
+     * 只看后端的返回结果会以为目录是干净的。
      *
-     * - 是符号链接 → `STORAGE_ACCESS_DENIED`，与可见链接同一处理；
-     * - 不是符号链接 → `STORAGE_ERROR`，两边不一致但不猜原因。
-     *
-     * 内容访问仍然全部走 OpenDAL；这里只用 JDK 读目录项，不重写后端。
-     *
-     * @param refuseSymbolicLinks 非递归删除只需要知道「是否为空」，因此它把链接当普通内容算“非空”；
-     *   但后端隐藏的条目仍参与“是否为空”的判断，否则含悬空链接的目录会被误判为空。
+     * @param refuseSymbolicLinks `false` 时表示「只想知道目录是不是空的」，符号链接按普通内容算，
+     *   遇到就报 `DIRECTORY_NOT_EMPTY` 而不是拒绝访问。
      */
     private fun listChildren(
         path: StoragePath,
@@ -543,7 +493,7 @@ class LocalFsStorage private constructor(
             }
             reported += name
             if (refuseSymbolicLinks) {
-                // 列举条目里的符号链接同样不跟随（T12 §2.2）。
+                // 列出来的符号链接也不跟过去。
                 LocalPath.resolve(root, path.resolve(name).segments)
             }
             val attributes = attributesOf(entry.metadata)
@@ -554,11 +504,9 @@ class LocalFsStorage private constructor(
     }
 
     /**
-     * 物理目录里存在、后端没返回的条目（悬空符号链接等）→ 拒绝。
+     * 磁盘上有、后端没返回的东西，直接拒绝。
      *
-     * 必须在任何破坏性操作之前做完：`delete` 先走完规划阶段再动手，所以这里的抛出发生在“一个字节都没删”时。
-     * @param refuseSymbolicLinks `false` 时（非递归删除只关心是否为空）不报链接拒绝，而是算作「非空」，
-     *   保持 [VfsErrorCode.DIRECTORY_NOT_EMPTY] 语义。
+     * 一定发生在删东西之前：删除是先排好顺序再动手，所以报错时一个文件都还没删。
      */
     private fun refuseHiddenEntries(
         physical: Path,
@@ -571,27 +519,27 @@ class LocalFsStorage private constructor(
                 val name = child.fileName.toString()
                 if (name in reported) continue
                 if (!refuseSymbolicLinks) {
-                    // 非递归删除只需要知道「是否为空」，所以不可见条目一律算非空。
+                    // 非递归删除只需要知道「是否为空」，所以看不到的条目一律算非空。
                     throw VfsException(VfsErrorCode.DIRECTORY_NOT_EMPTY, "directory is not empty")
                 }
                 if (Files.isSymbolicLink(child)) {
                     throw VfsException(VfsErrorCode.STORAGE_ACCESS_DENIED, "symbolic links are not followed")
                 }
-                // 不是链接却只有本地看得到：后端与本地对不上，不猜原因。
+                // 不是符号链接却只有本地看得到：两边对不上，不猜原因。
                 throw VfsException(VfsErrorCode.STORAGE_ERROR, "local storage listing is inconsistent with the physical directory")
             }
         }
     }
 
-    /** 递归删除的规划阶段：只读取和校验，不删除，因此遇到符号链接时副作用为零。结果是后序（最深在前）。 */
+    /** 把要删的条目按「最深的先删」排好。这一步只看不删，所以遇到符号链接时不会有任何改动。 */
     private fun collectForDeletion(
         path: StoragePath,
         plan: MutableList<Pair<StoragePath, NodeType>>,
     ) {
         for (entry in listChildren(path)) {
-            // listChildren 已对每个子项做过完整闸门（含路径解析与隐藏条目核对），不再重复。
+            // 上面已经对每个子项检查过了，这里不用重复。
             val child = path.resolve(entry.name)
-            // 后序遍历：先删子树再删自己，保证每一步目标都是空的。
+            // 先把里面的删完再删自己，保证每一步目标都是空的。
             if (entry.type == NodeType.DIRECTORY) {
                 collectForDeletion(child, plan)
             }
@@ -600,18 +548,14 @@ class LocalFsStorage private constructor(
     }
 
     /**
-     * 单次打开的流：重复打开报状态错误，关闭后打开报 CLOSED。
+     * 一个只能打开一次的读文件流。
      *
-     * **关闭语义**：reader 由 [ReaderHandle] 持有，本类与 [StorageInputStream] 都不是所有者，
-     * 只是两个都可以触发释放的入口，而 [ReaderHandle] 的闸门保证**恰好释放一次**。
+     * 文件流实际由 [ReaderHandle] 保管，本类和 [StorageInputStream] 都只是能触发关闭的入口，
+     * 所以谁先关都行，而且只会关一次。三种顺序的结果：
      *
-     * 三种关闭顺序的确定结果：
-     *
-     * 1. 先关流、再关 Adapter：`openStream()` 的返回值或本类的 `close()` 释放 reader；
-     *    Adapter 关闭时登记表已空，排空是空操作。
-     * 2. Adapter 先关：写锁内先排空释放全部 reader，再释放 Operator——reader 一定在 Operator 还活着时关闭。
-     *    之后调用方再 `close()` 是**幂等空操作，不报错也不泄漏**。
-     * 3. 流没打开就关 Adapter：reader 同样由排空释放；本类的 `close()` 之后是空操作。
+     * 1. 先关流：正常关掉。
+     * 2. 先关存储：存储关闭时会把还开着的文件流都关掉，之后再关这个流是空操作，不报错。
+     * 3. 还没打开就关存储：一样由存储关掉，之后再关也是空操作。
      */
     private inner class LocalFsStream(
         override val attributes: StorageAttributes,
@@ -632,7 +576,7 @@ class LocalFsStorage private constructor(
         override fun close() {
             if (finished) return
             finished = true
-            // 不经过 lifetime：Adapter 已关闭时这仍必须能释放或空转，否则 reader 就漏了。
+            // 不经过 lifetime：存储已经关闭时，这里也要能正常关掉或者什么都不做。
             mapStorageErrors("close read stream") { handle.release() }
         }
     }

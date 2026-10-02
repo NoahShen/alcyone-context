@@ -12,15 +12,18 @@ import java.nio.file.AccessDeniedException
 import java.nio.file.NoSuchFileException
 
 /*
- * 同步阻塞调用的 IO 执行环境与错误映射（T12 §2.5）。与 T11 的 stateCall 同思路，但错误码是 Storage 自己一套。
+ * 本地存储的错误转换：把 OpenDAL 的报错翻译成 VFS 的错误码。
  *
- * 公开消息只说明「哪个本地存储操作失败了」，不拼接物理路径、凭据或后端原始响应；原始异常挂在 cause 上。
+ * 错误消息只说「哪个操作失败了」，不带磁盘路径或后端原文；后端异常挂在 cause 上。
  */
 
-/** 在 IO 调度器上执行一次阻塞的存储调用。
+/**
+ * 在后台线程上执行一次存储操作，并把异常翻译成 VFS 错误码。
  *
- * [onEnter] 是测试专用可观测点，生产恒为 `null`：阻塞调用是否离开调用方线程、以及
- * 「资源已取得但交回前被取消」这两个窗口都发生在 [withContext] 边界上，别处看不见。
+ * 操作本身是阻塞的（比如读磁盘），所以必须挪到 [Dispatchers.IO]，
+ * 否则会把调用方的线程占住。
+ *
+ * [onEnter] 只给测试用，生产恒为 `null`。
  */
 internal suspend fun <T> storageCall(
     operation: String,
@@ -34,21 +37,18 @@ internal suspend fun <T> storageCall(
     }
 
 /**
- * 堵上「资源已取得、但还没交给调用方」的取消窗口（T12 R2）。
+ * 打开文件流这类操作，如果中途被取消，必须把已经打开的东西关掉。
  *
- * 资源在 IO 执行块里创建（[storageCall] 有 prompt cancellation：块跑完、切回时若协程已取消就抛
- * [CancellationException]），而块内的 `try/catch` 接不住这个异常——它抛在块外。
- * 于是调用方拿不到资源，块内的 catch 也不会执行，native 句柄就泄漏了。
+ * 场景：已经打开了文件，正准备返回给调用方，这时协程被取消了。
+ * 调用方拿不到这个文件流，如果没人关它，文件句柄就一直被占着。
  *
- * 做法：块内把取得的资源登记到**外层可见**的变量（[release] 读它），外层捕获取消后释放并原样重抛。
- * 与 `vfs/persistence` 的 `SqliteUnitOfWork` 是同一个模式。
+ * 做法：块内把打开结果记到外面能看到的变量里（[release] 会用到它），
+ * 块外捕获取消异常，关掉之后再原样抛出去。和 `vfs/persistence` 里的 `SqliteUnitOfWork` 同一个写法。
  *
- * 登记必须发生在 [storageCall] 的 IO 块**内部**：块成功返回、切回时若已取消，[withContext] 抛的异常
- * 会吃掉块的返回值，块内登记的变量却已经写好了，所以释放路径拿得到资源。
+ * 记变量的动作要写在 [storageCall] 的块里面：块跑完、切回时如果协程已取消，
+ * 返回值会被丢掉，但块里记的变量已经写好了，所以关得到。
  *
- * 清理失败只 [Throwable.addSuppressed]，不覆盖原始取消异常。
- *
- * 例：`create` 里 `Operator.of` 成功但协程在返回前被取消 → `release` 关掉 Operator，调用方仍然只看到取消。
+ * 关闭失败只记到 [Throwable.addSuppressed]，不会盖掉原来的取消异常。
  */
 internal suspend fun <T> handoffOrRelease(
     release: () -> Unit,
@@ -66,8 +66,9 @@ internal suspend fun <T> handoffOrRelease(
     }
 
 /**
- * 不吞异常、不猜原因：[CancellationException] 与已经是 VFS 契约的异常原样传播，
- * 其余按 [OpenDALException.Code] 与 JDK I/O 异常映射到 [VfsErrorCode]。
+ * 把底层异常翻译成 [VfsException]。
+ *
+ * 取消异常和已经翻译好的 VFS 异常原样抛出，其余按错误码对照表转换。
  */
 internal fun <T> mapStorageErrors(
     operation: String,
@@ -91,11 +92,10 @@ internal fun <T> mapStorageErrors(
     }
 
 /**
- * OpenDAL 错误码到 VFS 错误码的映射。
+ * OpenDAL 错误码到 VFS 错误码的对照（OpenDAL 0.50.6 / fs / macOS arm64 实测）。
  *
- * 实测事实（OpenDAL 0.50.6 / fs / macOS arm64）：`ConditionNotMatch` 是 `if_not_exists` 条件写命中已存在文件；
- * 目录 rename 返回 `IsADirectory`（本 Adapter 先自行判定并报 UNSUPPORTED_OPERATION，这里只是兜底）；
- * 删除非空目录返回 `Unexpected`，因此非空判断由 Adapter 先列举完成。
+ * 注意 `IsADirectory` 和「删除非空目录返回 `Unexpected`」这两条：
+ * [LocalFsStorage] 会自己先判断并给出更准确的错误码，这里只是兜底。
  */
 private fun openDalCode(error: OpenDALException): VfsErrorCode =
     when (error.code) {
