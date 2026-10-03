@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
@@ -23,6 +24,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 
 /**
  * A01 补充：把「检查」与「释放」互斥化的行为证据（T12 R1）。
@@ -443,5 +445,140 @@ class LocalFsStorageLifetimeTest {
 
             assertFalse(delivered.get(), "取消后调用方不能拿到成功结果")
             assertEquals(1, reader.closeCalls, "交接取消与 Adapter 关闭重合时仍恰好释放一次")
+        }
+}
+
+/**
+ * 关停时一个文件流关不掉，其余资源仍然必须被清理（T12 R7）。
+ *
+ * 场景：调用方同时开着三个文件流，关 Adapter 时其中一个关失败。
+ * 正确的行为是三个都试一次、Operator 也照关，然后把错误抛回去。
+ */
+@Timeout(60)
+class LocalFsDrainFailureTest {
+    @TempDir
+    lateinit var tempDir: Path
+
+    /** 纯 JVM 对象，不碰 native。`closeFailure` 非空时 `close()` 抛 [IOException]。 */
+    private class FailingOnClose(
+        private val label: String,
+        private val closeFailure: IOException?,
+    ) : InputStream() {
+        private val source = ByteArrayInputStream(label.toByteArray())
+
+        var closeCalls = 0
+            private set
+
+        override fun read(): Int = source.read()
+
+        override fun read(
+            buffer: ByteArray,
+            offset: Int,
+            length: Int,
+        ): Int = source.read(buffer, offset, length)
+
+        override fun close() {
+            closeCalls++
+            closeFailure?.let { throw it }
+        }
+    }
+
+    /** 按后端路径给出不同替身：同一个 Adapter 上的三个文件流，其中哪些关得掉由参数决定。 */
+    private suspend fun openStorage(
+        readers: Map<String, FailingOnClose>,
+        onOperator: (org.apache.opendal.Operator) -> Unit = {},
+    ) = LocalFsStorage.open(
+        root,
+        LocalFsOptions(),
+        operatorFactory = { path ->
+            org.apache.opendal.Operator
+                .of(
+                    org.apache.opendal.ServiceConfig
+                        .Fs
+                        .builder()
+                        .root(path.toString())
+                        .build(),
+                ).also(onOperator)
+        },
+        readerFactory = { _ -> { path -> readers.getValue(path) } },
+    )
+
+    private lateinit var root: Path
+
+    @Test
+    fun `a reader that fails to close does not strand the others or the operator`() =
+        runBlocking {
+            root = Files.createDirectory(tempDir.resolve("root"))
+            Files.writeString(root.resolve("a.txt"), "a")
+            Files.writeString(root.resolve("b.txt"), "b")
+            Files.writeString(root.resolve("c.txt"), "c")
+
+            val boom = IOException("b.txt cannot be closed")
+            val readers =
+                mapOf(
+                    "a.txt" to FailingOnClose("a", null),
+                    "b.txt" to FailingOnClose("b", boom),
+                    "c.txt" to FailingOnClose("c", null),
+                )
+            var operator: org.apache.opendal.Operator? = null
+            val storage = openStorage(readers) { operator = it }
+
+            // 三个流都保持打开（不关），这样它们会一起进入关停时的排空。
+            storage.readStream(StoragePath.parse("a.txt"))
+            storage.readStream(StoragePath.parse("b.txt"))
+            storage.readStream(StoragePath.parse("c.txt"))
+
+            val failure = assertFailsWith<VfsException> { storage.close() }
+
+            // 三个文件流都获得了一次关闭尝试：关不掉的那个也不能把另外两个跳过。
+            readers.values.forEach { reader ->
+                assertEquals(1, reader.closeCalls, "每个文件流都要试一次，不因前一个失败而跳过")
+            }
+            assertTrue(operator!!.isDisposed, "排空失败也不能跳过 Operator 的关闭")
+
+            // 失败要如实报给调用方，并保留原始异常。
+            assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
+            assertSame(boom, failure.cause, "原始 IOException 挂在 cause 上，不能被吞掉")
+
+            // 重调 close 是幂等空操作：已处理过的资源不重复释放，也不重复抛。
+            storage.close()
+            readers.values.forEach { reader -> assertEquals(1, reader.closeCalls, "重调 close 不重复释放") }
+        }
+
+    /** 多个文件流都关失败时，第一个失败当主异常，其余挂在 suppressed 上，一个都不吞。 */
+    @Test
+    fun `when several readers fail the first failure stays primary and the rest are suppressed`() =
+        runBlocking {
+            root = Files.createDirectory(tempDir.resolve("root"))
+            Files.writeString(root.resolve("a.txt"), "a")
+            Files.writeString(root.resolve("b.txt"), "b")
+
+            val first = IOException("a.txt cannot be closed")
+            val second = IOException("b.txt cannot be closed")
+            val readers =
+                mapOf(
+                    "a.txt" to FailingOnClose("a", first),
+                    "b.txt" to FailingOnClose("b", second),
+                )
+            var operator: org.apache.opendal.Operator? = null
+            val storage = openStorage(readers) { operator = it }
+
+            // 两个流都保持打开（不关），关停时会一起被排空。
+            storage.readStream(StoragePath.parse("a.txt"))
+            storage.readStream(StoragePath.parse("b.txt"))
+
+            val failure = assertFailsWith<VfsException> { storage.close() }
+
+            // 排空顺序不保证，所以只断言「两个失败都在、都报告了」，不指定哪个当主异常。
+            val mainCause = failure.cause
+            assertTrue(mainCause === first || mainCause === second, "主异常是两者之一，实际：$mainCause")
+            val other = if (mainCause === first) second else first
+            assertEquals(
+                1,
+                failure.suppressed.count { it.cause === other },
+                "另一个失败挂在 suppressed 上，没有被丢弃或覆盖",
+            )
+            assertTrue(operator!!.isDisposed, "两个都失败时 Operator 仍然要关")
+            readers.values.forEach { reader -> assertEquals(1, reader.closeCalls) }
         }
 }

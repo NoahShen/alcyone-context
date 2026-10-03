@@ -55,13 +55,30 @@ class LocalFsStorage private constructor(
     private val onNativeCall: ((String) -> Unit)?,
 ) : Storage,
     AutoCloseable {
-    /** 防止「一边操作一边关闭」。 */
+    /**
+     * 防止「一边操作一边关闭」。
+     *
+     * 释放分三步，**顺序不能变**：先把还开着的文件流尽量关掉，再关 Operator，最后统一报错。
+     *
+     * 例：调用方同时开着三个文件流，关 Adapter 时其中一个关失败。
+     * 那就三个都试一次、Operator 也照关，然后把错误抛回去——
+     * 不能因为第一个关失败就冒出去，那样另外两个文件句柄和整个 Operator 都会漏掉。
+     * `close()` 本身幂等：重调一次是空操作，不会重新释放。
+     */
     private val lifetime =
         NativeLifetime {
-            // 顺序很重要：先关掉所有还开着的文件流，再关 Operator。
-            // 这样文件流一定是在 Operator 还有效的时候关掉的，不会去操作一个已经销毁的 Operator。
-            drainReaders()
-            operator.close()
+            val failures = mutableListOf<Throwable>()
+            drainReaders(failures)
+            try {
+                operator.close()
+            } catch (e: Throwable) {
+                failures += e
+            }
+            // 第一个失败当主异常（调用方先遇到的就是它），其余挂在 suppressed 上，一个都不吞。
+            failures.firstOrNull()?.let { first ->
+                failures.drop(1).forEach(first::addSuppressed)
+                throw first
+            }
         }
 
     /** 已经打开、但还没关闭的文件流。关闭存储时要把它们都关掉。 */
@@ -227,13 +244,36 @@ class LocalFsStorage private constructor(
         return handle
     }
 
-    /** 把所有还开着的文件流都关掉。由 [lifetime] 在关闭存储时调用。 */
-    private fun drainReaders() {
-        liveReaders.forEach { handle ->
-            mapStorageErrors("close read stream") { handle.release() }
+    /**
+     * 尽量把所有还开着的文件流都关掉，关不掉的记进 [failures]，**不中断其余**。
+     *
+     * 场景：三个文件流里有一个关的时候后端报错。正确的做法是三个都试一次，
+     * 而不是关掉第一个就冒出去——那样另外两个文件句柄会一直被占着。
+     * 由 [lifetime] 在关闭存储时调用。
+     */
+    private fun drainReaders(failures: MutableList<Throwable>) {
+        // 先取快照：关流时会把自身从 liveReaders 摘掉，边遍历边改容易漏。
+        for (handle in liveReaders.toList()) {
+            try {
+                handle.release()
+            } catch (e: Throwable) {
+                failures += storageCleanupFailure(e)
+            }
         }
         liveReaders.clear()
     }
+
+    /**
+     * 把清理失败翻译成 VFS 错误码（原始异常挂在 `cause` 上）；翻译不了就保留原异常。
+     *
+     * 这一步自身也不能抛：它正在关停途中，弄不好会让后面的资源跟着漏掉。
+     */
+    private fun storageCleanupFailure(cause: Throwable): Throwable =
+        try {
+            mapStorageErrors("close read stream") { throw cause }
+        } catch (mapped: Throwable) {
+            mapped
+        }
 
     /**
      * 写文件。超限在动手写之前就拒绝，不会写一半再报错。
