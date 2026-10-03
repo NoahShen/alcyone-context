@@ -1,5 +1,13 @@
 # AGENTS.md
 
+## 本次修改（2026-10-03，T13 任务入口）
+
+- 新增阅读顺序第 17 条 [T13 Node Registry 与懒注册开发及验收](docs/tasks/m2-t13/T13_NodeRegistry与懒注册开发及验收.md)：Core 查询与注册、虚拟目录、竞争复用、共享串行边界及真实组件验证。任务 TODO，待开发 Agent 实现，当前基线 363 个测试；本轮仅准备任务文档。
+
+## 本次修改（2026-10-03，38394d1 R7 复核通过，T12 DONE）
+
+- T12 的 38394d1 R7 修复通过独立复核，R1～R7 全部关闭，**T12 DONE**，363 个正式测试通过。更新阅读顺序第 16 条与开发验证说明；T13 前置依赖满足，可以开始，本轮不开展实现。
+
 ## 本次修改（2026-10-03，dad329c 收口复核）
 
 - dad329c 原 R1～R6 已确认，新增 R7 清理异常路径待修；独立 361 个正式测试通过，T12 保持 IN_REVIEW，不开始 T13。涉及阅读顺序第 16 条与开发验证说明，见 [复核第 9 节](docs/tasks/m2-t12/T12_架构与技术复核.md#9-dad329c-收口复核2026-10-03)。
@@ -192,7 +200,9 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 15. [T11 SQLDelight Schema、Repository、事务与数据库生命周期开发及验收](docs/tasks/m2-t11/T11_SQLDelight存储事务与生命周期开发及验收.md)：状态库四表 Schema 与唯一约束、Repository 与事务实现、生命周期与迁移及 A01～A07 验收；当前 **DONE**（修复 `6fe4878` / `d5b33f8` 第二轮独立复核通过，R1～R4 关闭），227 个测试全绿，模块为 `vfs/persistence`；详见同目录 [使用说明](docs/tasks/m2-t11/T11_使用说明.md) 与[验收记录](docs/tasks/m2-t11/T11_验收记录.md)。 **补充 F1～F4 已全部复核关闭，F4 修正提交 `2e35b79`；不自动开始 T12。**
 
-16. [T12 Local FS 存储适配开发及验收](docs/tasks/m2-t12/T12_LocalFS存储适配开发及验收.md)：实现 `vfs/storage` 的 OpenDAL Local FS Adapter，含真实文件操作、物理路径检查、流与限额、能力和错误映射；当前 **IN_REVIEW**，`dad329c` 原 R1～R6 已确认，新增 R7 清理异常路径待修，361 个正式测试通过，详见同目录架构与技术复核。
+16. [T12 Local FS 存储适配开发及验收](docs/tasks/m2-t12/T12_LocalFS存储适配开发及验收.md)：实现 `vfs/storage` 的 OpenDAL Local FS Adapter，含真实文件操作、物理路径检查、流与限额、能力和错误映射；当前 **DONE**，`38394d1` R7 独立复核通过，R1～R7 全部关闭，363 个正式测试通过，详见同目录架构与技术复核第 10 节；可以开始 T13。
+
+17. [T13 Node Registry 与懒注册开发及验收](docs/tasks/m2-t13/T13_NodeRegistry与懒注册开发及验收.md)：前置 T09～T12 已完成，当前 **TODO，任务已安排**；实现属于 Core，T15 复用查询 / 注册与共享串行边界，真实 SQLite + Local FS 验证放 integration-tests。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
@@ -320,4 +330,4 @@ VfsUri / 参数校验 → VfsPath → Mount / StoragePath → 存储约束检查
 - 正常关闭后重启可读取已提交的 SQLite 状态，不要求修复中断操作，事件对应成功变更，Consumer 失败不影响已完成操作。
 - 通过 Runtime 组合真实 SQLite 与 Local FS / WebDAV 的集成行为。
 
-T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前 `common` / `vfs/api` / `vfs/core` / `vfs/persistence` 共 227 个单元测试通过（T11 交付后，180 → 227，其中 `vfs/persistence` 47 个）；T06 的 R1～R5 边界复核与完整构建均通过。状态库已实现并用真实 SQLite 验证；Local FS Adapter 已交付，原 R1～R6 已确认但新增 R7 待修，storage 134 个正式测试，总基线 361。Runtime 编排与 SDK 入口尚未实现，不得声称 SDK 文件操作已验收。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。
+T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前 `common` / `vfs/api` / `vfs/core` / `vfs/persistence` 共 227 个单元测试通过（T11 交付后，180 → 227，其中 `vfs/persistence` 47 个）；T06 的 R1～R5 边界复核与完整构建均通过。状态库已实现并用真实 SQLite 验证；Local FS Adapter 已独立验收通过（T12 DONE，38394d1，R1～R7 全部关闭），storage 136 个正式测试，总基线 363。Runtime 编排与 SDK 入口尚未实现，不得声称 SDK 文件操作已验收。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。
