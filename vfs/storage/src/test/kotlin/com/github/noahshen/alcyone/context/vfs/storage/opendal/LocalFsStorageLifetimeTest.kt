@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayInputStream
 import java.io.InputStream
@@ -28,7 +29,10 @@ import kotlin.test.assertFailsWith
  *
  * 竞争用**单线程 + 显式闩锁**编排，不靠压力重试碰运气：一个线程顺序地做「开始读 → 放行 close →
  * 让读收尾」，close 必须被读锁挡住而不是把句柄从读操作脚下抽走。
+ *
+ * [Timeout]：这类用例靠放行信号推进，哪一步等不到就会挂死整个套件；超时把它变成一次失败。
  */
+@Timeout(60)
 class LocalFsStorageLifetimeTest {
     @TempDir
     lateinit var tempDir: Path

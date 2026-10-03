@@ -65,9 +65,12 @@ internal class StorageInputStream(
         offset: Int,
         length: Int,
     ): Int {
-        // 先校验入参：负 length 传进 native 流的行为未定义，可能直接崩 JVM。
+        // 先校验入参：负 length 传进后端的行为没定义，可能直接让 JVM 崩掉。
         requireRange(offset, length, buffer)
         beforeRead("read")
+        // 要 0 个字节就直接回 0，不去问后端。后端对 length = 0 会回 -1（它当自己读完了），
+        // 那是它的内部判断，不该顺着传出去：有界和无界两种流在这里必须一致。
+        if (length == 0) return 0
         val read = mapped("read stream") { handle.read { handle.native.read(buffer, offset, requestLimit(length)) } }
         if (read > 0) charge(read.toLong())
         return read

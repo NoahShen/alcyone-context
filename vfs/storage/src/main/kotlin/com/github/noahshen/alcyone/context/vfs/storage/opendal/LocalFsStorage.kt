@@ -90,10 +90,11 @@ class LocalFsStorage private constructor(
             statFactory: (Operator) -> (String) -> Metadata = { operator -> { path -> operator.stat(path) } },
             onNativeCall: ((String) -> Unit)? = null,
         ): LocalFsStorage {
-            val realRoot = LocalFsRoots.normalize(root)
             var opened: Operator? = null
             return handoffOrRelease(release = { opened?.close() }) {
                 storageCall("open adapter", onEnter = onNativeCall) {
+                    // 检查根目录也要读磁盘，所以放在同一个后台任务里，不占调用方的线程。
+                    val realRoot = LocalFsRoots.normalize(root)
                     val operator = operatorFactory(realRoot)
                     opened = operator
                     try {
@@ -287,7 +288,7 @@ class LocalFsStorage private constructor(
         }
         // 第三步：再查一次文件信息确认。写入已经成功了，读不到就说「已经改了东西」。
         return call("write attributes", VfsEffect.PARTIAL) {
-            lifetime.call { statOrFail(plain(path), "write") }
+            afterChange { lifetime.call { statOrFail(plain(path), "write", VfsEffect.PARTIAL) } }
         }
     }
 
@@ -345,7 +346,7 @@ class LocalFsStorage private constructor(
         }
         // 第三步：再查一次目标确认。改名已经成功了，读不到就说「已经改了东西」。
         return call("move attributes", VfsEffect.PARTIAL) {
-            lifetime.call { statOrFail(plain(target), "move") }
+            afterChange { lifetime.call { statOrFail(plain(target), "move", VfsEffect.PARTIAL) } }
         }
     }
 
@@ -353,7 +354,9 @@ class LocalFsStorage private constructor(
      * 删除文件或目录。不存在报 `NOT_FOUND`；目录不递归删时里面还有东西报 `DIRECTORY_NOT_EMPTY`。
      *
      * 递归删分两步：先把整棵子树的删除顺序排好（这一步遇到符号链接就停，一个字节都还没删），
-     * 再从最深的往上删。中途失败时，已经删掉几个就报 `PARTIAL`，一个没删掉就报 `NONE`。
+     * 再从最深的往上删。中途失败时，已经删掉过几个就报 `PARTIAL`，一项都还没删掉成功就报 `UNKNOWN`——
+     * 不是 `NONE`：一次 `delete` 调用报了错，那个条目仍有可能已经不在了（「删成功了但回包丢了」），
+     * 从失败点证明不了「什么都没删」。
      */
     override suspend fun delete(
         path: StoragePath,
@@ -378,11 +381,15 @@ class LocalFsStorage private constructor(
                     plan += path to NodeType.DIRECTORY
                     var removed = 0
                     plan.forEach { (target, type) ->
-                        mapStorageErrors("delete", if (removed == 0) VfsEffect.NONE else VfsEffect.PARTIAL) {
+                        // 第一项失败时不能说「什么都没删」：一次 delete 调用报了错，条目仍有可能已经不在了
+                        // （本地磁盘正常，别的后端上删除可能成功了但回包丢了）。所以从保守的 UNKNOWN 开始，
+                        // 不拿「它是第一项」当「失败前无副作用」的证据。
+                        // 已经删掉过几个之后就是确定的部分变更，报 PARTIAL。
+                        mapStorageErrors("delete", if (removed == 0) VfsEffect.UNKNOWN else VfsEffect.PARTIAL) {
                             // 目录必须带结尾的 /，否则后端会当成文件去删，空目录也会失败。
                             operator.delete(if (type == NodeType.DIRECTORY) dirPath(target) else plain(target))
                         }
-                        // 已经删掉几个是唯一的事实依据，效果就按它来定。
+                        // 已经删掉几个是唯一确定的事实，效果就按它来定。
                         removed++
                     }
                 }
@@ -426,24 +433,63 @@ class LocalFsStorage private constructor(
             if (e.code == OpenDALException.Code.NotFound) null else throw e
         }
 
+    /**
+     * 已经改动成功之后的收尾步骤（比如写完之后再查一次文件信息）。
+     *
+     * 这一步不管怎么失败，都已经改过东西了，所以 [VfsEffect] 至少是 [VfsEffect.PARTIAL]。
+     * 外面那层 [mapStorageErrors] 不会替已经是 [VfsException] 的异常补 effect，
+     * 这里把还带着 `NONE` 的重新标一次。
+     */
+    private fun <T> afterChange(block: () -> T): T =
+        try {
+            block()
+        } catch (e: VfsException) {
+            if (e.effect != VfsEffect.NONE) throw e
+            throw VfsException(
+                e.code,
+                e.message ?: e.code.name,
+                e.uri,
+                e.operationId,
+                VfsEffect.PARTIAL,
+            ).apply { e.cause?.let { initCause(it) } }
+        }
+
+    /**
+     * 查文件信息，查不到就报 `NOT_FOUND`。
+     *
+     * [effect]：这一步失败时到底有没有改动，取决于调用方。
+     * 检查阶段传 `NONE`；改动已经成功之后传 `PARTIAL`，不然「文件已经写进去了」这个事实就丢了
+     * （[mapStorageErrors] 对已经是 [VfsException] 的异常是原样抛出的，不会补 effect）。
+     */
     private fun statOrFail(
         backendPath: String,
         operation: String,
+        effect: VfsEffect = VfsEffect.NONE,
     ): StorageAttributes =
-        metadataOrNull(backendPath)?.let { attributesOf(it) }
-            ?: throw VfsException(VfsErrorCode.NOT_FOUND, "local storage $operation target does not exist")
+        metadataOrNull(backendPath)?.let { attributesOf(it, effect) }
+            ?: throw VfsException(VfsErrorCode.NOT_FOUND, "local storage $operation target does not exist", effect = effect)
 
     /** 查文件类型。后端说不上来是什么就报错，不猜。 */
-    private fun typeOf(metadata: Metadata): NodeType =
+    private fun typeOf(
+        metadata: Metadata,
+        effect: VfsEffect = VfsEffect.NONE,
+    ): NodeType =
         when (metadata.mode) {
             Metadata.EntryMode.FILE -> NodeType.FILE
             Metadata.EntryMode.DIR -> NodeType.DIRECTORY
-            Metadata.EntryMode.UNKNOWN -> throw VfsException(VfsErrorCode.STORAGE_ERROR, "local storage returned an unknown entry type")
+            Metadata.EntryMode.UNKNOWN -> throw VfsException(
+                VfsErrorCode.STORAGE_ERROR,
+                "local storage returned an unknown entry type",
+                effect = effect,
+            )
         }
 
-    private fun attributesOf(metadata: Metadata): StorageAttributes =
+    private fun attributesOf(
+        metadata: Metadata,
+        effect: VfsEffect = VfsEffect.NONE,
+    ): StorageAttributes =
         StorageAttributes(
-            type = typeOf(metadata),
+            type = typeOf(metadata, effect),
             sizeBytes = if (metadata.mode == Metadata.EntryMode.FILE) metadata.contentLength else null,
             modifiedAt = metadata.lastModified,
         )

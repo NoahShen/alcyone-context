@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayInputStream
 import java.io.InputStream
@@ -37,7 +38,10 @@ import kotlin.test.assertNotNull
  * - 线程归属用**线程名捕获**（调用方线程有专属名字），不靠「跑得慢所以在别处」。
  * - 句柄释放用**计数替身**，替身不碰 native，断言与 OpenDAL 内部行为无关。
  * - 取消窗口用 [nativeCallHook] 暂停 IO 块内的 continuation，确定性地停在「资源已取得、结果还没交回」那一刻。
+ *
+ * [Timeout]：这里用闩锁和独立线程编排时序，万一哪次等不到放行就挂死整个套件；超时把它变成一次失败。
  */
+@Timeout(60)
 class LocalFsExecutionContextTest {
     @TempDir
     lateinit var tempDir: Path
