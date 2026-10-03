@@ -7,6 +7,7 @@ import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
+import org.junit.jupiter.api.AfterEach
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
@@ -44,3 +45,31 @@ class EventRecorder(
         return received.toList()
     }
 }
+
+/**
+ * 测试里造的通知器都登记在这里，测试方法结束后统一关掉。
+ *
+ * 为什么要多这一层：用例自己写 `notifier.close()` 时，**断言先失败就跳过了关闭**，
+ * 分发协程会活到测试进程退出（还可能在别的用例里继续送事件）。@AfterEach 保证失败路径也收干净。
+ */
+class TrackedNotifiers {
+    private val created = CopyOnWriteArrayList<AsyncEventNotifier>()
+
+    fun create(capacity: Int = AsyncEventNotifier.DEFAULT_CAPACITY): AsyncEventNotifier =
+        AsyncEventNotifier(capacity).also { created.add(it) }
+
+    @AfterEach
+    fun closeAll() {
+        created.forEach { it.close() }
+        created.clear()
+    }
+}
+
+/**
+ * 「末尾标记」：失败事务之后发的探针事件。
+ *
+ * 等它到达 = 等到分发链把队列处理到了这里；因为是同一条 FIFO 链，在它之前入队的
+ * （包括本该被拒绝的失败事务那条）一定已经先被处理过。这是「没有通知」这类断言的依据，不靠延时。
+ */
+fun sentinelEvent(name: String = "sentinel"): VfsEvent =
+    testRecord(VfsEventType.FILE_CREATED, VfsUri.parse("alcyone://resources/$name.txt")).toVfsEvent()

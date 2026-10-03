@@ -29,6 +29,9 @@ import java.util.concurrent.CopyOnWriteArrayList
 /** T14 S1：状态与事件同事务、提交成功才通知。内存替身管分支，真实 SQLite 的原子性放集成测试。 */
 @Timeout(60)
 class EventPipelineTest {
+    /** 统一登记 + @AfterEach 关闭：断言失败也不留分发协程。 */
+    private val notifiers = TrackedNotifiers()
+
     private val filePath = VfsPath.parse("/notes/a.txt")
 
     private fun node(name: String = "a.txt") =
@@ -45,7 +48,7 @@ class EventPipelineTest {
     fun `A01 commit publishes exactly the appended events and the state is already committed`() =
         runBlocking {
             val uow = FakeStateUnitOfWork()
-            val notifier = AsyncEventNotifier()
+            val notifier = notifiers.create()
             val committedAtDelivery = CompletableDeferred<Int>()
             val recorder = EventRecorder(2)
             notifier.subscribe { committedAtDelivery.complete(uow.snapshot().third.size) }
@@ -77,8 +80,8 @@ class EventPipelineTest {
                 FakeStateUnitOfWork().apply {
                     failOnEventAppend = FakeStateUnitOfWork.storageFailure("event log write failed")
                 }
-            val notifier = AsyncEventNotifier()
-            val recorder = EventRecorder(1) // 探针：证明分发链路是活的
+            val notifier = notifiers.create()
+            val recorder = EventRecorder(1) // 只等末尾标记
             notifier.subscribe(recorder)
             val pipeline = EventPipeline(StateBoundary(), uow, notifier)
             val record = testRecord()
@@ -93,16 +96,18 @@ class EventPipelineTest {
 
             assertTrue(failure != null, "追加事件失败必须让事务失败")
             assertTrue(uow.snapshot().first.isEmpty(), "同批的 Node 变更一起回滚")
-            notifier.publish(listOf(testRecord(VfsEventType.FILE_CREATED).toVfsEvent()))
-            recorder.await()
-            assertEquals(1, recorder.received.size, "失败的这次事务一个事件都没通知（收到的那条是之后发的探针）")
+            val marker = sentinelEvent()
+            notifier.publish(listOf(marker))
+            recorder.await() // 等到标记 = 队列里排在它前面的都处理完了
+
+            assertEquals(listOf(marker.id), recorder.received.map { it.id }, "失败的这次事务一个事件都没通知")
         }
 
     @Test
     fun `A03 nothing is published while the transaction is still open`() =
         runBlocking {
             val uow = FakeStateUnitOfWork()
-            val notifier = AsyncEventNotifier()
+            val notifier = notifiers.create()
             val probe = EventRecorder(1)
             val pipeline = EventPipeline(StateBoundary(), uow, notifier)
             val record = testRecord()
@@ -147,9 +152,9 @@ class EventPipelineTest {
     fun `A03 a block that fails publishes nothing`() =
         runBlocking {
             val uow = FakeStateUnitOfWork()
-            val notifier = AsyncEventNotifier()
-            val probe = EventRecorder(1)
-            notifier.subscribe(probe)
+            val notifier = notifiers.create()
+            val recorder = EventRecorder(1)
+            notifier.subscribe(recorder)
             val pipeline = EventPipeline(StateBoundary(), uow, notifier)
             val record = testRecord()
 
@@ -165,34 +170,39 @@ class EventPipelineTest {
             assertEquals("storage wrote but the caller gave up", thrown?.message)
             assertTrue(uow.snapshot().first.isEmpty())
             assertTrue(uow.snapshot().third.isEmpty())
-            notifier.publish(listOf(testRecord(VfsEventType.FILE_CREATED).toVfsEvent()))
-            probe.await()
-            assertEquals(1, probe.received.size, "回滚的事务不通知任何 Consumer（收到的那条是之后发的探针）")
+            val marker = sentinelEvent()
+            notifier.publish(listOf(marker))
+            recorder.await()
+
+            assertEquals(listOf(marker.id), recorder.received.map { it.id }, "回滚的事务不通知任何 Consumer")
         }
 
     @Test
     fun `A03 a failed commit publishes nothing`() =
         runBlocking {
             val uow = FakeStateUnitOfWork().apply { failOnCommit = FakeStateUnitOfWork.storageFailure("commit failed") }
-            val notifier = AsyncEventNotifier()
-            val probe = EventRecorder(1)
-            notifier.subscribe(probe)
+            val notifier = notifiers.create()
+            val recorder = EventRecorder(1)
+            notifier.subscribe(recorder)
             val pipeline = EventPipeline(StateBoundary(), uow, notifier)
+            val record = testRecord()
 
-            val thrown = runCatching { pipeline.commit { scope -> scope.events.append(testRecord()) } }.exceptionOrNull()
+            val thrown = runCatching { pipeline.commit { scope -> scope.events.append(record) } }.exceptionOrNull()
 
             assertTrue(thrown != null, "提交失败要照实抛出")
             assertTrue(uow.snapshot().third.isEmpty())
-            notifier.publish(listOf(testRecord(VfsEventType.FILE_CREATED).toVfsEvent()))
-            probe.await()
-            assertEquals(1, probe.received.size, "提交失败不通知")
+            val marker = sentinelEvent()
+            notifier.publish(listOf(marker))
+            recorder.await()
+
+            assertEquals(listOf(marker.id), recorder.received.map { it.id }, "提交失败不通知")
         }
 
     @Test
     fun `A04 a consumer parked on its own work does not delay the commit returning`() =
         runBlocking {
             val uow = FakeStateUnitOfWork()
-            val notifier = AsyncEventNotifier()
+            val notifier = notifiers.create()
             val parked = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Unit>()
             val recorder = EventRecorder(2)
@@ -220,7 +230,7 @@ class EventPipelineTest {
         runBlocking {
             val uow = FakeStateUnitOfWork()
             val boundary = StateBoundary()
-            val pipeline = EventPipeline(boundary, uow, AsyncEventNotifier())
+            val pipeline = EventPipeline(boundary, uow, notifiers.create())
             val heldPath = VfsPath.parse("/notes/held.txt")
             val heldNode = node("held.txt")
             val holderInside = CompletableDeferred<Unit>()
@@ -263,9 +273,9 @@ class EventPipelineTest {
                     boundary,
                 )
             val uow = FakeStateUnitOfWork()
-            val notifier = AsyncEventNotifier()
-            val probe = EventRecorder(1)
-            notifier.subscribe(probe)
+            val notifier = notifiers.create()
+            val recorder = EventRecorder(1)
+            notifier.subscribe(recorder)
             val pipeline = EventPipeline(boundary, uow, notifier)
 
             val registered = registry.resolveOrRegister(VfsPath.parse("/resources/a.txt"))
@@ -274,8 +284,10 @@ class EventPipelineTest {
 
             assertEquals(registered.id, inside.id)
             assertTrue(uow.snapshot().third.isEmpty(), "懒注册和逻辑查询都不产生事件")
-            notifier.publish(listOf(testRecord(VfsEventType.FILE_CREATED).toVfsEvent()))
-            probe.await()
-            assertEquals(1, probe.received.size, "注册本身没有通知任何人（收到的那条是之后发的探针）")
+            val marker = sentinelEvent()
+            notifier.publish(listOf(marker))
+            recorder.await()
+
+            assertEquals(listOf(marker.id), recorder.received.map { it.id }, "注册本身没有通知任何人")
         }
 }

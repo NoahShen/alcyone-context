@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ThreadContextElement
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -15,6 +16,8 @@ import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 
 /**
  * 进程内异步通知：已提交的事件丢进有界队列就算返回，Consumer 由**自己的**分发协程一个个跑。
@@ -24,21 +27,23 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * 它就是「T07 的 [EventDispatcher]（逐个调用 + 异常隔离）+ 一个有界 Channel」：
  *
- * - **有界**：队列满了 [publish] 记一条日志并丢弃，**不抛给发布方**。慢 Consumer 会拖慢通知，
+ * - **有界**：队列满了 [publish] 记一条日志（只记首次，不逐条刷屏）并丢弃，**不抛给发布方**。慢 Consumer 会拖慢通知，
  *   但绝不会把已经提交的文件操作堵住；也不会靠无限缓存把内存撑爆。丢弃不改动已经提交的事件，
  *   事件日志里那条还在（本轮不做补发，补发属 E05）。
  * - **顺序**：一个分发协程、一个 FIFO 队列，所以事件按 [publish] 的先后送达；
  *   同一个事件内，Consumer 按订阅顺序一个个跑。**不保证全局排序**，也不为每个 Consumer 单独排队，
  *   一个慢 Consumer 会让后面的 Consumer 一起等（首版接受，见使用说明）。
- * - **无订阅者**：事件照收照丢，不报错、不缓存。事件日志才是可靠的那一份。
+ * - **无订阅者**：事件照样入队并被分发协程取走丢掉，不报错、也不计入 [droppedEvents]（那不是队列满）。
+ *   分发慢的时候照样受容量约束；晚订阅的 Consumer 可能收到订阅之前入队、还没分发的那一批。
  *
- * @param capacity 队列容量，**必须有界**，默认 [DEFAULT_CAPACITY]。测试用很小的值逼出丢弃行为。
+ * @param capacity 队列容量，**必须是有界的普通正整数**，默认 [DEFAULT_CAPACITY]。`0`（无缓冲）、
+ *   `-1`（新事件覆盖未分发的）、`Int.MAX_VALUE`（无界）都在构造时就被拒绝，测试用很小的值逼出丢弃行为。
  */
 class AsyncEventNotifier(
-    private val capacity: Int = DEFAULT_CAPACITY,
+    capacity: Int = DEFAULT_CAPACITY,
 ) : AutoCloseable {
     private val delegate = EventDispatcher()
-    private val queue = Channel<VfsEvent>(capacity)
+    private val queue = Channel<VfsEvent>(checkedCapacity(capacity))
 
     /** 自己的 Job：不接管宿主的 Scope / Dispatcher，宿主关掉自己的 scope 也不会顺手关掉通知。 */
     private val supervisor = SupervisorJob()
@@ -49,15 +54,15 @@ class AsyncEventNotifier(
 
     private val closed = AtomicBoolean(false)
     private val dropped = AtomicLong()
+    private val capacity = capacity
     private val insideConsumer = ThreadLocal.withInitial { false }
 
     private val logger = LoggerFactory.getLogger(AsyncEventNotifier::class.java)
 
     init {
         job =
-            scope.launch {
+            scope.launch(InsideConsumer(insideConsumer)) {
                 for (event in queue) {
-                    insideConsumer.set(true)
                     try {
                         delegate.dispatch(listOf(event))
                     } catch (cancellation: CancellationException) {
@@ -65,8 +70,6 @@ class AsyncEventNotifier(
                         // 只是某个 Consumer 自己抛了 CancellationException，不能让它把整个通知带走。
                         currentCoroutineContext().ensureActive()
                         logger.warn("A consumer cancelled itself while handling event {}; the notifier keeps running", event.id)
-                    } finally {
-                        insideConsumer.set(false)
                     }
                 }
             }
@@ -81,7 +84,8 @@ class AsyncEventNotifier(
     /**
      * 投递一批**已提交**的事件；只入队，不等 Consumer，队列满就丢。
      *
-     * 这不是挂起函数：提交后的通知没有取消点，调用方取消不会把「已经提交」的结果改写成失败。
+     * 这不是挂起函数，所以调用方取消不会把「已经提交」的结果改写成失败。提交附近被取消时，
+     * 这一批**可能**进了队列、也可能没进（取消可能落在提交返回与入队之间），已提交的事实不会因此撤回。
      *
      * 分发器已关闭时什么都不做，也不抛：事件日志里那条还在，只是这次没有进程内通知。
      */
@@ -91,18 +95,26 @@ class AsyncEventNotifier(
             return
         }
         for (event in events) {
-            if (!queue.trySend(event).isSuccess) {
-                dropped.incrementAndGet()
-                logger.warn(
-                    "Event buffer is full (capacity {}), event {} is not delivered in process; the event log keeps it",
-                    capacity,
-                    event.id,
-                )
+            if (queue.trySend(event).isSuccess) continue
+            dropped.incrementAndGet()
+            when {
+                // close 与 publish 抢先后：队列已经关闭，事件没入队——这和「队列满」是两回事，日志要说清楚
+                queue.isClosedForSend ->
+                    logger.debug("Event {} was not queued: the notifier is closing", event.id)
+                // 只记第一次：publish 是在持锁的调用栈里跑的，逐条 warn 会把日志刷爆；之后的靠 droppedEvents 累计
+                dropped.get() == 1L ->
+                    logger.warn(
+                        "Event buffer is full (capacity {}), event {} is not delivered in process; the event log keeps it",
+                        capacity,
+                        event.id,
+                    )
+
+                else -> Unit
             }
         }
     }
 
-    /** 因队列满而没能通知出去的事件条数，只作诊断用（首版不重放）。 */
+    /** 没能进入队列的事件条数：队列满或通知器正在关闭。只作诊断用（首版不重放）。 */
     val droppedEvents: Long get() = dropped.get()
 
     /** 关闭是否已经发生。 */
@@ -113,8 +125,9 @@ class AsyncEventNotifier(
      *
      * 协作取消：Consumer 挂在可取消的挂起点（`awaitCancellation`、挂起的网络读）会立刻收到取消；
      * 卡在不可中断的阻塞代码里时本方法也会跟着卡住——**不宣称能强杀不可中断代码**。
-     * 在 Consumer 回调里调 [close] 是自己等自己（和 [com.github.noahshen.alcyone.context.vfs.core.state.StateBoundary]
-     * 不可重入同一类问题），这种调用只取消不等待。
+     *
+     * **Consumer 回调里调 [close] 不会自己等自己**：[InsideConsumer] 让「正在回调里」这个事实跟着协程换线程，
+     * 即使 Consumer 用 `withContext` 换到别的线程，关闭也只做取消、不等待。外部调用则正常等分发协程收尾。
      */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
@@ -133,5 +146,42 @@ class AsyncEventNotifier(
         const val DEFAULT_CAPACITY: Int = 256
 
         private const val NAME = "vfs-event-notifier"
+
+        /** [Channel] 的特殊取值：`-1` 是 conflated（新事件覆盖未分发的），`Int.MAX_VALUE` 是无界。 */
+        private const val CONFLATED = -1
+        private const val UNLIMITED = Int.MAX_VALUE
+
+        /** 只接受有界的普通正整数，别让「无界」或「覆盖」从参数偷偷溜进来。 */
+        private fun checkedCapacity(value: Int): Int {
+            require(value != 0 && value != CONFLATED && value != UNLIMITED) {
+                "capacity must be a bounded positive buffer size (1..${UNLIMITED - 1}); " +
+                    "got $value (0 = rendezvous, $CONFLATED = conflated, $UNLIMITED = unlimited)"
+            }
+            return value
+        }
+    }
+}
+
+/**
+ * 「现在正在跑 Consumer 回调」的标记。
+ *
+ * 为什么不能直接用 [ThreadLocal]：Consumer 完全可以 `withContext` 换到别的线程再调 `close()`，
+ * 那个线程上标记是 false，于是 [AsyncEventNotifier.close] 会去等分发协程——而分发协程正等着这个 Consumer 返回，自己等自己。
+ * 协程每次换线程都会问这个 Element 要不要改线程上下文，所以标记会跟着回调走到任何线程上；
+ * 回调退出时恢复原值，别的线程、别的协程看不到残留。
+ */
+private class InsideConsumer(
+    private val flag: ThreadLocal<Boolean>,
+) : AbstractCoroutineContextElement(InsideConsumer),
+    ThreadContextElement<Boolean?> {
+    companion object Key : CoroutineContext.Key<InsideConsumer>
+
+    override fun updateThreadContext(context: CoroutineContext): Boolean = flag.get().also { flag.set(true) }
+
+    override fun restoreThreadContext(
+        context: CoroutineContext,
+        oldState: Boolean?,
+    ) {
+        flag.set(oldState ?: false)
     }
 }

@@ -12,6 +12,7 @@ import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.event.AsyncEventNotifier
 import com.github.noahshen.alcyone.context.vfs.core.event.EventFactory
 import com.github.noahshen.alcyone.context.vfs.core.event.EventPipeline
+import com.github.noahshen.alcyone.context.vfs.core.event.VfsEventConsumer
 import com.github.noahshen.alcyone.context.vfs.core.event.toVfsEvent
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
 import com.github.noahshen.alcyone.context.vfs.core.state.StateBoundary
@@ -69,6 +70,32 @@ class EventPipelineRealStackTest {
         type: VfsEventType = VfsEventType.FILE_WRITTEN,
         uri: VfsUri = this.uri,
     ) = events.newRecord(type, nodeId, uri)
+
+    /** 末尾标记事件：等它到达 = 分发链把队列处理到了这里。 */
+    private fun marker(name: String) = record(VfsEventType.FILE_CREATED, VfsUri.parse("alcyone://resources/$name.txt"))
+
+    /**
+     * 记录收到的一切，并在看到指定的标记事件时放行。
+     *
+     * 用它来证明「某条事件没被通知」：先发标记、等到标记，再核对收到的列表里**没有**那条事件。
+     * 标记和被查的事件走同一条 FIFO 链，所以等到标记就说明前面入队的都已经被处理过，不靠延时。
+     */
+    private class TailRecorder(
+        private val markerIds: Set<String>,
+    ) : VfsEventConsumer {
+        val received = CopyOnWriteArrayList<VfsEvent>()
+        private val markerSeen = CompletableDeferred<Unit>()
+
+        override suspend fun onEvent(event: VfsEvent) {
+            received.add(event)
+            if (event.id.value in markerIds) markerSeen.complete(Unit)
+        }
+
+        suspend fun awaitMarker(): List<VfsEvent> {
+            withTimeout(30_000) { markerSeen.await() }
+            return received.toList()
+        }
+    }
 
     private fun node(
         path: String,
@@ -142,13 +169,12 @@ class EventPipelineRealStackTest {
     fun `A03 no consumer hears anything before the transaction commits`() =
         runBlocking {
             withStack { stack ->
-                val probeArrived = CompletableDeferred<Unit>()
-                val heard = CopyOnWriteArrayList<VfsEvent>()
-                stack.notifier.subscribe { probeArrived.complete(Unit) }
-                stack.notifier.subscribe { heard.add(it) }
-                // 探针：先证明分发链路真的活着，下面「没收到」才是有意义的
-                stack.notifier.publish(listOf(record(VfsEventType.FILE_CREATED).toVfsEvent()))
-                withTimeout(30_000) { probeArrived.await() }
+                val probe = marker("probe")
+                val recorder = TailRecorder(setOf(probe.id.value))
+                stack.notifier.subscribe(recorder)
+                // 标记先发一次：证明分发链路真的活着，下面「没收到」才是有意义的
+                stack.notifier.publish(listOf(probe.toVfsEvent()))
+                recorder.awaitMarker()
 
                 val committed = record()
                 val committedIds = CopyOnWriteArrayList<String>()
@@ -176,7 +202,7 @@ class EventPipelineRealStackTest {
                     assertTrue(committedIds.isEmpty(), "事务还没提交，Consumer 一个事件都没收到")
                     assertEquals(0, activeNodes(), "同批的 Node 也还没落库")
                     assertEquals(0, countRows("event"))
-                    assertEquals(1, heard.size, "到此刻只收到探针那一条")
+                    assertEquals(listOf(probe.id.value), recorder.received.map { it.id.value }, "到此刻只收到探针那一条")
                 } finally {
                     release.complete(Unit)
                 }
@@ -184,7 +210,11 @@ class EventPipelineRealStackTest {
                 val millis = withTimeout(30_000) { notifiedAt.await() }
 
                 assertEquals(listOf(committed.id.value), committedIds, "提交后才收到，而且只收到这一条")
-                assertEquals(2, heard.size, "探针 + 提交的那一条")
+                val after = marker("after-commit")
+                stack.notifier.publish(listOf(after.toVfsEvent()))
+                recorder.awaitMarker() // 末尾标记：确认队列真的走到了这里
+
+                assertEquals(listOf(probe.id.value, committed.id.value, after.id.value), recorder.received.map { it.id.value })
                 assertEquals(readEvents().single().let { it.id to it.occurredAt }, committedIds.single() to millis, "通知的就是库里那一条")
                 assertEquals(1, activeNodes())
             }
@@ -319,12 +349,9 @@ class EventPipelineRealStackTest {
     fun `A06 a cancelled caller is not wrapped and nothing is committed or notified`() =
         runBlocking {
             withStack { stack ->
-                val heard = CopyOnWriteArrayList<VfsEvent>()
-                val probeArrived = CompletableDeferred<Unit>()
-                stack.notifier.subscribe { probeArrived.complete(Unit) }
-                stack.notifier.subscribe { heard.add(it) }
-                stack.notifier.publish(listOf(record(VfsEventType.FILE_CREATED).toVfsEvent()))
-                withTimeout(30_000) { probeArrived.await() } // 先证明分发链路是活的
+                val tail = marker("tail")
+                val recorder = TailRecorder(setOf(tail.id.value))
+                stack.notifier.subscribe(recorder)
 
                 val parkedInside = CompletableDeferred<Unit>()
                 val caller =
@@ -340,10 +367,13 @@ class EventPipelineRealStackTest {
                 caller.cancel()
                 caller.join()
 
+                stack.notifier.publish(listOf(tail.toVfsEvent()))
+                recorder.awaitMarker()
+
                 assertTrue(caller.isCancelled, "调用方取消原样传播")
                 assertEquals(0, countRows("event"), "提交前取消：事件没落库")
                 assertEquals(0, activeNodes(), "提交前取消：状态也一起回滚")
-                assertEquals(1, heard.size, "只有探针那条，取消的事务没通知任何人")
+                assertEquals(listOf(tail.id.value), recorder.received.map { it.id.value }, "取消的事务没通知任何人")
             }
         }
 
@@ -352,12 +382,9 @@ class EventPipelineRealStackTest {
     fun `A03 a transaction that throws publishes nothing`() =
         runBlocking {
             withStack { stack ->
-                val heard = CopyOnWriteArrayList<VfsEvent>()
-                val probeArrived = CompletableDeferred<Unit>()
-                stack.notifier.subscribe { probeArrived.complete(Unit) }
-                stack.notifier.subscribe { heard.add(it) }
-                stack.notifier.publish(listOf(record(VfsEventType.FILE_CREATED).toVfsEvent()))
-                withTimeout(30_000) { probeArrived.await() }
+                val tail = marker("tail")
+                val recorder = TailRecorder(setOf(tail.id.value))
+                stack.notifier.subscribe(recorder)
 
                 val thrown =
                     assertFailsWith<IllegalStateException> {
@@ -370,7 +397,10 @@ class EventPipelineRealStackTest {
 
                 assertEquals(0, countRows("event"))
                 assertEquals(0, activeNodes())
-                assertEquals(1, heard.size, "失败的事务一个事件都不通知")
+                stack.notifier.publish(listOf(tail.toVfsEvent()))
+                recorder.awaitMarker()
+
+                assertEquals(listOf(tail.id.value), recorder.received.map { it.id.value }, "失败的事务一个事件都不通知")
                 assertTrue(thrown.message!!.contains("gave up"))
             }
         }
@@ -380,12 +410,9 @@ class EventPipelineRealStackTest {
     fun `A03 a real commit failure publishes nothing`() =
         runBlocking {
             withStack { stack ->
-                val heard = CopyOnWriteArrayList<VfsEvent>()
-                val probeArrived = CompletableDeferred<Unit>()
-                stack.notifier.subscribe { probeArrived.complete(Unit) }
-                stack.notifier.subscribe { heard.add(it) }
-                stack.notifier.publish(listOf(record(VfsEventType.FILE_CREATED).toVfsEvent()))
-                withTimeout(30_000) { probeArrived.await() } // 先证明分发链路是活的
+                val tail = marker("tail")
+                val recorder = TailRecorder(setOf(tail.id.value))
+                stack.notifier.subscribe(recorder)
 
                 val insideTransaction = CompletableDeferred<Unit>()
                 val release = CompletableDeferred<Unit>()
@@ -410,7 +437,10 @@ class EventPipelineRealStackTest {
 
                 val thrown = withTimeout(30_000) { outcome.await() }
                 assertEquals(VfsErrorCode.STATE_ERROR, (thrown as? VfsException)?.code, "提交真的失败了，实际：$thrown")
-                assertEquals(1, heard.size, "提交失败的这一批一个事件都没通知，收到的那条是探针")
+                stack.notifier.publish(listOf(tail.toVfsEvent()))
+                recorder.awaitMarker()
+
+                assertEquals(listOf(tail.id.value), recorder.received.map { it.id.value }, "提交失败的这一批一个事件都没通知")
                 assertEquals(0, stack.notifier.droppedEvents)
             }
         }
