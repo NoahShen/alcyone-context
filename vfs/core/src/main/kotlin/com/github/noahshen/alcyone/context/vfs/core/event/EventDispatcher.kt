@@ -32,6 +32,15 @@ class EventDispatcher {
     }
 
     /**
+     * 退订：同一个实例注册过就摘掉，之后的事件不再投给它。**正在执行的那一次不会被打断**。
+     *
+     * 例：一次会话结束，把会话专属的推送消费者摘掉，事件日志照旧，只是进程内不再有人收。
+     */
+    fun unsubscribe(consumer: VfsEventConsumer) {
+        consumers.remove(consumer)
+    }
+
+    /**
      * 向全部已注册消费者投递已提交的事件。
      *
      * 捕获范围：普通 [Exception]（含 [RuntimeException] 与 [IOException] 等受检异常）只记录日志并继续
