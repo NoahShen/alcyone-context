@@ -26,6 +26,8 @@ import com.github.noahshen.alcyone.context.vfs.core.transaction.UnitOfWork
  *
  * **锁**：整条链只取一次锁——[commit] 自己拿 [boundary]，里面一律用不加锁的入口
  * （`registry.getNodeInsideBoundary`）。调用方**不要**在外面再套一层 `boundary.withLock`（不可重入，会自己等自己）。
+ * 已经拿着同一把 [boundary] 的编排代码（例如 T15 写文件：预检、确认实际类型、补父目录和 Storage 写入都在锁里，
+ * 最后的「Node 状态 + 事件」才交给这里提交）用 [commitInsideBoundary]：同一个提交过程，不再取第二次锁。
  *
  * **写文件的顺序属 T15**：`Storage 写入成功 → 本类提交 Node 状态与事件`。SQLite 回滚不了外部文件，
  * 本类不代管那件事；本类保证的只有「状态和事件同批提交，提交成功才通知」。
@@ -49,19 +51,25 @@ class EventPipeline(
      * @return [block] 的返回值；提交成功后原样返回
      * @throws IllegalStateException [block] 把事务作用域带到了外面
      */
-    suspend fun <T> commit(block: suspend (TransactionScope) -> T): T {
+    suspend fun <T> commit(block: suspend (TransactionScope) -> T): T = boundary.withLock { commitInsideBoundary(block) }
+
+    /**
+     * [commit] 的不加锁版本：**调用方已经拿着同一把 [StateBoundary] 时用这个**，别再套一次 [commit]（会自己等自己）。
+     *
+     * 事务、提交后通知、异常语义与 [commit] 完全一样，只是取锁交给调用方。
+     * 例：写文件整条链只取一次锁，锁里最后一步才调这里提交状态与事件。
+     */
+    internal suspend fun <T> commitInsideBoundary(block: suspend (TransactionScope) -> T): T {
         val recorded = mutableListOf<EventRecord>()
-        return boundary.withLock {
-            val result =
-                unitOfWork.inTransaction { scope ->
-                    // 把事件视图换成「记一笔再转发」，调用方照常写 scope.events.append(...)，
-                    // 不必自己维护第二个列表——忘了记的事件通知不了，也不会通知出没记录的事件。
-                    block(RecordingScope(scope, recorded))
-                }
-            // 到这里 COMMIT 已经成功。整批一起入队，顺序即提交顺序（同一条边界串行）。
-            notifier.publish(recorded.map { it.toVfsEvent() })
-            result
-        }
+        val result =
+            unitOfWork.inTransaction { scope ->
+                // 把事件视图换成「记一笔再转发」，调用方照常写 scope.events.append(...)，
+                // 不必自己维护第二个列表——忘了记的事件通知不了，也不会通知出没记录的事件。
+                block(RecordingScope(scope, recorded))
+            }
+        // 到这里 COMMIT 已经成功。整批一起入队，顺序即提交顺序（同一条边界串行）。
+        notifier.publish(recorded.map { it.toVfsEvent() })
+        return result
     }
 }
 
