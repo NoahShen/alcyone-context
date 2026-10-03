@@ -176,6 +176,32 @@ class NodeRegistryRealStackTest {
         }
 
     @Test
+    fun `R1 a needed ancestor behind a real file on disk is a virtual directory and the file is untouched`() =
+        runBlocking {
+            // 真 Local FS：父盘上的 a 是文件，却在其下挂了 /resources/a/b/c。
+            // 查 /resources/a/b 时 OpenDAL 会对中间组件报 TYPE_MISMATCH，按 T02 §3.2 必要祖先优先，
+            // 这条路径仍然要能当虚拟目录导航；那个物理文件一个字节都不能改。
+            val childRoot = Files.createDirectory(tempDir.resolve("nested-disk"))
+            Files.writeString(diskRoot.resolve("a"), "physical content")
+            withStack(
+                mounts =
+                    listOf(
+                        MountRecord(VfsPath.parse("/resources"), "parent"),
+                        MountRecord(VfsPath.parse("/resources/a/b/c"), "child"),
+                    ),
+                extraStorages = mapOf("parent" to LocalFsStorage.create(diskRoot), "child" to LocalFsStorage.create(childRoot)),
+            ) { stack ->
+                val info = stack.registry.resolveOrRegister(VfsPath.parse("/resources/a/b"))
+
+                assertEquals(NodeType.DIRECTORY, info.type)
+                assertNull(info.storage, "虚拟目录没有磁盘属性")
+                assertEquals(false, stack.nodes.findByPath(VfsPath.parse("/resources/a/b"))?.physical)
+                assertEquals("physical content", Files.readString(diskRoot.resolve("a")), "被遮蔽的物理文件不能被改动")
+                assertTrue(Files.isRegularFile(diskRoot.resolve("a")), "它仍然是文件：VFS 既没改它也没删它")
+            }
+        }
+
+    @Test
     fun `A03 a path outside every mount is MOUNT_NOT_FOUND`() =
         runBlocking {
             withStack { stack ->
@@ -272,8 +298,9 @@ class NodeRegistryRealStackTest {
                         }
                     querying.await()
 
-                    // 正向检测违规：事务还开着，Registry 就把值返回了 = 共享边界没生效。
-                    // 不能只断言「它此刻还没完成」——协程可能只是还没跑到，睡一下就骗过去了。
+                    // 在这两秒的观察窗口里做违规检测：事务还开着，Registry 就把值返回了 = 共享边界没生效。
+                    // 判据是「提前拿到返回值」，不是「此刻还没完成」——后者在协程还没跑到时会误判成通过。
+                    // 窗口有限，所以它证明的是「这个窗口内没有违规返回」；锁失效的那次实跑是另一条独立证据。
                     val leaked = withTimeoutOrNull(2_000) { pending.await() }
 
                     assertNull(leaked, "事务提交前 Registry 就返回了 —— 共享边界没有生效")

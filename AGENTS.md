@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## 本次修改（2026-10-03，T13 独立复核）
+
+- T13 a83c375 独立复核：413 个正式测试通过，R1～R3 待修，保持 IN_REVIEW；涉及阅读顺序第 17 条。接受 URI 工厂并回写 T01，锁组合及虚拟目录缺口见 [复核记录](docs/tasks/m2-t13/T13_架构与技术复核.md)，不开始 T14。
+
 ## 本次修改（2026-10-03，T13 任务入口）
 
 - 新增阅读顺序第 17 条 [T13 Node Registry 与懒注册开发及验收](docs/tasks/m2-t13/T13_NodeRegistry与懒注册开发及验收.md)：Core 查询与注册、虚拟目录、竞争复用、共享串行边界及真实组件验证。任务 TODO，待开发 Agent 实现，当前基线 363 个测试；本轮仅准备任务文档。
@@ -202,7 +206,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 16. [T12 Local FS 存储适配开发及验收](docs/tasks/m2-t12/T12_LocalFS存储适配开发及验收.md)：实现 `vfs/storage` 的 OpenDAL Local FS Adapter，含真实文件操作、物理路径检查、流与限额、能力和错误映射；当前 **DONE**，`38394d1` R7 独立复核通过，R1～R7 全部关闭，363 个正式测试通过，详见同目录架构与技术复核第 10 节；可以开始 T13。
 
-17. [T13 Node Registry 与懒注册开发及验收](docs/tasks/m2-t13/T13_NodeRegistry与懒注册开发及验收.md)：前置 T09～T12 已完成，当前 **TODO，任务已安排**；实现属于 Core，T15 复用查询 / 注册与共享串行边界，真实 SQLite + Local FS 验证放 integration-tests。
+17. [T13 Node Registry 与懒注册开发及验收](docs/tasks/m2-t13/T13_NodeRegistry与懒注册开发及验收.md)：前置 T09～T12 已完成，当前 **IN_REVIEW，a83c375 已交付，独立复核待修 R1～R3，413 个正式测试通过**；实现属于 Core，T15 复用查询 / 注册与共享串行边界，真实 SQLite + Local FS 验证放 integration-tests。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 

@@ -35,11 +35,13 @@ class VfsUri private constructor(
         fun parse(text: String): VfsUri = VfsUri(VfsPath.of(splitUri(text)))
 
         /**
-         * 由已经解析好的逻辑路径造一个 URI，逐段做百分号编码、不做解码。
+         * 由已经解析好的逻辑路径造一个 URI：只把路径包进来，**不改一个字符**，百分号编码发生在 [toString] 输出时。
          *
-         * 例：磁盘上的文件名带空格（`/resources/my notes.txt`）时路径里就是带空格的，
-         * 拼出来的 URI 是 `alcyone://resources/my%20notes.txt`，再 [parse] 回来还是同一个路径。
-         * 调用方（Core 组装 `NodeInfo`、Runtime 接 SDK）不需要自己拼 scheme 或编码。
+         * 例：文件名带空格是合法的（`/resources/my notes.txt`），原样放进 [path]，
+         * 打印出来是 `alcyone://resources/my%20notes.txt`，再 [parse] 回来还是同一个路径。
+         *
+         * 有了这个入口，Core 组装 `NodeInfo`、Runtime 接 SDK 时就不必自己再抄一遍 URI 序列化规则
+         * （scheme 怎么写、哪些字符要编码），也就不会把规则抄错。
          */
         fun of(path: VfsPath): VfsUri = VfsUri(path)
     }

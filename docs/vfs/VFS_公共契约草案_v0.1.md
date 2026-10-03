@@ -1,5 +1,9 @@
 # VFS 公共契约草案 v0.1
 
+## 本次修改（2026-10-03，T13 独立复核）
+
+- 接受 T13 增补 `VfsUri.of(VfsPath)`：从已校验的不可变逻辑路径构造 URI，编码仍统一在 toString，parse / 路径校验规则不变。涉及第 4 节类型与构造入口说明；不改变 stat、身份或权限语义。
+
 ## 本次修改（2026-09-29，错误码分类澄清）
 
 - 在第 7 节补充 `INVALID_URI` 与 `INVALID_ARGUMENT` 的划分口径：路径类输入（含 URI 与其解码结果 `VfsPath`）用 `INVALID_URI`，ID、选项、字节内容等非路径参数用 `INVALID_ARGUMENT`。涉及第 7 节。
@@ -89,7 +93,7 @@ Context System 配置逻辑 Mount 和所需同步策略；普通 read / write / 
 | `NodeId` | 稳定资源身份 | UUIDv7，移动后不变；不是路径的哈希 |
 | `StoragePath` | Adapter 内部物理相对路径 | 挂载根内的 `ct/a.dcm`，不作为公共文件操作参数 |
 
-`VfsUri.parse(text)` 校验并构造 URI，`uri.path` 返回逻辑路径；`VfsPath` 和 `NodeId` 也只能通过校验后的构造入口生成。非法输入在本地被拒绝，不触发 Mount 或 Storage。规范化、编码、大小写、尾斜线和路径穿越规则由 T02 细化。
+`VfsUri.parse(text)` 校验并构造 URI；`VfsUri.of(path: VfsPath)` 从已校验的逻辑路径构造 URI，`uri.path` 返回逻辑路径。`of` 不重新解码，序列化时仍逐段编码，例如 `/resources/my notes.txt` 输出 `alcyone://resources/my%20notes.txt`；`VfsPath` 和 `NodeId` 也只能通过校验后的构造入口生成。非法输入在本地被拒绝，不触发 Mount 或 Storage。规范化、编码、大小写、尾斜线和路径穿越规则由 T02 细化。
 
 `memory` / `resources` 仅是逻辑命名空间示例，第一段必须作为路径保留，不能因通用 URI 库把它识别为 authority 而丢弃。API 不限制第一段的名称，也不查询配置；例如 `alcyone://notes/a.txt` 可解析，但不代表资源存在或已有匹配 Mount。
 

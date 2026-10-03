@@ -31,7 +31,9 @@ import java.time.Instant
  * - 路径没有挂载覆盖、也不是配置目录 → `MOUNT_NOT_FOUND`；
  * - 命中挂载但没有对应的 Storage 实例 → `STATE_ERROR`，这是装配写错了，必须说清楚缺哪个 key，
  *   绝不能装作「文件不存在」把问题藏起来；
- * - 后端确认失败（不存在 / 拒绝 / 一般 I/O 错误）→ 原样抛，不吞；只有**可识别的两种情况**会转成虚拟目录，见 [virtualFallbackAllowed]；
+ * - 后端确认失败（不存在 / 被祖先文件挡住 / 拒绝 / 一般 I/O 错误）→ 原样抛，不吞；
+ *   只有前两种「可识别的遮蔽」会转成虚拟目录，见 [virtualFallbackAllowed]；
+ * - 挂载点自己的后端根不是目录（stat 成功返回了 FILE）→ `TYPE_MISMATCH`，拒绝，不登记成文件也不降级成虚拟目录；
  * - 磁盘上的实际类型和已登记的类型不一致 → `CONFLICT`，绝不偷偷换 ID、删 Metadata 或就地改记录。
  *
  * 状态读写一律经过 [StateBoundary]；同一个边界实例由 Runtime 共享给 T15 之后的编排代码。
@@ -117,9 +119,20 @@ class NodeRegistry(
             try {
                 storage.stat(route.relativePath)
             } catch (failure: VfsException) {
-                // 只处理「后端明确说没有」这一种情况。权限不足、后端已关闭、一般 I/O 错误都是真实故障，原样抛。
-                if (failure.code == VfsErrorCode.NOT_FOUND && virtualFallbackAllowed(path)) null else throw failure
+                // 只处理两种「可识别的遮蔽」：后端说没有，以及必要祖先在磁盘上就是个文件
+                // （中间组件类型冲突，例：/resources/a 是文件，却要在它下面挂 /resources/a/b/c）。
+                // 权限不足、后端已关闭、一般 I/O 错误都是真实故障，一个也不许吞，原样抛。
+                if (virtualFallbackAllowed(path) && failure.code in SHADOWED_CODES) null else throw failure
             }
+        // 挂载根必须真的是目录：后端说它是文件就明确拒绝，不能当成一个可用的文件挂载点登记进去。
+        // 注意这里只管「后端成功返回的错类型」，拒绝发生在任何写状态之前。
+        if (attributes != null && router.isMountPoint(path) && attributes.type != NodeType.DIRECTORY) {
+            throw VfsException(
+                VfsErrorCode.TYPE_MISMATCH,
+                "Mount root '$path' is a ${attributes.type} on the backing storage; a mount root must be a directory",
+                VfsUri.of(path),
+            )
+        }
         // 配置目录在磁盘上还是个文件时，按逻辑目录处理：这个文件被遮蔽了（下面 register 记的是虚拟目录）。
         val effective = if (attributes != null && virtualFallbackAllowed(path) && attributes.type == NodeType.FILE) null else attributes
         return register(
@@ -132,10 +145,12 @@ class NodeRegistry(
     }
 
     /**
-     * 这条路径「后端说没有」时，能不能按虚拟目录继续。
+     * 这条路径「后端说没有 / 说被文件挡住」时，能不能按虚拟目录继续。
      *
      * 能的只有一种：**配置里推导出的目录，且不是挂载点自己**（T02 §3.2 的缺层祖先）。
-     * 例：只挂了 `/resources/medical/ct`，那么 `/resources/medical` 磁盘上本来就不该有目录。
+     * 例：只挂了 `/resources/medical/ct`，那么 `/resources/medical` 磁盘上本来就不该有目录；
+     * 又例：父盘上的 `a` 是个文件，却在其下挂了 `/resources/a/b/c`，那 `/resources/a/b` 仍然是可以导航的虚拟目录，
+     * 那个物理文件只被遮蔽，不会被改动。
      *
      * 不能的两种：挂载点自己必须真的能访问到后端根（`/resources/medical/ct` 挂不上就是挂了，绝不降级成「虚拟目录，正常」）；
      * 普通路径同理，后端说没有就是 `NOT_FOUND`。
@@ -199,6 +214,14 @@ class NodeRegistry(
             VfsUri.of(path),
         )
 }
+
+/**
+ * 「被遮蔽」的两种可识别情况：后端说没有（[VfsErrorCode.NOT_FOUND]）、必要祖先在磁盘上是个文件（[VfsErrorCode.TYPE_MISMATCH]）。
+ *
+ * 其余错误码都是真实故障，原样抛出：权限不足（[VfsErrorCode.STORAGE_ACCESS_DENIED]）、后端已关（[VfsErrorCode.CLOSED]）、
+ * 一般 I/O 错误（[VfsErrorCode.STORAGE_ERROR]）。
+ */
+private val SHADOWED_CODES = setOf(VfsErrorCode.NOT_FOUND, VfsErrorCode.TYPE_MISMATCH)
 
 /** 记录 → 返回值。物理属性放 [NodeInfo.storage]，逻辑时间原样保留。 */
 private fun NodeRecord.toNodeInfo(storage: StorageStat?): NodeInfo =
