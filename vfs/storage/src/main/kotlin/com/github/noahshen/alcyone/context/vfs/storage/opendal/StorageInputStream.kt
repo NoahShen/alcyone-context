@@ -79,12 +79,12 @@ internal class StorageInputStream(
     /**
      * 跳过一些字节，跳过的也算进额度。
      *
-     * `count` 为负数时报 `IllegalArgumentException`。`InputStream.skip` 原本允许负数返回 0，
-     * 这里故意不同：调用方以为跳过了内容、实际一个字节没跳，额度就和实际位置对不上了。
+     * `count` 为 0 或负数时返回 0，和 [InputStream.skip] 一致：不移动、不计费、不去问后端。
+     * 调用方拿到 0 就知道自己没跳到期望的位置，不至于以为已经跳过去了。
      */
     override fun skip(count: Long): Long {
-        require(count >= 0) { "skip count must not be negative: $count" }
         beforeRead("skip")
+        if (count <= 0) return 0L
         val request = requestLimit(if (count > Int.MAX_VALUE) Int.MAX_VALUE else count.toInt()).toLong()
         val skipped = mapped("skip read stream") { handle.read { handle.native.skip(request) } }
         if (skipped > 0) charge(skipped)

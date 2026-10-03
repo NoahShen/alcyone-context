@@ -269,14 +269,20 @@ class StorageInputStreamTest {
         assertEquals(0, delegate.readCalls)
     }
 
+    /** 负数按 `InputStream.skip` 的标准行为返回 0：不移动、不计费，也不去问后端。 */
     @Test
-    fun `a negative skip is refused instead of silently succeeding`() {
+    fun `a negative skip returns zero without touching the delegate`() {
         val delegate = CountingInputStream(remaining = 8)
         val bounded = wrapStream(delegate, limitBytes = 4)
 
-        assertFailsWith<IllegalArgumentException> { bounded.skip(-1) }
-        assertEquals(0, delegate.skipCalls, "非法入参不得触碰 delegate")
-        assertEquals(0L, bounded.consumedBytes())
+        assertEquals(0L, bounded.skip(-1))
+        assertEquals(0L, bounded.skip(0))
+        assertEquals(0, delegate.skipCalls, "没跳过任何字节就不该去问后端")
+        assertEquals(0L, bounded.consumedBytes(), "没跳过的字节不消耗额度")
+
+        // 真正的 skip 照常工作：状态和额度都没被这次零长度调用破坏。
+        assertEquals(3L, bounded.skip(3))
+        assertEquals(3L, bounded.consumedBytes())
     }
 
     @Test
