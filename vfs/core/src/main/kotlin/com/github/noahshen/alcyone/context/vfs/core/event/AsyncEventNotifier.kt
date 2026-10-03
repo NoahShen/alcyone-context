@@ -36,8 +36,9 @@ import kotlin.coroutines.CoroutineContext
  * - **无订阅者**：事件照样入队并被分发协程取走丢掉，不报错、也不计入 [droppedEvents]（那不是队列满）。
  *   分发慢的时候照样受容量约束；晚订阅的 Consumer 可能收到订阅之前入队、还没分发的那一批。
  *
- * @param capacity 队列容量，**必须是有界的普通正整数**，默认 [DEFAULT_CAPACITY]。`0`（无缓冲）、
- *   `-1`（新事件覆盖未分发的）、`Int.MAX_VALUE`（无界）都在构造时就被拒绝，测试用很小的值逼出丢弃行为。
+ * @param capacity 队列容量，**必须是有界的普通正整数**，默认 [DEFAULT_CAPACITY]。除了 `0`（无缓冲）、
+ *   `-1`（新事件覆盖未分发的）、`-2`（`Channel.BUFFERED`，用调度器默认容量）、`Int.MAX_VALUE`（无界）
+ *   这些特殊取值以外，其他非正数同样一律拒绝：建 Channel、起协程之前就报错。
  */
 class AsyncEventNotifier(
     capacity: Int = DEFAULT_CAPACITY,
@@ -147,15 +148,19 @@ class AsyncEventNotifier(
 
         private const val NAME = "vfs-event-notifier"
 
-        /** [Channel] 的特殊取值：`-1` 是 conflated（新事件覆盖未分发的），`Int.MAX_VALUE` 是无界。 */
-        private const val CONFLATED = -1
-        private const val UNLIMITED = Int.MAX_VALUE
+        /** [Channel] 的特殊取值：`-1` conflated、`-2` BUFFERED（默认容量）、`Int.MAX_VALUE` 无界。 */
+        private const val MAX_BUFFER = Int.MAX_VALUE - 1
 
-        /** 只接受有界的普通正整数，别让「无界」或「覆盖」从参数偷偷溜进来。 */
+        /**
+         * 只接受有界的普通正整数。
+         *
+         * 用完整范围判断而不是「排除几个特殊值」：`Channel` 的负值全是保留含义（`-1` conflated、
+         * `-2` BUFFERED），漏掉一个就会静默变成另一种队列语义，「有界」名存实亡。
+         */
         private fun checkedCapacity(value: Int): Int {
-            require(value != 0 && value != CONFLATED && value != UNLIMITED) {
-                "capacity must be a bounded positive buffer size (1..${UNLIMITED - 1}); " +
-                    "got $value (0 = rendezvous, $CONFLATED = conflated, $UNLIMITED = unlimited)"
+            require(value in 1..MAX_BUFFER) {
+                "capacity must be a bounded positive buffer size (1..$MAX_BUFFER); " +
+                    "got $value (0 = rendezvous, negatives are reserved by Channel, Int.MAX_VALUE = unlimited)"
             }
             return value
         }

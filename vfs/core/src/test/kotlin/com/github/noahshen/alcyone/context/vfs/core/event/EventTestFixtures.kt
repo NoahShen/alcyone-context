@@ -7,7 +7,6 @@ import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
-import org.junit.jupiter.api.AfterEach
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
@@ -47,10 +46,13 @@ class EventRecorder(
 }
 
 /**
- * 测试里造的通知器都登记在这里，测试方法结束后统一关掉。
+ * 测试里造的通知器都登记在这里，由**测试类自己**的 `@AfterEach` 统一关掉。
  *
  * 为什么要多这一层：用例自己写 `notifier.close()` 时，**断言先失败就跳过了关闭**，
- * 分发协程会活到测试进程退出（还可能在别的用例里继续送事件）。@AfterEach 保证失败路径也收干净。
+ * 分发协程会活到测试进程退出（还可能在别的用例里继续送事件）。
+ *
+ * 注意：关闭钩子必须写在测试类上——JUnit 只在**测试实例**上执行 `@AfterEach`，
+ * 挂在这个辅助对象上不会触发（`NotifierTeardownTest` 就是钉这一条的）。
  */
 class TrackedNotifiers {
     private val created = CopyOnWriteArrayList<AsyncEventNotifier>()
@@ -58,10 +60,16 @@ class TrackedNotifiers {
     fun create(capacity: Int = AsyncEventNotifier.DEFAULT_CAPACITY): AsyncEventNotifier =
         AsyncEventNotifier(capacity).also { created.add(it) }
 
-    @AfterEach
+    /** 幂等：重复调用无害。 */
     fun closeAll() {
         created.forEach { it.close() }
         created.clear()
+    }
+
+    companion object {
+        /** 最近一次 [create] 造出来的通知器，供「钩子有没有真的触发」的检查用。 */
+        @Volatile
+        var lastCreated: AsyncEventNotifier? = null
     }
 }
 

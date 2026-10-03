@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -35,6 +36,12 @@ import kotlin.test.assertFailsWith
 class AsyncEventNotifierTest {
     /** 统一登记 + @AfterEach 关闭：断言失败也不留分发协程。 */
     private val notifiers = TrackedNotifiers()
+
+    /** 用例结束（包括断言失败）统一关掉通知器：钩子写在测试类上，JUnit 才会执行。 */
+    @AfterEach
+    fun tearDown() {
+        notifiers.closeAll()
+    }
 
     /** 造一个「创建了 resources/<name>」的通知事件。 */
     private fun event(name: String) = testRecord(VfsEventType.FILE_CREATED, VfsUri.parse("alcyone://resources/$name")).toVfsEvent()
@@ -292,12 +299,14 @@ class AsyncEventNotifierTest {
 
     @Test
     fun `R2 the capacity must be a bounded positive buffer size`() {
-        for (special in listOf(0, -1, Int.MAX_VALUE)) {
-            val failure = assertFailsWith<IllegalArgumentException> { AsyncEventNotifier(special) }
+        // 0 = rendezvous，-1 = conflated，-2 = Channel.BUFFERED（用调度器默认容量），Int.MAX_VALUE = 无界；
+        // 另外普通负值（-5）也得拒——留个口子在它明年变特殊值，就等于把队列语义交给下一个人。
+        for (rejected in listOf(0, -1, -2, -5, Int.MAX_VALUE)) {
+            val failure = assertFailsWith<IllegalArgumentException> { AsyncEventNotifier(rejected) }
 
             assertTrue(
                 failure.message!!.contains("bounded positive buffer size"),
-                "容量 $special 应被拒绝并说明允许范围，实际：${failure.message}",
+                "容量 $rejected 应被拒绝并说明允许范围，实际：${failure.message}",
             )
         }
 

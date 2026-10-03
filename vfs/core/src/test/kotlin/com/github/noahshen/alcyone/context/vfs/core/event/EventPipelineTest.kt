@@ -20,6 +20,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -31,6 +32,12 @@ import java.util.concurrent.CopyOnWriteArrayList
 class EventPipelineTest {
     /** 统一登记 + @AfterEach 关闭：断言失败也不留分发协程。 */
     private val notifiers = TrackedNotifiers()
+
+    /** 用例结束（包括断言失败）统一关掉通知器：钩子写在测试类上，JUnit 才会执行。 */
+    @AfterEach
+    fun tearDown() {
+        notifiers.closeAll()
+    }
 
     private val filePath = VfsPath.parse("/notes/a.txt")
 
