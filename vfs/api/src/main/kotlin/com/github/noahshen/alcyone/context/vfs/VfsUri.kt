@@ -33,6 +33,15 @@ class VfsUri private constructor(
     companion object {
         /** 解析并规范化逻辑地址；非法输入抛 [VfsErrorCode.INVALID_URI]，不触发任何 I/O。 */
         fun parse(text: String): VfsUri = VfsUri(VfsPath.of(splitUri(text)))
+
+        /**
+         * 由已经解析好的逻辑路径造一个 URI，逐段做百分号编码、不做解码。
+         *
+         * 例：磁盘上的文件名带空格（`/resources/my notes.txt`）时路径里就是带空格的，
+         * 拼出来的 URI 是 `alcyone://resources/my%20notes.txt`，再 [parse] 回来还是同一个路径。
+         * 调用方（Core 组装 `NodeInfo`、Runtime 接 SDK）不需要自己拼 scheme 或编码。
+         */
+        fun of(path: VfsPath): VfsUri = VfsUri(path)
     }
 }
 

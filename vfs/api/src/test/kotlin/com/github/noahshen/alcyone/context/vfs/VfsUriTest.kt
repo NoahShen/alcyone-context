@@ -234,6 +234,22 @@ class VfsUriTest {
         assertEquals(uris.size, uris.toSet().size)
     }
 
+    /**
+     * T13 用到的 path → uri：Core 组装 `NodeInfo` 时直接把逻辑路径变成 URI。
+     * 路径里允许有空格（文件名就是这样），URI 里必须编码成 `%20`，再 parse 回来还是同一个路径。
+     */
+    @Test
+    fun `a logical path can be turned into a uri without losing anything`() {
+        assertEquals("alcyone://resources/my%20notes.txt", VfsUri.of(VfsPath.parse("/resources/my notes.txt")).toString())
+        assertEquals(VfsPath.parse("/resources/my notes.txt"), VfsUri.of(VfsPath.parse("/resources/my notes.txt")).path)
+        assertEquals("alcyone://", VfsUri.of(VfsPath.root).toString())
+        assertEquals("alcyone://resources/", VfsUri.of(VfsPath.parse("/resources")).toString())
+        assertEquals(
+            VfsPath.parse("/resources/中文/a.txt"),
+            VfsUri.parse(VfsUri.of(VfsPath.parse("/resources/中文/a.txt")).toString()).path,
+        )
+    }
+
     private fun assertInvalidUri(text: String) {
         val error = assertFailsWith<VfsException>("expected INVALID_URI for: $text") { VfsUri.parse(text) }
         assertEquals(VfsErrorCode.INVALID_URI, error.code)
