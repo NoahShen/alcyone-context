@@ -1092,11 +1092,14 @@ private class BlockerStorage(
 }
 
 /**
- * 包一层事务：第一次 [NodeRepository.markDeleted] **真写进库里**之后停一下，让取消正好落在
- * 「物理删除已完成、事务还没 COMMIT」的窗口里。
+ * 事务包装：第一次 `markDeleted` **真的写进库里之后**、COMMIT 之前挂起，让取消恰好落在
+ * 提交附近——也就是删除实现捕获取消的那个 try 之内。事务与回滚全是真的（SqliteUnitOfWork
+ * 在 NonCancellable 里 ROLLBACK）；包装器只多加一个挂起点。
  *
- * 事务、回滚全是真的（SqliteUnitOfWork 在 NonCancellable 里 ROLLBACK）；包装器只多加一个挂起点，
- * 所以它能覆盖到 DefaultVfs 提交附近那个 catch——挂在 Storage I/O 上的取消用例覆盖不到那里。
+ * 挂在 Storage I/O 上的取消用例覆盖不到这里，它落不到那个 catch。所以要专门覆盖
+ * 「物理删除已完成、事务还没 COMMIT」的窗口。
+ *
+ * 取消一旦抛出来，这次事务连带 markDeleted 一起回滚：文件在盘上已经没了，逻辑记录还在。
  */
 private class PausingCommitUnitOfWork(
     private val delegate: SqliteUnitOfWork,
