@@ -39,6 +39,7 @@ import com.github.noahshen.alcyone.context.vfs.persistence.sqldelight.VfsStateDa
 import com.github.noahshen.alcyone.context.vfs.storage.opendal.LocalFsStorage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
@@ -48,6 +49,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -312,32 +314,39 @@ class DefaultVfsRealStackTest {
 
     @Test
     @Timeout(60)
-    fun `A06 the second write is proved to run behind the first one on the shared boundary`() =
+    fun `A06 the second write is held at the boundary before it touches the backend`() =
         runBlocking {
             withStack(wrapStorage = { PausingStorage(it, blockingPath = null) }) { stack ->
                 val pausing = stack.storages.getValue("local") as PausingStorage
-                val secondCalling = CompletableDeferred<Unit>()
 
                 val first =
                     async(Dispatchers.Default) {
                         stack.vfs.write(uri("/a.txt"), "first".toByteArray(), WriteOptions(WriteMode.CREATE_NEW))
                     }
                 pausing.awaitFirstWrite() // 第一个写已经进了 Storage I/O，正拿着边界
+                val backendCallsBeforeSecond = pausing.callLog().size
+
                 val second =
-                    async(Dispatchers.Default) {
-                        // 信号发在调用之前：证明第二个请求确实已经开跑，不是「还没轮到它」。
-                        secondCalling.complete(Unit)
+                    async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
                         runCatching { stack.vfs.write(uri("/a.txt"), "second".toByteArray(), WriteOptions(WriteMode.CREATE_NEW)) }
                             .exceptionOrNull()
                     }
-                secondCalling.await()
+                // UNDISPATCHED：第二个协程在当前线程直接开跑，直到第一个挂起点才把控制权交回来。
+                // write 入口只有限额检查，真正会挂住的就是取锁——所以它现在一定卡在边界上。
+                assertFalse(second.isCompleted, "第二个请求已经跑到第一个挂起点，却直接跑完了——它没被边界挡住")
+                assertEquals(
+                    backendCallsBeforeSecond,
+                    pausing.callLog().size,
+                    "第二个请求一次 Storage 都没碰：${pausing.callLog()}",
+                )
+                assertEquals(1, pausing.pausedWrites(), "此刻只有第一个写还挂在闩锁上")
+
                 pausing.releaseFirstWrite()
 
                 val info = withTimeout(30_000) { first.await() }
                 val failure = withTimeout(30_000) { second.await() }
 
-                // 判据是「事后顺序」而不是「当时还没返回」：第二个写对目标 stat 的时刻，
-                // 排在第一个写的物理写完成之后——它此前根本没能走进这条写链，也就没能越过边界。
+                // 竞争发生过了（一成一败），事后顺序也符合边界语义：第二个写的 stat 排在第一个写的物理写之后。
                 assertEquals(
                     listOf("stat:a.txt", "write:a.txt", "stat:a.txt"),
                     pausing.callLog(),
@@ -361,18 +370,31 @@ class DefaultVfsRealStackTest {
                 stack.notifier.subscribe(recorder)
                 val cancelled = CancellationException("cancelled while writing")
 
+                // 捕获发生在**调用 DefaultVfs 的协程内部**：被取消的 Deferred.await() 必然抛取消，
+                // 拿它当证据等于什么都没测，所以要留下写链自己真正抛出来的那一个。
+                val escaped = CompletableDeferred<Throwable?>()
                 val job =
                     async(Dispatchers.Default) {
-                        runCatching { stack.vfs.write(uri("/a.txt"), "written".toByteArray()) }.exceptionOrNull()
+                        try {
+                            stack.vfs.write(uri("/a.txt"), "written".toByteArray())
+                            escaped.complete(null)
+                        } catch (failure: Throwable) {
+                            escaped.complete(failure)
+                        }
                     }
                 pausing.awaitFirstWrite() // 写链已经走到 Storage I/O，取消就发生在这个挂起点上
                 job.cancel(cancelled)
 
                 withTimeout(30_000) { job.join() } // 取消当场结束，不会挂在边界上等
-                assertTrue(job.isCancelled, "取消以 CancellationException 结束协程")
-                val propagated = runCatching { job.await() }.exceptionOrNull()
-                assertTrue(propagated is CancellationException, "CancellationException 原样传播，不被包成 VfsException：$propagated")
-                assertEquals(cancelled.message, propagated?.message, "取消原因也原样传出去")
+                val escapedFailure = withTimeout(30_000) { escaped.await() }
+                assertNotNull(escapedFailure, "写链应该把取消抛出来，而不是安静地结束")
+                assertFalse(escapedFailure is VfsException, "取消没有被包装成 VfsException：$escapedFailure")
+                assertTrue(escapedFailure is CancellationException, "CancellationException 原样传播：$escapedFailure")
+                assertSame(
+                    cancelled,
+                    escapedFailure?.cause ?: escapedFailure,
+                    "取消原因一致（协程栈帧恢复可能复制异常，但原实例在 cause 上）",
+                )
                 assertEquals(0, pausing.pausedWrites(), "取消返回后写链已经退出闩锁")
                 assertFalse(Files.exists(diskRoot.resolve("a.txt")), "落盘那一步被取消，内容没有写进去")
                 assertEquals(0, activeNodes(), "取消不提交 Node")

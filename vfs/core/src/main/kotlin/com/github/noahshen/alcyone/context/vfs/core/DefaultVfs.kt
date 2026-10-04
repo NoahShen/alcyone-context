@@ -36,7 +36,6 @@ import com.github.noahshen.alcyone.context.vfs.core.storage.StorageCapabilities
 import com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode
 import com.github.noahshen.alcyone.context.vfs.core.transaction.TransactionScope
-import com.github.noahshen.alcyone.context.vfs.withEffect
 import kotlinx.coroutines.CancellationException
 import java.time.Instant
 
@@ -80,7 +79,7 @@ data class VfsLimits(
  * | 发生了什么 | 报什么 |
  * | --- | --- |
  * | 参数、限额、结构、路由、能力、模式、类型冲突被拒 | 原错误码 + effect `NONE`（一个字节都没动） |
- * | 补父目录**建到一半**失败 | 原错误码 + 至少 `PARTIAL`（已经建出来的空目录是真实副作用）；首层就失败 → `NONE` |
+ * | 补父目录**建到一半**失败 | 原错误码 + 至少 `PARTIAL`（已经建出来的空目录是真实副作用）；一个都没建成时保留后端自己的 effect |
  * | 补完父目录之后 Storage 写失败 | 原错误码 + 至少 `PARTIAL`（留下的空目录是真实副作用） |
  * | 后端说不清是否写成功 | 保持 `UNKNOWN`，不改报 `NONE` / `PARTIAL` |
  * | Storage 写成功但状态或事件提交失败 | `STATE_ERROR` + `PARTIAL`（文件内容留着，Node 与事件一起回滚，没有成功通知） |
@@ -286,7 +285,7 @@ class DefaultVfs(
                 storage.write(target.relativePath, content, mode.toStorageMode())
             } catch (failure: VfsException) {
                 // 补出来的空目录是真实副作用，不能把 effect 降回 NONE；后端说不清的 UNKNOWN 保持原样。
-                throw failure.mergedWithKnownChanges(createdDirectories)
+                throw failure.withKnownChanges(createdDirectories)
             }
         return try {
             pipeline.commitInsideBoundary { scope -> commitWrite(scope, uri, existedBefore, written) }
@@ -346,14 +345,16 @@ class DefaultVfs(
      * 从挂载根往下逐段看：已存在的目录跳过，是文件就拒绝（改写遮蔽文件是另一回事，T02 §3.2），
      * 缺失的记下来等会儿建。父目录不批量登记、不发单独的目录创建事件。
      *
-     * 逐层建，每建成一个就把「已经建过」记进 [created]：中途某层失败时，这次调用已经留下的目录
+     * 逐层建，每建成一层就记一次已建层数：中途某层失败时，这次调用已经留下的目录
      * 不会因为函数退出就被忘掉，异常直接带着这个事实往上抛，由调用方合并进 effect（至少 `PARTIAL`）。
+     *
+     * @return 这次真的建出来的层数；诊断文本只说「建了部分父目录」，不带后端相对路径（那是 Storage 的内部坐标）。
      */
     private suspend fun createMissingParents(
         uri: VfsUri,
         storage: Storage,
         target: RouteMatch,
-    ): List<StoragePath> {
+    ): Int {
         val missing = mutableListOf<StoragePath>()
         var prefix = emptyList<String>()
         for (segment in target.relativePath.parent.segments) {
@@ -377,7 +378,7 @@ class DefaultVfs(
                 NodeType.DIRECTORY -> Unit
             }
         }
-        if (missing.isEmpty()) return emptyList()
+        if (missing.isEmpty()) return 0
         // 父目录已经齐全时不看这个能力；确实要补而补不了才拒绝。
         if (!capabilitiesOf(target).createDirectory) {
             throw VfsException(
@@ -386,15 +387,15 @@ class DefaultVfs(
                 uri,
             )
         }
-        val created = mutableListOf<StoragePath>()
+        var created = 0
         for (directory in missing) {
             try {
                 storage.createDirectory(directory)
             } catch (failure: VfsException) {
                 // 先建成的那些目录留在盘上，不回删也不自动补偿；只是必须把「已经建了什么」如实带出去。
-                throw failure.withCreatedParents(created)
+                throw failure.withKnownChanges(created)
             }
-            created += directory
+            created++
         }
         return created
     }
@@ -519,26 +520,19 @@ private fun WriteMode.toStorageMode(): StorageWriteMode =
     }
 
 /**
- * 把「已经补过父目录」这个已知事实合并进 effect：只把还写着 `NONE` 的提到 `PARTIAL`，
- * `UNKNOWN` 保持 `UNKNOWN`（后端说不清就是说不清），已经是 `PARTIAL` 的不动。
- */
-private fun VfsException.mergedWithKnownChanges(createdDirectories: List<StoragePath>): VfsException =
-    if (createdDirectories.isEmpty()) this else withKnownChanges(createdDirectories)
-
-/**
- * 建父目录建到一半失败：把「已经建出来的那些」合进 effect。
+ * 把「已经建出一部分父目录」这个已知事实合并进 effect：写文件失败和建目录失败共用这一条规则，
+ * 只把还写着 `NONE` 的提到 `PARTIAL`；`UNKNOWN` 保持 `UNKNOWN`（后端说不清就是说不清），已经是 `PARTIAL` 的不动。
  *
- * 一层都没建成时原样抛出（`NONE` 确实准确）；建成过才提到 `PARTIAL`。`UNKNOWN` 仍不改判。
+ * 一个目录都没建成时原样抛出，保留后端自己的 effect（通常是 `NONE`，但后端说了别的就照它说的）。
+ * message 末尾**追加**一句诊断说明，不替换原消息，也不带后端相对路径。
  */
-private fun VfsException.withCreatedParents(created: List<StoragePath>): VfsException =
-    if (created.isEmpty()) this else withKnownChanges(created)
-
-/**
- * 只提 `NONE`；已经是 `PARTIAL` / `UNKNOWN` 的原样带着继续往上走。
- * 这样两个阶段共用一条规则，不会出现「建完目录后写失败报 UNKNOWN，写失败却报 PARTIAL」这种前后不一致。
- */
-private fun VfsException.withKnownChanges(created: List<StoragePath>): VfsException {
-    if (effect != VfsEffect.NONE) return this
-    val note = "the parent directories ${created.joinToString { it.toRelativeString() }} created for this call are still there"
-    return withEffect(VfsEffect.PARTIAL, note)
+private fun VfsException.withKnownChanges(createdDirectories: Int): VfsException {
+    if (createdDirectories == 0 || effect != VfsEffect.NONE) return this
+    return VfsException(
+        code,
+        "$message (the parent directories created for this call are still there)",
+        uri,
+        operationId,
+        VfsEffect.PARTIAL,
+    ).apply { initCause(this@withKnownChanges) }
 }
