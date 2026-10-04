@@ -65,7 +65,7 @@ data class VfsLimits(
 
 /**
  * VFS 的基础文件操作（T15）：把已交付的路由、预检、Node Registry、事件提交和 Storage 拼成 `read` / `write` / `stat` /
- * `list` 和 `getNode`。Core 只依赖 Port，具体 SQLite 与本地磁盘由调用方注入。
+ * `list` 和 `getNode`；T16 加上 `delete`。Core 只依赖 Port，具体 SQLite 与本地磁盘由调用方注入。
  *
  * 例：挂载 `/resources` 指向本地磁盘，`write(alcyone://resources/notes/a.txt, "hi")` 会
  * 自动建出 `notes` 目录、写文件、在同一个事务里登记 Node 并追加 `FILE_CREATED` 事件。
@@ -83,11 +83,16 @@ data class VfsLimits(
  * | 补完父目录之后 Storage 写失败 | 原错误码 + 至少 `PARTIAL`（留下的空目录是真实副作用） |
  * | 后端说不清是否写成功 | 保持 `UNKNOWN`，不改报 `NONE` / `PARTIAL` |
  * | Storage 写成功但状态或事件提交失败 | `STATE_ERROR` + `PARTIAL`（文件内容留着，Node 与事件一起回滚，没有成功通知） |
+ * | 删除时 Storage 报错 | 原错误码 + 后端自己的 effect（原样带出，不降级）；逻辑状态先留着不清 |
+ * | 删除已在盘上生效但状态或事件提交失败 | `STATE_ERROR` + `PARTIAL`（文件删了回不来，Node 与 Metadata 保持原样） |
  * | 通知队列满、Consumer 抛错 | 不影响已提交的结果（复用 T14 的 EventPipeline） |
  * | 协程被取消 | 取消原样传播；已提交的事实不撤回，不声称「取消 = 全部回滚」 |
  *
- * **本轮没交付的方法**：[move] / [delete] / [getMetadata] / [setMetadata] 明确抛
- * [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用，分别由 T16、T17、T20～T22 接续。
+ * **删除（T16）**：物理删除走 Storage 自己的递归实现（Core 不重写遍历），逻辑侧把目标与「完整段边界内已登记的子树」
+ * 标记删除、清掉各自 Metadata，追加**一条**目标级事件（目录删除表示整棵子树失效，不为后代逐个造事件）。
+ *
+ * **本轮没交付的方法**：[move] / [getMetadata] / [setMetadata] 明确抛
+ * [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用，分别由 T17、T20～T22 接续。
  */
 class DefaultVfs(
     /** 挂载与配置目录（T09）。 */
@@ -444,11 +449,32 @@ class DefaultVfs(
         target: VfsUri,
     ): NodeInfo = throw notDeliveredYet("move", "planned for T20~T22")
 
-    /** 删除：T16 接续。 */
+    /**
+     * 删掉一个文件或目录：结构保护 → 路由 → 向 Storage 确认真实类型 → Guard → 读逻辑记录 → 物理删除 → 状态与事件同事务提交。
+     *
+     * 例：`delete(alcyone://resources/notes/a.txt)` 会让磁盘上的 `notes/a.txt` 消失、旧 Node ID 查不到、
+     * Metadata 被清掉，并追加一条 `FILE_DELETED`；目标没登记过时事件的 `nodeId` 是 null。
+     *
+     * 顺序契约（任何可确认的拒绝都发生在碰盘之前）：
+     *
+     * 1. 逻辑根、命名空间根、挂载根、承载后代挂载的祖先 → `UNSUPPORTED_OPERATION`，`recursive = true` 也不例外；
+     * 2. 路由（`MOUNT_NOT_FOUND`）、只读、能力快照缺失 → 走 T10 预检，`effect = NONE`；
+     * 3. `storage.stat` 确认目标**真的存在**且确认实际类型；不存在 → `NOT_FOUND`（不当作幂等成功）；
+     *    已登记 Node 的类型与实际类型冲突 → `CONFLICT`，不借删除静默把记录改对；
+     * 4. 需要的逻辑记录先读出来（目标是文件看自身，是目录看已登记子树），查询失败发生在副作用之前；
+     * 5. `storage.delete`（T12 负责递归、防符号链接和 `PARTIAL` / `UNKNOWN` 语义），Core 不重写物理遍历；
+     * 6. 一个事务里标记这些 Node 删除、清各自 Metadata、追加**一条**目标级事件。
+     *
+     * 文件删不删得看 `recursive`；空目录非递归可删，非空目录非递归由 Storage 报 `DIRECTORY_NOT_EMPTY`。
+     * 目标之外的空父目录不顺带删除（T02 §8.1）。
+     */
     override suspend fun delete(
         uri: VfsUri,
         options: DeleteOptions,
-    ): Unit = throw notDeliveredYet("delete", "planned for T16")
+    ) {
+        // 整条链只取这一次锁：结构保护、预检、Storage 删除和最后的状态提交都在里面。
+        return boundary.withLock { deleteInsideBoundary(uri, options) }
+    }
 
     /** 读 Metadata：T17 接续。 */
     override suspend fun getMetadata(id: NodeId): NodeMetadata = throw notDeliveredYet("getMetadata", "planned for T17")
@@ -458,6 +484,120 @@ class DefaultVfs(
         id: NodeId,
         metadata: NodeMetadata,
     ): Unit = throw notDeliveredYet("setMetadata", "planned for T17")
+
+    /** 删链的锁内部分：先拒绝结构冲突，再按真实类型跑预检，最后物理删除 + 逻辑提交。 */
+    private suspend fun deleteInsideBoundary(
+        uri: VfsUri,
+        options: DeleteOptions,
+    ) {
+        val path = uri.path
+        requireDeletableStructure(uri)
+
+        val route = router.route(path) ?: throw mountNotFound(path)
+        val storage = storageFor(route)
+        // 确认物理存在与**实际类型**：不存在时 Storage 直接报 NOT_FOUND，不当作幂等成功；
+        // 其他错误（后端已关、权限不足）照抛。
+        val attributes = storage.stat(route.relativePath)
+
+        // 按真实类型构造意图再走一遍 T10 预检：声明类型是调用方给的，删目录时更不能拿声明当事实。
+        val target =
+            OperationGuard
+                .check(
+                    OperationIntent.delete(path, attributes.type, options.recursive),
+                    router,
+                    capabilities,
+                ).source!!
+
+        val cleanup = planLogicalCleanup(uri, target, attributes.type)
+        // 物理删除交给 Storage：递归遍历、防符号链接和部分删除的 effect 都由 T12 负责。
+        storage.delete(target.relativePath, options.recursive)
+
+        try {
+            pipeline.commitInsideBoundary { scope -> commitDelete(scope, uri, cleanup) }
+        } catch (cancellation: CancellationException) {
+            // 取消原样传播。盘上的东西已经删掉这件事不会因为取消而消失，也不声称逻辑状态已回滚。
+            throw cancellation
+        } catch (failure: Exception) {
+            // 只收普通异常：JVM 的 Error（OOM、StackOverflow）不是状态库拒绝了一条记录，原样抛出去。
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The delete reached the storage but the node state, metadata and event could not be committed: " +
+                    "${failure.message ?: failure::class.java.simpleName}",
+                uri,
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+    }
+
+    /**
+     * 配置结构冲突先于一切 I/O：逻辑根、命名空间根、挂载根、缺层祖先以及承载后代挂载的祖先都不许删，
+     * `recursive = true` 也不例外（T02 §8.2）。
+     *
+     * 例：`/resources/work` 下面挂了 `medical`，`delete("/resources/work", recursive = true)` 当场拒；
+     * 但 `/resources/work/note.md` 是普通文件，照常能删。
+     *
+     * 消息按具体原因写一句，方便调用方区分是哪条结构规则挡住了。
+     */
+    private fun requireDeletableStructure(uri: VfsUri) {
+        val path = uri.path
+        if (!router.isConfiguredDirectory(path)) return
+        val reason =
+            when {
+                path.isRoot -> "it is the logical root"
+                router.isMountPoint(path) -> "it is a mount root, and a mounted directory must not be deleted"
+                router.hasDescendantMounts(path) ->
+                    "it contains another mount, and recursive = true cannot delete across mounts"
+                else -> "it is a configured directory (namespace root or a mount ancestor)"
+            }
+        throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "Cannot delete '$path': $reason", uri)
+    }
+
+    /**
+     * 物理删除**之前**把需要清理的逻辑记录读出来：目标自己的记录，目录则加上完整段边界内的已登记子树。
+     *
+     * 例：`a` 从没登记过，但 `a/b.txt` 登记过——删 `a` 仍然会把 `b.txt` 的记录和 Metadata 一起清掉。
+     * `findSubtree` 按完整段匹配，`a-old`、`A` 都不会被算进 `a` 的子树，这里不再自己写前缀比较。
+     */
+    private suspend fun planLogicalCleanup(
+        uri: VfsUri,
+        target: RouteMatch,
+        actualType: NodeType,
+    ): DeleteCleanup {
+        val recorded = nodes.findByPath(uri.path)
+        // 逻辑记录说它是目录、盘上却是文件（或反过来）：状态和现实对不上，绝不靠删除把类型改过来。
+        if (recorded != null && recorded.type != actualType) {
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "Registered node at '${uri.path}' is ${recorded.type} but the backing storage reports $actualType; " +
+                    "deleting does not change stored node records",
+                uri,
+            )
+        }
+        val victims =
+            if (actualType == NodeType.DIRECTORY) {
+                nodes.findSubtree(uri.path).map { it.id }
+            } else {
+                listOfNotNull(recorded?.id)
+            }
+        return DeleteCleanup(recorded?.id, victims.distinct(), actualType)
+    }
+
+    /**
+     * 最后一个事务：标记这些 Node 删除、清掉各自 Metadata、追加**一条**目标级事件（T03 §2、§4）。
+     *
+     * 目录删除事件代表整棵逻辑子树失效，不为每个后代另造事件或身份（T16 §2.4）。
+     * 历史事件不删：里面留着的旧 Node ID 仍然是那次写入的事实。
+     */
+    private suspend fun commitDelete(
+        scope: TransactionScope,
+        uri: VfsUri,
+        cleanup: DeleteCleanup,
+    ) {
+        scope.nodes.markDeleted(cleanup.ids, clock())
+        cleanup.ids.forEach { scope.metadata.delete(it) }
+        val type = if (cleanup.type == NodeType.DIRECTORY) VfsEventType.DIRECTORY_DELETED else VfsEventType.FILE_DELETED
+        scope.events.append(events.newRecord(type, cleanup.targetNodeId, uri))
+    }
 
     /** 读取实际上限：配置上限与单次上限里较小的那个。`null` 用配置，`0` 就是只接受空文件。 */
     private fun effectiveReadLimit(options: ReadOptions): Long =
@@ -510,6 +650,21 @@ class DefaultVfs(
 
 /** 后端说「没有」和「必要祖先是个文件」这两种可识别的遮蔽；其余错误一律照抛。 */
 private val SHADOWED_CODES = setOf(VfsErrorCode.NOT_FOUND, VfsErrorCode.TYPE_MISMATCH)
+
+/**
+ * 一次删除在物理操作**之前**读好的逻辑清理清单。
+ *
+ * 例：删目录 `/resources/a`，`a` 自己没登记、但 `a/b.txt` 登记了，
+ * 这时 `ids` 是 `[b 的 Node ID]`、`targetNodeId` 是 null，事件里也就没有身份。
+ */
+private data class DeleteCleanup(
+    /** 目标自己的 Node ID；目标没登记过时为 null，也就是事件里没有身份。 */
+    val targetNodeId: NodeId?,
+    /** 这次要标记删除的 Node ID（目标 + 目录子树）；一个都没有时是空列表。 */
+    val ids: List<NodeId>,
+    /** 确认过的实际类型，决定 `FILE_DELETED` 还是 `DIRECTORY_DELETED`。 */
+    val type: NodeType,
+)
 
 /** 公共模式直接对应后端模式：三个名字一一对应，不用再做翻译表。 */
 private fun WriteMode.toStorageMode(): StorageWriteMode =

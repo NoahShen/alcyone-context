@@ -1,6 +1,5 @@
 package com.github.noahshen.alcyone.context.vfs.core
 
-import com.github.noahshen.alcyone.context.vfs.DeleteOptions
 import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.VfsEffect
@@ -22,7 +21,7 @@ import kotlin.streams.toList
 import kotlin.test.assertFailsWith
 
 /**
- * T15 A07：阶段边界——未交付的四个方法明确拒绝且零副作用，Core 也只认 Port。
+ * T15 A07：阶段边界——未交付的三个方法明确拒绝且零副作用，Core 也只认 Port。
  *
  * 依赖方向本身由 `vfs/core/build.gradle.kts` 决定（只有 `:vfs:api`），这里用源码扫描与反射做静态佐证。
  * 测试的工作目录是模块目录，所以 `src/main/kotlin` 是相对的。
@@ -37,7 +36,7 @@ class DefaultVfsStageBoundaryTest {
     }
 
     @Test
-    fun `A07 the four operations still to be delivered are refused with no side effect`() =
+    fun `A07 the three operations still to be delivered are refused with no side effect`() =
         runBlocking {
             val disk = StorageFakeImpl()
             disk.withFile("a.txt", "hello")
@@ -49,8 +48,6 @@ class DefaultVfsStageBoundaryTest {
             val failures =
                 listOf(
                     assertFailsWith<VfsException>("move") { harness.vfs.move(uri, VfsUri.parse("alcyone://resources/b.txt")) },
-                    assertFailsWith<VfsException>("delete") { harness.vfs.delete(uri) },
-                    assertFailsWith<VfsException>("delete recursive") { harness.vfs.delete(uri, DeleteOptions(recursive = true)) },
                     assertFailsWith<VfsException>("getMetadata") { harness.vfs.getMetadata(id) },
                     assertFailsWith<VfsException>("setMetadata") { harness.vfs.setMetadata(id, NodeMetadata(description = "x")) },
                 )

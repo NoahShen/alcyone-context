@@ -1,5 +1,6 @@
 package com.github.noahshen.alcyone.context.vfs.integration.vfs
 
+import com.github.noahshen.alcyone.context.vfs.DeleteOptions
 import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.NodeType
@@ -27,6 +28,8 @@ import com.github.noahshen.alcyone.context.vfs.core.registry.NodeRegistry
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.MountRecord
+import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
+import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository
 import com.github.noahshen.alcyone.context.vfs.core.router.MountRouter
 import com.github.noahshen.alcyone.context.vfs.core.state.StateBoundary
 import com.github.noahshen.alcyone.context.vfs.core.storage.Storage
@@ -42,11 +45,13 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
@@ -58,6 +63,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.DriverManager
+import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertFailsWith
@@ -518,6 +524,26 @@ class DefaultVfsRealStackTest {
             }
         }
 
+    /** 库里事件带的 Node ID，按写入顺序；历史事件保留旧 ID 用它断言。 */
+    private fun eventNodeIds(): List<String> =
+        DriverManager.getConnection("jdbc:sqlite:$databaseFile").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT COALESCE(node_id, '') FROM event ORDER BY rowid").use { rows ->
+                    buildList { while (rows.next()) add(rows.getString(1)) }
+                }
+            }
+        }
+
+    /** 当前有效 Node 的逻辑路径，排序后比较（删除失败时记录应当原样留着）。 */
+    private fun activePaths(): List<String> =
+        DriverManager.getConnection("jdbc:sqlite:$databaseFile").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT vfs_path FROM node WHERE deleted_at IS NULL ORDER BY vfs_path").use { rows ->
+                    buildList { while (rows.next()) add(rows.getString(1)) }
+                }
+            }
+        }
+
     private fun randomNodeId() = NodeId.parse("018f0a5c-1b2c-7def-8abc-0000000000ff")
 
     /**
@@ -541,6 +567,338 @@ class DefaultVfsRealStackTest {
         }
     }
 
+    @Test
+    @Timeout(60)
+    fun `A01 the real disk loses a registered file an empty directory and refuses a full one`() =
+        runBlocking {
+            withStack { stack ->
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                Files.createDirectory(diskRoot.resolve("empty"))
+                Files.createDirectory(diskRoot.resolve("full"))
+                Files.writeString(diskRoot.resolve("full/b.txt"), "child")
+
+                stack.vfs.delete(uri("/a.txt"))
+                assertFalse(Files.exists(diskRoot.resolve("a.txt")), "文件真的从盘上没了")
+
+                stack.vfs.delete(uri("/empty"))
+                assertFalse(Files.exists(diskRoot.resolve("empty")), "空目录非递归也能删")
+
+                val refused = assertFailsWith<VfsException> { stack.vfs.delete(uri("/full")) }
+                assertEquals(VfsErrorCode.DIRECTORY_NOT_EMPTY, refused.code)
+                assertEquals(VfsEffect.NONE, refused.effect, "非空目录非递归：一个字节都没删")
+                assertTrue(Files.exists(diskRoot.resolve("full/b.txt")), "目录里的东西还在")
+
+                val missing = assertFailsWith<VfsException> { stack.vfs.delete(uri("/gone.txt")) }
+                assertEquals(VfsErrorCode.NOT_FOUND, missing.code, "缺失目标不当作幂等成功")
+
+                stack.vfs.delete(uri("/full"), DeleteOptions(recursive = true))
+                assertFalse(Files.exists(diskRoot.resolve("full")), "递归删掉整棵子树")
+                assertTrue(Files.isDirectory(diskRoot), "挂载根不动：删 a 不顺带删目标之外的父目录")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A03 the real database retires the whole registered subtree and a rebuild gets a new id`() =
+        runBlocking {
+            withStack { stack ->
+                stack.vfs.write(uri("/a/b.txt"), "b".toByteArray())
+                stack.vfs.write(uri("/a/deep/c.txt"), "c".toByteArray())
+                stack.vfs.write(uri("/a-old/keep.txt"), "keep".toByteArray())
+                stack.vfs.write(uri("/A.txt"), "case".toByteArray())
+                // 绕过 VFS 直接删掉磁盘上的 a/deep/c.txt：物理没了，逻辑记录还挂着——这正是要验证的「幽灵记录」。
+                Files.delete(diskRoot.resolve("a/deep/c.txt"))
+
+                val childB = stack.vfs.stat(uri("/a/b.txt")).id
+                val childC = stack.nodes.findByPath(VfsPath.parse("/resources/a/deep/c.txt"))!!.id
+                val sibling = stack.nodes.findByPath(VfsPath.parse("/resources/a-old/keep.txt"))!!.id
+                val caseSibling = stack.nodes.findByPath(VfsPath.parse("/resources/A.txt"))!!.id
+                stack.metadata.put(childB, NodeMetadata(setOf("ct"), "胸部 CT"))
+                stack.metadata.put(childC, NodeMetadata(description = "already gone on disk"))
+                stack.metadata.put(sibling, NodeMetadata(description = "keep me"))
+
+                stack.vfs.delete(uri("/a"), DeleteOptions(recursive = true))
+
+                assertFalse(Files.exists(diskRoot.resolve("a")), "物理子树真的没了")
+                assertTrue(stack.nodes.findSubtree(VfsPath.parse("/resources/a")).isEmpty(), "逻辑子树整体退役")
+                listOf(childB, childC).forEach { id ->
+                    val gone = assertFailsWith<VfsException> { stack.vfs.getNode(id) }
+                    assertEquals(VfsErrorCode.NOT_FOUND, gone.code, "旧 ID 查不到了")
+                    assertNull(stack.metadata.get(id), "Metadata 跟着清掉")
+                }
+                assertEquals(sibling, stack.nodes.findByPath(VfsPath.parse("/resources/a-old/keep.txt"))?.id, "同名前缀兄弟不受影响")
+                assertEquals(caseSibling, stack.nodes.findByPath(VfsPath.parse("/resources/A.txt"))?.id, "大小写兄弟不受影响")
+                assertEquals(NodeMetadata(description = "keep me"), stack.metadata.get(sibling))
+                assertTrue(Files.exists(diskRoot.resolve("a-old/keep.txt")))
+                assertTrue(Files.exists(diskRoot.resolve("A.txt")))
+                assertTrue(Files.isDirectory(diskRoot), "目标之外的父目录（这里是挂载根）留着")
+
+                assertEquals(
+                    listOf("FILE_CREATED", "FILE_CREATED", "FILE_CREATED", "FILE_CREATED", "DIRECTORY_DELETED"),
+                    eventTypes(),
+                    "一次删除一条目标级事件，不为后代逐个造事件",
+                )
+
+                // 同一路径重建：旧记录已经失效，新记录是新身份；历史事件仍带着旧 ID。
+                val rebuilt = stack.vfs.write(uri("/a/b.txt"), "again".toByteArray())
+                assertNotEquals(childB, rebuilt.id, "同路径重建获得新 Node ID")
+                assertTrue(eventNodeIds().contains(childB.value), "历史事件保留删除前的旧 ID")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A04 a real sqlite append conflict after a real delete rolls the state back and sends nothing`() =
+        runBlocking {
+            // 测试装置：让本次事务的第一条事件用固定 ID，和库里已存在的那条撞主键——
+            // 真实 SQLite 拒绝重复主键，回滚也是真实事务。磁盘上的删除是真的，回滚不了。
+            val colliding = VfsEventId.parse("018f0a5c-1b2c-7def-8abc-0000000000e6")
+            withStack(unitOfWork = { CollidingEventUnitOfWork(it, colliding) }) { stack ->
+                // 预置不用 DefaultVfs：这个包装器会把**每个事务的第一条事件**换成 colliding，
+                // 所以文件、Node、Metadata 和历史事件都直接用真库预置，只让待测的删除撞上主键。
+                Files.writeString(diskRoot.resolve("a.txt"), "hello")
+                val written =
+                    NodeId.parse("018f0a5c-1b2c-7def-8abc-0000000000a4")
+                val now = Instant.now()
+                stack.nodes.register(NodeRecord(written, VfsPath.parse("/resources/a.txt"), NodeType.FILE, true, now, now))
+                stack.metadata.put(written, NodeMetadata(description = "keep"))
+                stack.rawUnitOfWork.inTransaction { scope ->
+                    scope.events.append(
+                        EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/seed.txt")).copy(id = colliding),
+                    )
+                }
+                val recorder = TailRecorder()
+                stack.notifier.subscribe(recorder)
+
+                val failure = assertFailsWith<VfsException> { stack.vfs.delete(uri("/a.txt")) }
+
+                assertEquals(VfsErrorCode.STATE_ERROR, failure.code)
+                assertEquals(VfsEffect.PARTIAL, failure.effect, "文件真的删掉了，这是已知变更")
+                assertFalse(Files.exists(diskRoot.resolve("a.txt")), "物理删除不自动补偿")
+                assertEquals(written, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "Node 标记删除随事务回滚")
+                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 一起回滚")
+                assertEquals(1, eventCount(), "库里只有预置那一条，删除事件没进库")
+
+                // 失败不该有通知：按 ID 末尾标记确认（标记之前若还有别的通知，一定排在它前面）。
+                val marker = EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/tail.txt"))
+                stack.notifier.publish(listOf(marker.toVfsEvent()))
+                recorder.await(marker.id)
+                assertEquals(listOf(marker.id.value), recorder.received.map { it.id.value }, "失败的事务没有成功通知")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A05 a half-finished backend delete keeps its effect and the records stay`() =
+        runBlocking {
+            // 故障注入，不是 OS 自发故障：包装器真的删掉子树里的一个文件，然后抛出带指定 effect 的错误。
+            // 真文件系统没法自己造出「删了一半才失败」，所以用包装器；断言仍然对着真盘。
+            val partial = VfsException(VfsErrorCode.STORAGE_ERROR, "lost the reply halfway", effect = VfsEffect.PARTIAL)
+            withStack(
+                wrapStorage = { PartialDeleteStorage(it, partialPath = "a/one.txt", failure = partial) },
+            ) { stack ->
+                stack.vfs.write(uri("/a/one.txt"), "1".toByteArray())
+                stack.vfs.write(uri("/a/two.txt"), "2".toByteArray())
+                val one = stack.vfs.stat(uri("/a/one.txt")).id
+                val two = stack.vfs.stat(uri("/a/two.txt")).id
+                stack.metadata.put(one, NodeMetadata(description = "one"))
+                stack.metadata.put(two, NodeMetadata(description = "two"))
+
+                val failure = assertFailsWith<VfsException> { stack.vfs.delete(uri("/a"), DeleteOptions(recursive = true)) }
+
+                assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code, "保留后端自己的错误码")
+                assertEquals(VfsEffect.PARTIAL, failure.effect, "确实删掉了一个文件，PARTIAL 保真，不降级成 NONE")
+                assertFalse(Files.exists(diskRoot.resolve("a/one.txt")), "注入的那次删除真的生效了")
+                assertTrue(Files.exists(diskRoot.resolve("a/two.txt")), "另一个文件还在")
+                assertEquals(listOf("/resources/a/one.txt", "/resources/a/two.txt"), activePaths(), "物理失败就不按猜测部分清理逻辑状态")
+                assertEquals(NodeMetadata(description = "one"), stack.metadata.get(one), "Metadata 也不提前清")
+                assertEquals(listOf("FILE_CREATED", "FILE_CREATED"), eventTypes(), "没有发布目录删除成功的事件")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A05 an UNKNOWN backend delete is reported as UNKNOWN`() =
+        runBlocking {
+            val unknown = VfsException(VfsErrorCode.STORAGE_ERROR, "connection lost mid delete", effect = VfsEffect.UNKNOWN)
+            withStack(wrapStorage = { FailingDeleteStorage(it, unknown) }) { stack ->
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val id = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+
+                val failure = assertFailsWith<VfsException> { stack.vfs.delete(uri("/a.txt")) }
+
+                assertEquals(VfsEffect.UNKNOWN, failure.effect, "后端说不清就是说不清，不改报 NONE / PARTIAL")
+                assertTrue(Files.exists(diskRoot.resolve("a.txt")))
+                assertEquals(id, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id)
+                assertEquals(listOf("FILE_CREATED"), eventTypes())
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A06 the second delete is held at the boundary before it touches the backend`() =
+        runBlocking {
+            withStack(wrapStorage = { PausingStorage(it, blockingPath = null, blockingDeletePath = "a") }) { stack ->
+                val pausing = stack.storages.getValue("local") as PausingStorage
+                pausing.releaseFirstWrite() // 写链不参与本用例的闩锁，接下来只拦删除
+                stack.vfs.write(uri("/a/one.txt"), "1".toByteArray())
+                stack.vfs.write(uri("/a/two.txt"), "2".toByteArray())
+
+                val first = async(Dispatchers.Default) { stack.vfs.delete(uri("/a"), DeleteOptions(recursive = true)) }
+                pausing.awaitFirstDelete() // 第一个删除已经进了 Storage I/O，正拿着边界
+                val backendCallsBeforeSecond = pausing.callLog().size
+
+                val second =
+                    async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                        runCatching { stack.vfs.delete(uri("/a/two.txt")) }.exceptionOrNull()
+                    }
+                // UNDISPATCHED：第二个协程在当前线程直接开跑，直到第一个挂起点才交回控制权。
+                assertFalse(second.isCompleted, "第二个请求已经跑到第一个挂起点，却直接跑完了——它没被边界挡住")
+                assertEquals(
+                    backendCallsBeforeSecond,
+                    pausing.callLog().size,
+                    "第二个请求一次 Storage 都没碰：${pausing.callLog()}",
+                )
+                assertEquals(1, pausing.pausedDeletes(), "此刻只有第一个删除还挂在闩锁上")
+
+                pausing.releaseDelete()
+
+                withTimeout(30_000) { first.await() }
+                val failure = withTimeout(30_000) { second.await() }
+
+                assertFalse(Files.exists(diskRoot.resolve("a")), "第一个删除真的删掉了子树")
+                assertEquals(VfsErrorCode.NOT_FOUND, (failure as? VfsException)?.code, "后到的那个看到的是目标已经不存在")
+                assertEquals(
+                    listOf("delete:a", "stat:a/two.txt"),
+                    pausing.callLog().takeLast(2),
+                    "第二个删除直到第一个删除提交完才动过后端",
+                )
+                assertEquals(
+                    listOf("FILE_CREATED", "FILE_CREATED", "DIRECTORY_DELETED"),
+                    eventTypes(),
+                    "被挡住的第二个删除没有产生任何事件",
+                )
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A06 a delete cancelled at the DefaultVfs entry propagates, releases the lock and commits nothing`() =
+        runBlocking {
+            withStack(wrapStorage = { PausingStorage(it, blockingPath = null, blockingDeletePath = "a.txt") }) { stack ->
+                val pausing = stack.storages.getValue("local") as PausingStorage
+                pausing.releaseFirstWrite() // 写链不参与本用例的闩锁，接下来只拦删除
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val written = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+                val recorder = TailRecorder()
+                stack.notifier.subscribe(recorder)
+                val cancelled = CancellationException("cancelled while deleting")
+
+                // 捕获发生在**调用 DefaultVfs 的协程内部**：被取消的 Deferred.await() 必然抛取消，
+                // 拿它当证据等于什么都没测，要留下删除链自己真正抛出来的那一个。
+                val escaped = CompletableDeferred<Throwable?>()
+                val job =
+                    async(Dispatchers.Default) {
+                        try {
+                            stack.vfs.delete(uri("/a.txt"))
+                            escaped.complete(null)
+                        } catch (failure: Throwable) {
+                            escaped.complete(failure)
+                        }
+                    }
+                pausing.awaitFirstDelete() // 删除链已经走到 Storage I/O，取消就发生在这个挂起点上
+                job.cancel(cancelled)
+
+                withTimeout(30_000) { job.join() }
+                val escapedFailure = withTimeout(30_000) { escaped.await() }
+                assertNotNull(escapedFailure, "删除链应该把取消抛出来，而不是安静地结束")
+                assertFalse(escapedFailure is VfsException, "取消没有被包装成 VfsException：$escapedFailure")
+                assertTrue(escapedFailure is CancellationException, "CancellationException 原样传播：$escapedFailure")
+                assertSame(
+                    cancelled,
+                    escapedFailure?.cause ?: escapedFailure,
+                    "取消原因一致（协程栈帧恢复可能复制异常，但原实例在 cause 上）",
+                )
+                assertEquals(0, pausing.pausedDeletes(), "取消返回后删除链已经退出闩锁")
+                assertTrue(Files.exists(diskRoot.resolve("a.txt")), "取消发生在真正删盘之前")
+                assertEquals(written, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "取消不提交 Node")
+                assertEquals(listOf("FILE_CREATED"), eventTypes(), "取消不发成功事件")
+
+                // 锁已放行：紧接着的删除能正常拿到同一把边界并完成——它能挂上闩锁就是锁没被留下的证据。
+                stack.vfs.delete(uri("/a.txt"))
+                assertEquals(0, pausing.pausedDeletes(), "挂起发生在取消之后，锁已经放行")
+                assertFalse(Files.exists(diskRoot.resolve("a.txt")))
+
+                // 末尾标记按 ID 等：如果还有别的通知，它一定排在标记之前。
+                val marker = EventFactory().newRecord(VfsEventType.FILE_DELETED, null, uri("/tail.txt"))
+                stack.notifier.publish(listOf(marker.toVfsEvent()))
+                recorder.await(marker.id)
+                assertEquals(listOf(written, null), recorder.received.map { it.nodeId }, "只有成功的那次有通知")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A06 a delete cancelled inside the commit propagates the original exception and rolls the state back`() =
+        runBlocking {
+            // 取消点放在「物理删除已完成、事务还没 COMMIT」的窗口里：包装器让第一次 markDeleted
+            // 真写进库之后停一下，取消就从这里抛出来，正好落进提交附近那个 catch。
+            lateinit var pausing: PausingCommitUnitOfWork
+            withStack(unitOfWork = { PausingCommitUnitOfWork(it).also { wrapper -> pausing = wrapper } }) { stack ->
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val written = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+                stack.metadata.put(written, NodeMetadata(description = "keep"))
+                val recorder = TailRecorder()
+                stack.notifier.subscribe(recorder)
+                val cancelled = CancellationException("cancelled while committing the delete")
+
+                // 捕获发生在**调用 DefaultVfs 的协程内部**：被取消的 Deferred.await() 必然抛取消，
+                // 拿它当证据等于什么都没测，要留下删除链自己真正抛出来的那一个。
+                val escaped = CompletableDeferred<Throwable?>()
+                val job =
+                    async(Dispatchers.Default) {
+                        try {
+                            stack.vfs.delete(uri("/a.txt"))
+                            escaped.complete(null)
+                        } catch (failure: Throwable) {
+                            escaped.complete(failure)
+                        }
+                    }
+                pausing.awaitMarkDeleted() // markDeleted 已写入，物理删除已完成，事务还没 COMMIT
+                job.cancel(cancelled)
+
+                withTimeout(30_000) { job.join() }
+                val escapedFailure = withTimeout(30_000) { escaped.await() }
+                assertNotNull(escapedFailure, "删除链应该把取消抛出来，而不是安静地结束")
+                assertFalse(escapedFailure is VfsException, "取消没有被包装成 VfsException：$escapedFailure")
+                assertTrue(escapedFailure is CancellationException, "CancellationException 原样传播：$escapedFailure")
+                assertSame(
+                    cancelled,
+                    escapedFailure?.cause ?: escapedFailure,
+                    "取消原因一致（协程栈帧恢复可能复制异常，但原实例在 cause 上）",
+                )
+
+                // 实际事实：物理删除**已经**完成，取消不能把它变回来；逻辑状态随事务回滚。
+                assertFalse(Files.exists(diskRoot.resolve("a.txt")), "物理删除已完成，不声称「取消 = 没删过」")
+                assertEquals(written, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "取消时事务回滚，Node 记录原样")
+                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 一起回滚")
+                assertEquals(listOf("FILE_CREATED"), eventTypes(), "取消不追加删除事件")
+
+                // 锁已放行：紧接着的写与删能拿到同一把边界并完成。
+                val second = stack.vfs.write(uri("/b.txt"), "second".toByteArray())
+                stack.vfs.delete(uri("/b.txt"))
+                assertFalse(Files.exists(diskRoot.resolve("b.txt")), "锁没有被留在手里")
+                assertEquals(1, pausing.pausedMarks(), "只有第一次 markDeleted 挂起过")
+
+                // 末尾标记按 ID 等：如果还有别的通知，它一定排在标记之前。
+                val marker = EventFactory().newRecord(VfsEventType.FILE_DELETED, null, uri("/tail.txt"))
+                stack.notifier.publish(listOf(marker.toVfsEvent()))
+                recorder.await(marker.id)
+                // 记录器在 a.txt 那次写之后才订阅，所以收件箱里应当只有 b.txt 的写、b.txt 的删和哨兵三条。
+                assertEquals(listOf(second.id, second.id, null), recorder.received.map { it.nodeId }, "被取消的那次没有通知")
+            }
+        }
+
     // __REAL_STACK_APPEND__
 }
 
@@ -555,11 +913,16 @@ private class PausingStorage(
     private val delegate: Storage,
     /** 哪个相对路径的 write 会挂住；null 表示每一次都挂（并发排队用例）。 */
     private val blockingPath: String?,
+    /** 哪个相对路径的 delete 会挂住；null 表示不拦删除（T16 的删除并发 / 取消用例）。 */
+    private val blockingDeletePath: String? = null,
 ) : Storage by delegate {
     private val release = CompletableDeferred<Unit>()
     private val paused = AtomicInteger()
     private val pauseArrivals = Channel<Unit>(Channel.UNLIMITED)
     private val calls = CopyOnWriteArrayList<String>()
+    private val deleteRelease = CompletableDeferred<Unit>()
+    private val pausedDelete = AtomicInteger()
+    private val deleteArrivals = Channel<Unit>(Channel.UNLIMITED)
 
     /** Storage.write 被调了几次（不管成功还是失败）。 */
     val writeCalls = AtomicInteger()
@@ -600,6 +963,27 @@ private class PausingStorage(
         withTimeout(30_000) { pauseArrivals.receive() }
     }
 
+    /** 挂住这次删除：日志先记一行，再在**真正删盘之前**等放行。 */
+    override suspend fun delete(
+        path: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
+        recursive: Boolean,
+    ) {
+        calls += "delete:${path.toRelativeString()}"
+        if (blockingDeletePath == null || path.toRelativeString() == blockingDeletePath) {
+            pausedDelete.incrementAndGet()
+            deleteArrivals.trySend(Unit)
+            try {
+                deleteRelease.await()
+            } catch (stopped: CancellationException) {
+                deleteRelease.complete(Unit)
+                throw stopped
+            } finally {
+                pausedDelete.decrementAndGet()
+            }
+        }
+        delegate.delete(path, recursive)
+    }
+
     /** 此刻停在闩锁上等放行的写次数（取消之后必须是 0，说明写链已经退出）。 */
     fun pausedWrites(): Int = paused.get()
 
@@ -610,6 +994,56 @@ private class PausingStorage(
     fun releaseFirstWrite() {
         release.complete(Unit)
     }
+
+    /** 第一次删除已经进了 Storage I/O（也就是正拿着边界）。 */
+    suspend fun awaitFirstDelete() {
+        withTimeout(30_000) { deleteArrivals.receive() }
+    }
+
+    /** 此刻停在闩锁上等放行的删除次数（取消之后必须是 0，说明删除链已经退出）。 */
+    fun pausedDeletes(): Int = pausedDelete.get()
+
+    /** 放行所有挂住的删除；幂等。 */
+    fun releaseDelete() {
+        deleteRelease.complete(Unit)
+    }
+}
+
+/**
+ * 包一层存储：先**真的**删掉子树里的一个文件，再抛出带指定 effect 的错误。
+ *
+ * 这是**故障注入，不是 OS 自发故障**：真文件系统不会自己停在一半，后端丢掉回包才产生那种局面。
+ * 所以这里证明的是「编排保留后端说出的 PARTIAL / UNKNOWN」，不等于所有真实后端故障行为都已验证。
+ */
+private class PartialDeleteStorage(
+    private val delegate: Storage,
+    private val partialPath: String,
+    private val failure: VfsException,
+) : Storage by delegate {
+    override suspend fun delete(
+        path: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
+        recursive: Boolean,
+    ) {
+        runCatching {
+            delegate.delete(
+                com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath
+                    .parse(partialPath),
+                false,
+            )
+        }
+        throw failure
+    }
+}
+
+/** 包一层存储：每次删除都直接报错，原样带出它自己的 code 和 effect。 */
+private class FailingDeleteStorage(
+    private val delegate: Storage,
+    private val failure: VfsException,
+) : Storage by delegate {
+    override suspend fun delete(
+        path: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
+        recursive: Boolean,
+    ): Unit = throw failure
 }
 
 /**
@@ -631,6 +1065,58 @@ private class BlockerStorage(
         }
         delegate.createDirectory(path)
     }
+}
+
+/**
+ * 包一层事务：第一次 [NodeRepository.markDeleted] **真写进库里**之后停一下，让取消正好落在
+ * 「物理删除已完成、事务还没 COMMIT」的窗口里。
+ *
+ * 事务、回滚全是真的（SqliteUnitOfWork 在 NonCancellable 里 ROLLBACK）；包装器只多加一个挂起点，
+ * 所以它能覆盖到 DefaultVfs 提交附近那个 catch——挂在 Storage I/O 上的取消用例覆盖不到那里。
+ */
+private class PausingCommitUnitOfWork(
+    private val delegate: SqliteUnitOfWork,
+) : UnitOfWork {
+    /** 见到过几次 markDeleted；只有第一次会真的挂起。 */
+    private val marks = AtomicInteger()
+
+    /** 真的挂起了几次：取消之后应当仍然是 1，说明后来的操作没再被拦住。 */
+    private val paused = AtomicInteger()
+    private val arrivals = Channel<Unit>(Channel.UNLIMITED)
+
+    override suspend fun <T> inTransaction(block: suspend (TransactionScope) -> T): T =
+        delegate.inTransaction { scope ->
+            val decorated =
+                object : TransactionScope {
+                    override val nodes: NodeRepository =
+                        object : NodeRepository by scope.nodes {
+                            override suspend fun markDeleted(
+                                ids: Collection<NodeId>,
+                                deletedAt: Instant,
+                            ) {
+                                scope.nodes.markDeleted(ids, deletedAt) // 先真的写进库里
+                                if (marks.incrementAndGet() == 1) {
+                                    paused.incrementAndGet()
+                                    arrivals.trySend(Unit)
+                                    awaitCancellation() // 取消就在这里抛出来，事务随之回滚
+                                }
+                            }
+                        }
+
+                    override val metadata get() = scope.metadata
+
+                    override val events get() = scope.events
+                }
+            block(decorated)
+        }
+
+    /** 第一次 markDeleted 已经写入、事务尚未提交。 */
+    suspend fun awaitMarkDeleted() {
+        withTimeout(30_000) { arrivals.receive() }
+    }
+
+    /** 真的挂起过几次：取消之后仍应是 1。 */
+    fun pausedMarks(): Int = paused.get()
 }
 
 /**
