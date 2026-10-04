@@ -689,9 +689,8 @@ class DefaultVfsRealStackTest {
                 assertEquals(VfsEffect.PARTIAL, failure.effect, "文件真的删掉了，这是已知变更")
                 assertFalse(Files.exists(diskRoot.resolve("a.txt")), "物理删除不自动补偿")
                 assertEquals(written, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "Node 标记删除随事务回滚")
-                // 取消点停在 markDeleted 之后、metadata.delete 之前：这里证明的是 **Node 回滚**；
-                // Metadata 没被写过，自然原样。「取消 / 提交失败后 Metadata 也回滚」由 A04 的追加冲突用例证明。
-                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 原样")
+                // 事件追加冲突发生在 markDeleted 和 metadata.delete 之后，真实事务回滚恢复 Node 与 Metadata。
+                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 随事务回滚")
                 assertEquals(1, eventCount(), "库里只有预置那一条，删除事件没进库")
 
                 // 失败不该有通知：按 ID 末尾标记确认（标记之前若还有别的通知，一定排在它前面）。
@@ -903,9 +902,9 @@ class DefaultVfsRealStackTest {
                 // 实际事实：物理删除**已经**完成，取消不能把它变回来；逻辑状态随事务回滚。
                 assertFalse(Files.exists(diskRoot.resolve("a.txt")), "物理删除已完成，不声称「取消 = 没删过」")
                 assertEquals(written, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "取消时事务回滚，Node 记录原样")
-                // 取消点停在 markDeleted 之后、metadata.delete 之前：这里证明的是 **Node 回滚**；
-                // Metadata 没被写过，自然原样。「取消 / 提交失败后 Metadata 也回滚」由 A04 的追加冲突用例证明。
-                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 原样")
+                // 本例取消发生在 markDeleted 后、metadata.delete 前，证明 Node 回滚和 Metadata 未改；
+                // Metadata 删除后的普通提交失败回滚由 A04 验证。
+                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 未改")
                 assertEquals(listOf("FILE_CREATED"), eventTypes(), "取消不追加删除事件")
 
                 // 锁已放行：紧接着的写与删能拿到同一把边界并完成。
@@ -1092,14 +1091,11 @@ private class BlockerStorage(
 }
 
 /**
- * 事务包装：第一次 `markDeleted` **真的写进库里之后**、COMMIT 之前挂起，让取消恰好落在
- * 提交附近——也就是删除实现捕获取消的那个 try 之内。事务与回滚全是真的（SqliteUnitOfWork
- * 在 NonCancellable 里 ROLLBACK）；包装器只多加一个挂起点。
+ * 包一层事务：第一次 [NodeRepository.markDeleted] **真写进库里**之后停一下，让取消正好落在
+ * 「物理删除已完成、事务还没 COMMIT」的窗口里。
  *
- * 挂在 Storage I/O 上的取消用例覆盖不到这里，它落不到那个 catch。所以要专门覆盖
- * 「物理删除已完成、事务还没 COMMIT」的窗口。
- *
- * 取消一旦抛出来，这次事务连带 markDeleted 一起回滚：文件在盘上已经没了，逻辑记录还在。
+ * 事务、回滚全是真的（SqliteUnitOfWork 在 NonCancellable 里 ROLLBACK）；包装器只多加一个挂起点，
+ * 所以它能覆盖到 DefaultVfs 提交附近那个 catch——挂在 Storage I/O 上的取消用例覆盖不到那里。
  */
 private class PausingCommitUnitOfWork(
     private val delegate: SqliteUnitOfWork,
