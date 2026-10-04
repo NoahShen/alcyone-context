@@ -29,6 +29,12 @@ class StorageFakeImpl(
         var onCreateDirectory: VfsException? = null
         var onMove: VfsException? = null
         var onDelete: VfsException? = null
+
+        /**
+         * 只在这个相对路径上让 [Storage.createDirectory] 失败；其他目录照常建。
+         * 用来制造「建到一半失败」——首层成功、次层失败。
+         */
+        var onCreateDirectoryAt: Pair<String, VfsException>? = null
     }
 
     /** 故障注入开关。 */
@@ -242,6 +248,9 @@ class StorageFakeImpl(
     override suspend fun createDirectory(path: StoragePath) {
         calls += "createDirectory:${path.toRelativeString()}"
         failures.onCreateDirectory?.let { throw it }
+        failures.onCreateDirectoryAt
+            ?.takeIf { (at, _) -> at == path.toRelativeString() }
+            ?.let { (_, failure) -> throw failure }
         if (path.isRoot) return
         val key = path.toRelativeString()
         val existing = nodes[key]

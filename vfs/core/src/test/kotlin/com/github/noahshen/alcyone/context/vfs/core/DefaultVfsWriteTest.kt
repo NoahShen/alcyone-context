@@ -16,6 +16,7 @@ import com.github.noahshen.alcyone.context.vfs.core.storage.StorageFakeImpl
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Instant
@@ -182,7 +183,7 @@ class DefaultVfsWriteTest {
             )
             assertEquals(listOf("/resources/a/b/c.txt"), harness.committedNodes().map { it.path.toString() }, "父目录不批量登记")
             assertEquals(1, harness.committedEvents().size, "补目录不发单独的事件")
-            assertEquals(NodeType.DIRECTORY, disk.typeOf("a/b"))
+            assertEquals(NodeType.DIRECTORY, disk.typeOfOrNull("a/b"))
             assertEquals("deep", disk.readText("a/b/c.txt"))
         }
 
@@ -222,6 +223,53 @@ class DefaultVfsWriteTest {
         }
 
     @Test
+    fun `A05 a parent creation that fails halfway reports the directories it already created`() =
+        runBlocking {
+            val disk = StorageFakeImpl()
+            val harness = harness(listOf(VfsHarness.Mounted("/resources", disk)))
+            // a 建得出来，a/b 不行：第一层成功、第二层失败。
+            disk.failures.onCreateDirectoryAt = "a/b" to VfsException(VfsErrorCode.STORAGE_ACCESS_DENIED, "denied")
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.write(uri("/a/b/c.txt"), "x".toByteArray()) }
+
+            assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, failure.code, "保留后端的原始错误码")
+            assertEquals(VfsEffect.PARTIAL, failure.effect, "已经建出的 a 是真实副作用，不能报 NONE")
+            assertEquals(NodeType.DIRECTORY, disk.typeOfOrNull("a"), "建出来的 a 确实还在")
+            assertNull(disk.typeOfOrNull("a/b"), "没建出来的目录不该出现")
+            assertTrue(disk.calls.none { it.startsWith("write:") }, "失败在建目录阶段，内容一个字节都没写：${disk.calls}")
+            assertTrue(harness.committedNodes().isEmpty(), "没有提交任何 Node")
+            assertTrue(harness.committedEvents().isEmpty(), "没有提交任何事件")
+        }
+
+    @Test
+    fun `A05 a parent creation that fails on the first level reports NONE`() =
+        runBlocking {
+            val disk = StorageFakeImpl()
+            val harness = harness(listOf(VfsHarness.Mounted("/resources", disk)))
+            disk.failures.onCreateDirectory = VfsException(VfsErrorCode.STORAGE_ACCESS_DENIED, "denied")
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.write(uri("/a/b/c.txt"), "x".toByteArray()) }
+
+            assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, failure.code)
+            assertEquals(VfsEffect.NONE, failure.effect, "一个目录也没建成，报 NONE 是准确的")
+            assertTrue(disk.calls.none { it.startsWith("write:") }, "没写内容：${disk.calls}")
+        }
+
+    @Test
+    fun `A05 an UNKNOWN parent creation failure is not downgraded either`() =
+        runBlocking {
+            val disk = StorageFakeImpl()
+            val harness = harness(listOf(VfsHarness.Mounted("/resources", disk)))
+            disk.failures.onCreateDirectoryAt =
+                "a/b" to VfsException(VfsErrorCode.STORAGE_ERROR, "connection lost", effect = VfsEffect.UNKNOWN)
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.write(uri("/a/b/c.txt"), "x".toByteArray()) }
+
+            assertEquals(VfsEffect.UNKNOWN, failure.effect, "a 确实建出来了，可后端对 a/b 说不清：UNKNOWN 不降级，也不改判 PARTIAL")
+            assertEquals(NodeType.DIRECTORY, disk.typeOfOrNull("a"))
+        }
+
+    @Test
     fun `A05 a write that fails after the parents were created keeps PARTIAL, never NONE`() =
         runBlocking {
             val disk = StorageFakeImpl()
@@ -232,7 +280,7 @@ class DefaultVfsWriteTest {
 
             assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
             assertEquals(VfsEffect.PARTIAL, failure.effect, "留下的空目录 a 是真实副作用")
-            assertEquals(NodeType.DIRECTORY, disk.typeOf("a"), "建出来的目录确实还在")
+            assertEquals(NodeType.DIRECTORY, disk.typeOfOrNull("a"), "建出来的目录确实还在")
             assertTrue(harness.committedNodes().isEmpty(), "没有提交任何 Node")
             assertTrue(harness.committedEvents().isEmpty(), "没有提交任何事件")
         }
@@ -244,10 +292,6 @@ class DefaultVfsWriteTest {
             val harness = harness(listOf(VfsHarness.Mounted("/resources", disk)))
             disk.failures.onWrite =
                 VfsException(VfsErrorCode.STORAGE_ERROR, "connection lost mid write", effect = VfsEffect.UNKNOWN)
-
-            val withParents =
-                assertFailsWith<VfsException> { harness.vfs.write(uri("/a/b.txt"), "x".toByteArray()) }
-            assertEquals(VfsEffect.UNKNOWN, withParents.effect, "后端说不清就是说不清")
 
             val withoutParents =
                 assertFailsWith<VfsException> { harness.vfs.write(uri("/c.txt"), "x".toByteArray()) }

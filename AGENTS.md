@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## 本次修改（2026-10-04，T15 独立复核）
+
+- T15 `3eaa1d0` / `9387604` 独立复核，503 例通过，R1～R3 待修；涉及阅读顺序第 19 条。见 [复核记录](docs/tasks/m3-t15/T15_架构与技术复核.md)，保持 IN_REVIEW，不开始 T16。当前测试分布 common 10 / api 65 / core 215 / storage 136 / persistence 47 / integration 30。
+
 ## 本次修改（2026-10-03，安排 T15 开发）
 
 - 新增阅读顺序第 19 条：DefaultVfs 基础文件操作、列表合并、补父目录、唯一持锁与事件同事务及 A01～A08。T15 已安排，状态 TODO，前置全部 DONE，正式测试基线 461；当前对话只准备开发文档。
@@ -234,7 +238,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 18. [T14 事件产生、持久化与进程内分发开发及验收](docs/tasks/m3-t14/T14_事件产生持久化与进程内分发开发及验收.md)：当前 **DONE，250c0bd 独立复核通过，R1～R4 全部关闭**，461 个正式测试通过，见 [复核清单](docs/tasks/m3-t14/T14_架构与技术复核.md)；含 S1～S3 与 A01～A08；不实现可靠消费、Git Consumer 或 Runtime 完整停机，T15 复用提交与分发接线。
 
-19. [T15 基础文件操作开发及验收](docs/tasks/m3-t15/T15_基础文件操作开发及验收.md)：当前 **TODO，任务已安排**，含 S1～S3 与 A01～A08；实现 read / write / stat / list 与 getNode 接线，写入从预检到状态提交共享唯一持锁边界，SQLite 不包 Storage I/O。Runtime 与公共流式入口接线留 T18 / T19，不提前实现删除、Metadata 或移动。
+19. [T15 基础文件操作开发及验收](docs/tasks/m3-t15/T15_基础文件操作开发及验收.md)：当前 **IN_REVIEW，3eaa1d0 / 9387604 独立复核完成，503 例通过，R1～R3 待修**，见 [复核记录](docs/tasks/m3-t15/T15_架构与技术复核.md)；含 S1～S3 与 A01～A08；实现 read / write / stat / list 与 getNode 接线，写入从预检到状态提交共享唯一持锁边界，SQLite 不包 Storage I/O。Runtime 与公共流式入口接线留 T18 / T19，不提前实现删除、Metadata 或移动。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 

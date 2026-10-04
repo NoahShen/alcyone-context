@@ -1,6 +1,7 @@
 package com.github.noahshen.alcyone.context.vfs.integration.vfs
 
 import com.github.noahshen.alcyone.context.vfs.NodeId
+import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.NodeType
 import com.github.noahshen.alcyone.context.vfs.StatOptions
 import com.github.noahshen.alcyone.context.vfs.VfsEffect
@@ -36,12 +37,13 @@ import com.github.noahshen.alcyone.context.vfs.persistence.sqldelight.SqliteNode
 import com.github.noahshen.alcyone.context.vfs.persistence.sqldelight.SqliteUnitOfWork
 import com.github.noahshen.alcyone.context.vfs.persistence.sqldelight.VfsStateDatabase
 import com.github.noahshen.alcyone.context.vfs.storage.opendal.LocalFsStorage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -111,10 +113,13 @@ class DefaultVfsRealStackTest {
 
     @Test
     @Timeout(60)
-    fun `A02 creating and overwriting keeps one identity and the event follows real existence`() =
+    fun `A02 creating and overwriting keeps one identity, the metadata and the event follows real existence`() =
         runBlocking {
             withStack { stack ->
                 val created = stack.vfs.write(uri("/notes/a.txt"), "first".toByteArray())
+                // 直接用测试已有的 Repository 预置 Metadata（setMetadata 属 T17 尚未交付）。
+                val metadata = NodeMetadata(setOf("ct", "影像"), "胸部 CT 报告")
+                stack.metadata.put(created.id, metadata)
 
                 assertEquals("first", Files.readString(diskRoot.resolve("notes/a.txt")), "父目录和内容都真的在磁盘上")
                 assertEquals(listOf("FILE_CREATED"), eventTypes(), "第一次写是 FILE_CREATED")
@@ -125,6 +130,7 @@ class DefaultVfsRealStackTest {
                 assertEquals(created.id, overwritten.id, "覆盖保留同一个 Node ID")
                 assertEquals(created.registeredAt, overwritten.registeredAt, "登记时间不变")
                 assertEquals("second", Files.readString(diskRoot.resolve("notes/a.txt")))
+                assertEquals(metadata, stack.metadata.get(created.id), "覆盖只推进 updatedAt，不清空 Metadata")
                 assertEquals(listOf("FILE_CREATED", "FILE_WRITTEN"), eventTypes())
                 assertEquals(1, activeNodes(), "覆盖不产生第二条记录")
             }
@@ -257,6 +263,24 @@ class DefaultVfsRealStackTest {
 
     @Test
     @Timeout(60)
+    fun `A05 a parent creation that fails halfway says PARTIAL and leaves the directories it did create`() =
+        runBlocking {
+            withStack(wrapStorage = { BlockerStorage(it) }) { stack ->
+                // 第一层 a 真建到盘上，第二层 a/b 在后端这里失败——这就是「补父目录建到一半」。
+                val failure = assertFailsWith<VfsException> { stack.vfs.write(uri("/a/b/c.txt"), "x".toByteArray()) }
+
+                assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code, "保留后端原始错误码")
+                assertEquals(VfsEffect.PARTIAL, failure.effect, "a 已经建在盘上，报 NONE 才是错的")
+                assertTrue(Files.isDirectory(diskRoot.resolve("a")), "第一层目录真的留在盘上，不自动回删")
+                assertFalse(Files.exists(diskRoot.resolve("a/b")), "第二层确实没建成")
+                assertFalse(Files.exists(diskRoot.resolve("a/b/c.txt")), "内容一个字节都没写")
+                assertEquals(0, activeNodes(), "失败不提交 Node")
+                assertEquals(0, eventCount(), "失败不发成功事件")
+            }
+        }
+
+    @Test
+    @Timeout(60)
     fun `A05 a file that was written but whose event commit failed keeps the bytes and rolls the state back`() =
         runBlocking {
             // 测试装置：让本次事务里的第一条事件用固定 ID，和库里已存在的那条撞主键——
@@ -288,11 +312,11 @@ class DefaultVfsRealStackTest {
 
     @Test
     @Timeout(60)
-    fun `A06 two writes of one path are serialized by the shared boundary`() =
+    fun `A06 the second write is proved to run behind the first one on the shared boundary`() =
         runBlocking {
-            withStack(wrapStorage = { PausingStorage(it) }) { stack ->
+            withStack(wrapStorage = { PausingStorage(it, blockingPath = null) }) { stack ->
                 val pausing = stack.storages.getValue("local") as PausingStorage
-                val secondStarted = CompletableDeferred<Unit>()
+                val secondCalling = CompletableDeferred<Unit>()
 
                 val first =
                     async(Dispatchers.Default) {
@@ -301,28 +325,73 @@ class DefaultVfsRealStackTest {
                 pausing.awaitFirstWrite() // 第一个写已经进了 Storage I/O，正拿着边界
                 val second =
                     async(Dispatchers.Default) {
-                        secondStarted.complete(Unit)
+                        // 信号发在调用之前：证明第二个请求确实已经开跑，不是「还没轮到它」。
+                        secondCalling.complete(Unit)
                         runCatching { stack.vfs.write(uri("/a.txt"), "second".toByteArray(), WriteOptions(WriteMode.CREATE_NEW)) }
                             .exceptionOrNull()
                     }
-                secondStarted.await()
-                try {
-                    // 竞态判据：第二个写拿不到边界，所以在第一个放开之前它不可能完成。
-                    // 判据是「提前返回了」而不是「此刻还没完成」——后者会把「协程还没跑到」误当成互斥成立。
-                    val leaked = withTimeoutOrNull(2_000) { second.await() }
-                    assertNull(leaked, "第一个写还在闩锁上，第二个写就已经完成——共享边界没有生效")
-                } finally {
-                    pausing.releaseFirstWrite()
-                }
+                secondCalling.await()
+                pausing.releaseFirstWrite()
 
                 val info = withTimeout(30_000) { first.await() }
                 val failure = withTimeout(30_000) { second.await() }
 
+                // 判据是「事后顺序」而不是「当时还没返回」：第二个写对目标 stat 的时刻，
+                // 排在第一个写的物理写完成之后——它此前根本没能走进这条写链，也就没能越过边界。
+                assertEquals(
+                    listOf("stat:a.txt", "write:a.txt", "stat:a.txt"),
+                    pausing.callLog(),
+                    "第二个写直到第一个写完成才动过后端",
+                )
                 assertEquals(VfsErrorCode.ALREADY_EXISTS, (failure as? VfsException)?.code, "后到的那个看到的是已存在")
-                assertEquals("first", Files.readString(diskRoot.resolve("a.txt")), "第二个写没有做物理变更")
-                assertEquals(1, pausing.writeCalls.get(), "Storage.write 只被调过一次")
+                assertEquals("first", Files.readString(diskRoot.resolve("a.txt")), "第二次物理变更没有落地")
+                assertEquals(1, pausing.writeCalls.get(), "只有第一个写真的调过 Storage.write")
                 assertEquals(info.id, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id)
                 assertEquals(1, activeNodes())
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A06 a write cancelled at the DefaultVfs entry propagates, releases the lock and commits nothing`() =
+        runBlocking {
+            withStack(wrapStorage = { PausingStorage(it, blockingPath = "a.txt") }) { stack ->
+                val pausing = stack.storages.getValue("local") as PausingStorage
+                val recorder = TailRecorder()
+                stack.notifier.subscribe(recorder)
+                val cancelled = CancellationException("cancelled while writing")
+
+                val job =
+                    async(Dispatchers.Default) {
+                        runCatching { stack.vfs.write(uri("/a.txt"), "written".toByteArray()) }.exceptionOrNull()
+                    }
+                pausing.awaitFirstWrite() // 写链已经走到 Storage I/O，取消就发生在这个挂起点上
+                job.cancel(cancelled)
+
+                withTimeout(30_000) { job.join() } // 取消当场结束，不会挂在边界上等
+                assertTrue(job.isCancelled, "取消以 CancellationException 结束协程")
+                val propagated = runCatching { job.await() }.exceptionOrNull()
+                assertTrue(propagated is CancellationException, "CancellationException 原样传播，不被包成 VfsException：$propagated")
+                assertEquals(cancelled.message, propagated?.message, "取消原因也原样传出去")
+                assertEquals(0, pausing.pausedWrites(), "取消返回后写链已经退出闩锁")
+                assertFalse(Files.exists(diskRoot.resolve("a.txt")), "落盘那一步被取消，内容没有写进去")
+                assertEquals(0, activeNodes(), "取消不提交 Node")
+                assertEquals(0, eventCount(), "取消不发成功事件")
+
+                // 锁已放行：紧接着的写能正常拿到同一把边界并完成——它能挂到闩锁上就是锁没被留下的证据。
+                val info = withTimeout(30_000) { stack.vfs.write(uri("/a.txt"), "after".toByteArray()) }
+                assertEquals(0, pausing.pausedWrites(), "挂起发生在取消之后，锁已经放行")
+                pausing.releaseFirstWrite()
+                assertEquals("after", Files.readString(diskRoot.resolve("a.txt")))
+                assertEquals(info.id, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id)
+
+                // 末尾标记按 ID 等：如果还有别的通知，它一定排在标记之前。
+                val marker = EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/tail.txt"))
+                stack.notifier.publish(listOf(marker.toVfsEvent()))
+                recorder.await(marker.id)
+                // 被取消的那次一个 Node 都没建，所以它不可能产生任何通知；
+                // 收件箱里只有「成功那次 + 末尾标记」两条。
+                assertEquals(listOf(info.id, null), recorder.received.map { it.nodeId }, "只有成功的那次有通知")
             }
         }
 
@@ -454,38 +523,91 @@ class DefaultVfsRealStackTest {
 }
 
 /**
- * 包一层存储：第一个 [write] 先挂住，由测试放行。
+ * 包一层存储：写进来先挂住，由测试放行；同时按顺序记下每次 `stat` / `write`。
  *
- * 挂住的位置在真正落盘之前，而 DefaultVfs 整条写链都拿着共享边界——所以这个闩锁
- * 能确定第一个写此刻正占着边界，第二个写必须排队。
+ * 挂住的位置在真正落盘之前，而 DefaultVfs 整条写链都拿着共享边界——所以第一个写此刻正占着边界。
+ * [callLog] 记的是「谁在什么时候第一次碰到后端」：两个写各自的 `stat` 一前一后，就是第二个写
+ * 排在边界后面的事后证据，不依赖「它此刻还没返回」这种随时会骗人的判据。
  */
 private class PausingStorage(
     private val delegate: Storage,
+    /** 哪个相对路径的 write 会挂住；null 表示每一次都挂（并发排队用例）。 */
+    private val blockingPath: String?,
 ) : Storage by delegate {
-    private val entered = CompletableDeferred<Unit>()
     private val release = CompletableDeferred<Unit>()
+    private val paused = AtomicInteger()
+    private val pauseArrivals = Channel<Unit>(Channel.UNLIMITED)
+    private val calls = CopyOnWriteArrayList<String>()
 
     /** Storage.write 被调了几次（不管成功还是失败）。 */
     val writeCalls = AtomicInteger()
+
+    override suspend fun stat(
+        path: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
+    ): com.github.noahshen.alcyone.context.vfs.core.storage.StorageAttributes {
+        calls += "stat:${path.toRelativeString()}"
+        return delegate.stat(path)
+    }
 
     override suspend fun write(
         path: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
         content: ByteArray,
         mode: com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode,
     ): com.github.noahshen.alcyone.context.vfs.core.storage.StorageAttributes {
-        if (writeCalls.incrementAndGet() == 1) {
-            entered.complete(Unit)
-            release.await()
+        calls += "write:${path.toRelativeString()}"
+        val call = writeCalls.incrementAndGet()
+        if (call == 1 || path.toRelativeString() == blockingPath) {
+            paused.incrementAndGet()
+            pauseArrivals.trySend(Unit)
+            try {
+                release.await()
+            } catch (stopped: CancellationException) {
+                // OpenDAL 的落盘在 OpenDAL 自己的执行器上，取消不一定会把它撤回来；
+                // 测试里明确放弃这次写，免得两个写真的去抢同一个文件。
+                release.complete(Unit)
+                throw stopped
+            } finally {
+                paused.decrementAndGet()
+            }
         }
         return delegate.write(path, content, mode)
     }
 
     /** 第一个写已经进了 Storage I/O（也就是正拿着边界）。 */
-    suspend fun awaitFirstWrite() = entered.await()
+    suspend fun awaitFirstWrite() {
+        withTimeout(30_000) { pauseArrivals.receive() }
+    }
 
-    /** 放行第一个写；幂等。 */
+    /** 此刻停在闩锁上等放行的写次数（取消之后必须是 0，说明写链已经退出）。 */
+    fun pausedWrites(): Int = paused.get()
+
+    /** 按发生顺序记下的后端调用。 */
+    fun callLog(): List<String> = calls.toList()
+
+    /** 放行所有挂住的写；幂等。 */
     fun releaseFirstWrite() {
         release.complete(Unit)
+    }
+}
+
+/**
+ * 包一层存储：本次调用里第 [failAt] 次 [Storage.createDirectory] 直接报错，其余都真的建到盘上。
+ *
+ * 写 `/resources/a/b/c.txt` 时的调用顺序是建 `a`、建 `a/b`、写内容，所以 [failAt] = 2 造出来的正是
+ * 「第一层建成了、第二层失败」。失败注入在 Storage 端口上（真文件系统没法预置这种阻断，
+ * 第一层是这次调用自己建的），但建出来的目录是真的落在真盘上的，断言仍然对着真盘。
+ */
+private class BlockerStorage(
+    private val delegate: Storage,
+    private val failAt: Int = 2,
+) : Storage by delegate {
+    private var seen = 0
+
+    override suspend fun createDirectory(path: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath) {
+        if (++seen == failAt) {
+            throw VfsException(VfsErrorCode.STORAGE_ERROR, "cannot create directory under the blocking file")
+        }
+        delegate.createDirectory(path)
     }
 }
 

@@ -56,6 +56,17 @@ class VfsException(
 ) : RuntimeException(message)
 
 /**
+ * 换一个 effect 重新抛出同一个错误：code、message、uri、operationId 原样带上，cause 挂回原异常。
+ *
+ * 编排层发现「之前已经有真实副作用」时用它把 `NONE` 提升成 `PARTIAL`——调用方按 effect 判断要不要补偿。
+ * `UNKNOWN` 仍代表后端说不清，不在这里改判。
+ */
+fun VfsException.withEffect(
+    effect: VfsEffect,
+    note: String,
+): VfsException = VfsException(code, "$message ($note)", uri, operationId, effect).apply { initCause(this@withEffect) }
+
+/**
  * 适配 `com.github.noahshen.alcyone.context.common` 的 UUID 校验异常：底层工具库不知道 VFS 错误契约，由 API 在边界转换，
  * 保证 [NodeId]、[VfsEventId] 对调用方只表现为 [VfsErrorCode.INVALID_ARGUMENT]。
  */

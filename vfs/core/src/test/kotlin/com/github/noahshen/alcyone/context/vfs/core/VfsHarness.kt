@@ -120,8 +120,8 @@ internal class VfsHarness(
 internal fun StorageFakeImpl.readText(relativePath: String): String =
     runBlocking { read(StoragePath.parse(relativePath), Long.MAX_VALUE).bytes.toString(Charsets.UTF_8) }
 
-/** 替身盘上这个路径在不在，是什么类型；不在返回 null。 */
-internal fun StorageFakeImpl.typeOf(relativePath: String): NodeType? =
+/** 替身盘上这个路径在不在，是什么类型；不在（含注入的 stat 失败）返回 null。 */
+internal fun StorageFakeImpl.typeOfOrNull(relativePath: String): NodeType? =
     runBlocking {
-        stat(StoragePath.parse(relativePath)).type
+        runCatching { stat(StoragePath.parse(relativePath)).type }.getOrNull()
     }
