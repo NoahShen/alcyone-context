@@ -455,17 +455,21 @@ class DefaultVfs(
      * 例：`delete(alcyone://resources/notes/a.txt)` 会让磁盘上的 `notes/a.txt` 消失、旧 Node ID 查不到、
      * Metadata 被清掉，并追加一条 `FILE_DELETED`；目标没登记过时事件的 `nodeId` 是 null。
      *
-     * 顺序契约（任何可确认的拒绝都发生在碰盘之前）：
+     * 顺序契约（除了第 3 步那次 `stat`，任何可确认的拒绝都发生在**删除副作用之前**）：
      *
-     * 1. 逻辑根、命名空间根、挂载根、承载后代挂载的祖先 → `UNSUPPORTED_OPERATION`，`recursive = true` 也不例外；
-     * 2. 路由（`MOUNT_NOT_FOUND`）、只读、能力快照缺失 → 走 T10 预检，`effect = NONE`；
-     * 3. `storage.stat` 确认目标**真的存在**且确认实际类型；不存在 → `NOT_FOUND`（不当作幂等成功）；
-     *    已登记 Node 的类型与实际类型冲突 → `CONFLICT`，不借删除静默把记录改对；
-     * 4. 需要的逻辑记录先读出来（目标是文件看自身，是目录看已登记子树），查询失败发生在副作用之前；
-     * 5. `storage.delete`（T12 负责递归、防符号链接和 `PARTIAL` / `UNKNOWN` 语义），Core 不重写物理遍历；
-     * 6. 一个事务里标记这些 Node 删除、清各自 Metadata、追加**一条**目标级事件。
+     * 1. 结构：逻辑根、命名空间根、挂载根、承载后代挂载的祖先 → `UNSUPPORTED_OPERATION`，`recursive = true` 也不例外；
+     * 2. 路由（`MOUNT_NOT_FOUND`）与取这块盘的 Storage 实例；
+     * 3. `storage.stat` 确认目标**真的存在**并拿到**实际类型**；不存在 → `NOT_FOUND`（不当作幂等成功）。
+     *    只读与能力快照是在第 4 步才判的，所以它们排在这一次 `stat` 之后——这时的 `effect = NONE`
+     *    指的是「没删任何东西」，不承诺「一次没问过端」；
+     * 4. 按实际类型构造 [OperationIntent.delete] 再跑一遍 T10 预检：只读 → `READ_ONLY`，缺能力快照 → `INVALID_ARGUMENT`。
+     *    声明类型是调用方给的，删目录时不能拿它当事实；
+     * 5. 已登记 Node 的类型与实际类型冲突 → `CONFLICT`，不借删除静默把记录改对；同时把要清理的逻辑记录先读出来
+     *    （文件看自身，目录看已登记子树），这些查询都在删盘之前；
+     * 6. `storage.delete`（T12 负责递归、防符号链接和 `PARTIAL` / `UNKNOWN` 语义），Core 不重写物理遍历；
+     * 7. 一个事务里标记这些 Node 删除、清各自 Metadata、追加**一条**目标级事件。
      *
-     * 文件删不删得看 `recursive`；空目录非递归可删，非空目录非递归由 Storage 报 `DIRECTORY_NOT_EMPTY`。
+     * 删除文件**不要求** `recursive`（给了也不影响结果）；空目录非递归可删，非空目录非递归由 Storage 报 `DIRECTORY_NOT_EMPTY`。
      * 目标之外的空父目录不顺带删除（T02 §8.1）。
      */
     override suspend fun delete(
@@ -508,7 +512,7 @@ class DefaultVfs(
                     capabilities,
                 ).source!!
 
-        val cleanup = planLogicalCleanup(uri, target, attributes.type)
+        val cleanup = planLogicalCleanup(uri, attributes.type)
         // 物理删除交给 Storage：递归遍历、防符号链接和部分删除的 effect 都由 T12 负责。
         storage.delete(target.relativePath, options.recursive)
 
@@ -560,7 +564,6 @@ class DefaultVfs(
      */
     private suspend fun planLogicalCleanup(
         uri: VfsUri,
-        target: RouteMatch,
         actualType: NodeType,
     ): DeleteCleanup {
         val recorded = nodes.findByPath(uri.path)

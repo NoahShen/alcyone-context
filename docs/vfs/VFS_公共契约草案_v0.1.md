@@ -1,5 +1,9 @@
 # VFS 公共契约草案 v0.1
 
+## 本次修改（2026-10-04，T16 复核回写删除事件粒度）
+
+- 第 8 节补一句删除事件的最小口径：一次成功删除只发**目标级**事件，目录事件按完整段子树失效，不为后代逐个造事件（依据与示例见 [T16 任务文档 §2.4](../tasks/m3-t16/T16_删除操作开发及验收.md)）。事件类型与字段本身未变。
+
 ## 本次修改（2026-10-03，T13 独立复核）
 
 - 接受 T13 增补 `VfsUri.of(VfsPath)`：从已校验的不可变逻辑路径构造 URI，编码仍统一在 toString，parse / 路径校验规则不变。涉及第 4 节类型与构造入口说明；不改变 stat、身份或权限语义。
@@ -315,6 +319,8 @@ Kotlin Coroutine 的 `CancellationException` 原样传播，不包装为普通�
 本轮建议的事件公共字段：事件 UUIDv7 ID、事件类型、可空 Node ID、发生时间、逻辑 URI 和关联 operation ID。移动事件额外包含源 / 目标 URI；消费进度及处理状态属于 Event Log / Consumer 状态，不让订阅者直接修改原事件。
 
 事件类型覆盖 FILE_CREATED、FILE_WRITTEN、FILE_MOVED、DIRECTORY_MOVED、FILE_DELETED、DIRECTORY_DELETED、METADATA_UPDATED；按已确认的 T03，首版不公开 NODE_REGISTERED。Payload 不包含文件内容、凭据。
+
+删除事件只发目标级：一次成功删除产生**一条** `FILE_DELETED` 或 `DIRECTORY_DELETED`，URI 为请求目标，Node ID 为目标已有身份（未登记则为空）。目录事件表示该 URI 之下**按完整路径段边界**的整棵子树失效，不为每个后代另造事件；Consumer 需要逐文件信号时应在删除前自行展开。口径与示例见 [T16 §2.4](../tasks/m3-t16/T16_删除操作开发及验收.md)。
 
 UC-07 的外部可见契约建议：事件代表已完成的核心变更；Consumer 失败不撤销该变更。进程内 Flow 是通知机制，不能单独代表可靠消费。首版仅持久化事件和进程内通知，消费接口在实现时明确；日志游标、确认和重放列为后续 E05。
 

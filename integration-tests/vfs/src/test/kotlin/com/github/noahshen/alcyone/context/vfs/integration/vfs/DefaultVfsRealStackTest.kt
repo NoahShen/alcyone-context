@@ -544,6 +544,17 @@ class DefaultVfsRealStackTest {
             }
         }
 
+    /** 库里最后一条事件的 ID（写入是同步提交的，返回时就已落库）：用来按 ID 等它被分发完。 */
+    private fun lastEventId(): String =
+        DriverManager.getConnection("jdbc:sqlite:$databaseFile").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT event_id FROM event ORDER BY rowid DESC LIMIT 1").use { rows ->
+                    rows.next()
+                    rows.getString(1)
+                }
+            }
+        }
+
     private fun randomNodeId() = NodeId.parse("018f0a5c-1b2c-7def-8abc-0000000000ff")
 
     /**
@@ -609,6 +620,8 @@ class DefaultVfsRealStackTest {
                 // 绕过 VFS 直接删掉磁盘上的 a/deep/c.txt：物理没了，逻辑记录还挂着——这正是要验证的「幽灵记录」。
                 Files.delete(diskRoot.resolve("a/deep/c.txt"))
 
+                // 夹具前提：目录 a 自己**没有**身份，只有子项登记过——删除链必须照样清掉子树。
+                assertNull(stack.nodes.findByPath(VfsPath.parse("/resources/a")), "目录 a 从没登记过")
                 val childB = stack.vfs.stat(uri("/a/b.txt")).id
                 val childC = stack.nodes.findByPath(VfsPath.parse("/resources/a/deep/c.txt"))!!.id
                 val sibling = stack.nodes.findByPath(VfsPath.parse("/resources/a-old/keep.txt"))!!.id
@@ -676,7 +689,9 @@ class DefaultVfsRealStackTest {
                 assertEquals(VfsEffect.PARTIAL, failure.effect, "文件真的删掉了，这是已知变更")
                 assertFalse(Files.exists(diskRoot.resolve("a.txt")), "物理删除不自动补偿")
                 assertEquals(written, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "Node 标记删除随事务回滚")
-                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 一起回滚")
+                // 取消点停在 markDeleted 之后、metadata.delete 之前：这里证明的是 **Node 回滚**；
+                // Metadata 没被写过，自然原样。「取消 / 提交失败后 Metadata 也回滚」由 A04 的追加冲突用例证明。
+                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 原样")
                 assertEquals(1, eventCount(), "库里只有预置那一条，删除事件没进库")
 
                 // 失败不该有通知：按 ID 末尾标记确认（标记之前若还有别的通知，一定排在它前面）。
@@ -788,10 +803,13 @@ class DefaultVfsRealStackTest {
             withStack(wrapStorage = { PausingStorage(it, blockingPath = null, blockingDeletePath = "a.txt") }) { stack ->
                 val pausing = stack.storages.getValue("local") as PausingStorage
                 pausing.releaseFirstWrite() // 写链不参与本用例的闩锁，接下来只拦删除
-                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
-                val written = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+                // 先订阅再写：分发是异步的，写返回只说明创建事件已入队，订阅晚一步就可能收到它、也可能收不到。
                 val recorder = TailRecorder()
                 stack.notifier.subscribe(recorder)
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val written = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+                recorder.await(VfsEventId.parse(lastEventId())) // 按 ID 等这条创建事件真的被处理完，之后收件箱的基线才是确定的
+                assertEquals(listOf(written), recorder.received.map { it.nodeId }, "预置阶段只有这条创建事件")
                 val cancelled = CancellationException("cancelled while deleting")
 
                 // 捕获发生在**调用 DefaultVfs 的协程内部**：被取消的 Deferred.await() 必然抛取消，
@@ -833,7 +851,8 @@ class DefaultVfsRealStackTest {
                 val marker = EventFactory().newRecord(VfsEventType.FILE_DELETED, null, uri("/tail.txt"))
                 stack.notifier.publish(listOf(marker.toVfsEvent()))
                 recorder.await(marker.id)
-                assertEquals(listOf(written, null), recorder.received.map { it.nodeId }, "只有成功的那次有通知")
+                // 预置的创建事件（已在开头按 ID 等过）+ 成功那次删除 + 哨兵；被取消的那次一条都没有。
+                assertEquals(listOf(written, written, null), recorder.received.map { it.nodeId }, "只有成功的那次有通知")
             }
         }
 
@@ -845,11 +864,14 @@ class DefaultVfsRealStackTest {
             // 真写进库之后停一下，取消就从这里抛出来，正好落进提交附近那个 catch。
             lateinit var pausing: PausingCommitUnitOfWork
             withStack(unitOfWork = { PausingCommitUnitOfWork(it).also { wrapper -> pausing = wrapper } }) { stack ->
+                // 先订阅再写：分发是异步的，写返回只说明创建事件已入队，订阅晚一步就可能收到它、也可能收不到。
+                val recorder = TailRecorder()
+                stack.notifier.subscribe(recorder)
                 stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
                 val written = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
                 stack.metadata.put(written, NodeMetadata(description = "keep"))
-                val recorder = TailRecorder()
-                stack.notifier.subscribe(recorder)
+                recorder.await(VfsEventId.parse(lastEventId())) // 按 ID 等这条创建事件真的被处理完，之后收件箱的基线才是确定的
+                assertEquals(listOf(written), recorder.received.map { it.nodeId }, "预置阶段只有这条创建事件")
                 val cancelled = CancellationException("cancelled while committing the delete")
 
                 // 捕获发生在**调用 DefaultVfs 的协程内部**：被取消的 Deferred.await() 必然抛取消，
@@ -881,7 +903,9 @@ class DefaultVfsRealStackTest {
                 // 实际事实：物理删除**已经**完成，取消不能把它变回来；逻辑状态随事务回滚。
                 assertFalse(Files.exists(diskRoot.resolve("a.txt")), "物理删除已完成，不声称「取消 = 没删过」")
                 assertEquals(written, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "取消时事务回滚，Node 记录原样")
-                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 一起回滚")
+                // 取消点停在 markDeleted 之后、metadata.delete 之前：这里证明的是 **Node 回滚**；
+                // Metadata 没被写过，自然原样。「取消 / 提交失败后 Metadata 也回滚」由 A04 的追加冲突用例证明。
+                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(written), "Metadata 原样")
                 assertEquals(listOf("FILE_CREATED"), eventTypes(), "取消不追加删除事件")
 
                 // 锁已放行：紧接着的写与删能拿到同一把边界并完成。
@@ -894,8 +918,8 @@ class DefaultVfsRealStackTest {
                 val marker = EventFactory().newRecord(VfsEventType.FILE_DELETED, null, uri("/tail.txt"))
                 stack.notifier.publish(listOf(marker.toVfsEvent()))
                 recorder.await(marker.id)
-                // 记录器在 a.txt 那次写之后才订阅，所以收件箱里应当只有 b.txt 的写、b.txt 的删和哨兵三条。
-                assertEquals(listOf(second.id, second.id, null), recorder.received.map { it.nodeId }, "被取消的那次没有通知")
+                // 预置的创建事件 + b.txt 的写 + b.txt 的删 + 哨兵；被取消的那次一条都没有。
+                assertEquals(listOf(written, second.id, second.id, null), recorder.received.map { it.nodeId }, "被取消的那次没有通知")
             }
         }
 
