@@ -1,7 +1,5 @@
 package com.github.noahshen.alcyone.context.vfs.core
 
-import com.github.noahshen.alcyone.context.vfs.NodeId
-import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.VfsEffect
 import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsException
@@ -21,7 +19,7 @@ import kotlin.streams.toList
 import kotlin.test.assertFailsWith
 
 /**
- * T15 A07：阶段边界——未交付的三个方法明确拒绝且零副作用，Core 也只认 Port。
+ * T15 A07：阶段边界——未交付的 `move` 明确拒绝且零副作用，Core 也只认 Port。
  *
  * 依赖方向本身由 `vfs/core/build.gradle.kts` 决定（只有 `:vfs:api`），这里用源码扫描与反射做静态佐证。
  * 测试的工作目录是模块目录，所以 `src/main/kotlin` 是相对的。
@@ -36,26 +34,18 @@ class DefaultVfsStageBoundaryTest {
     }
 
     @Test
-    fun `A07 the three operations still to be delivered are refused with no side effect`() =
+    fun `A07 the operation still to be delivered is refused with no side effect`() =
         runBlocking {
             val disk = StorageFakeImpl()
             disk.withFile("a.txt", "hello")
             disk.calls.clear() // 下面的断言只看这几个方法自己造成的调用
             val harness = VfsHarness(listOf(VfsHarness.Mounted("/resources", disk)), notifier = notifiers.create())
-            val id = NodeId.parse("018f0a5c-1b2c-7def-8abc-0000000000e1")
             val uri = VfsUri.parse("alcyone://resources/a.txt")
 
-            val failures =
-                listOf(
-                    assertFailsWith<VfsException>("move") { harness.vfs.move(uri, VfsUri.parse("alcyone://resources/b.txt")) },
-                    assertFailsWith<VfsException>("getMetadata") { harness.vfs.getMetadata(id) },
-                    assertFailsWith<VfsException>("setMetadata") { harness.vfs.setMetadata(id, NodeMetadata(description = "x")) },
-                )
+            val failure = assertFailsWith<VfsException>("move") { harness.vfs.move(uri, VfsUri.parse("alcyone://resources/b.txt")) }
 
-            failures.forEach { failure ->
-                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, failure.code, "没交付的方法明确拒绝，不静默成功")
-                assertEquals(VfsEffect.NONE, failure.effect, "拒绝时零副作用")
-            }
+            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, failure.code, "没交付的方法明确拒绝，不静默成功")
+            assertEquals(VfsEffect.NONE, failure.effect, "拒绝时零副作用")
             assertTrue(disk.calls.isEmpty(), "不许再动后端：${disk.calls}")
             assertTrue(harness.committedNodes().isEmpty(), "不写状态")
             assertTrue(harness.committedEvents().isEmpty(), "不发事件")

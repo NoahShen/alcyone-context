@@ -27,6 +27,7 @@ import com.github.noahshen.alcyone.context.vfs.core.operation.CapabilitySnapshot
 import com.github.noahshen.alcyone.context.vfs.core.registry.NodeRegistry
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRepository
+import com.github.noahshen.alcyone.context.vfs.core.repository.MetadataRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.MountRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository
@@ -49,6 +50,8 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
@@ -65,6 +68,7 @@ import java.nio.file.Path
 import java.sql.DriverManager
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertFailsWith
 
@@ -429,6 +433,8 @@ class DefaultVfsRealStackTest {
         extraStorages: Map<String, LocalFsStorage> = emptyMap(),
         /** 包一层存储：用 PausingStorage 控制第一个写什么时候落盘（A06）。 */
         wrapStorage: (Storage) -> Storage = { it },
+        /** 包一层状态库：记下每次 Metadata 读 / 写，用来证明被挡住的请求还没碰状态库（A06）。 */
+        wrapMetadata: (MetadataRepository) -> MetadataRepository = { it },
         /** 包一层事务：让本次事务的第一条事件撞上库里的主键（A05）。 */
         unitOfWork: (SqliteUnitOfWork) -> UnitOfWork = { it },
         block: suspend (RealStack) -> T,
@@ -448,6 +454,8 @@ class DefaultVfsRealStackTest {
             val notifier = AsyncEventNotifier()
             val router = MountRouter.of(setOf("resources"), mounts)
             val nodes = SqliteNodeRepository(state)
+            val metadata = SqliteMetadataRepository(state)
+            val observedMetadata = wrapMetadata(metadata)
             try {
                 return block(
                     RealStack(
@@ -457,13 +465,15 @@ class DefaultVfsRealStackTest {
                                 capabilities = CapabilitySnapshot.of(storages.mapValues { it.value.capabilities() }),
                                 registry = NodeRegistry(router, nodes, { key -> storages[key] }, boundary),
                                 nodes = nodes,
+                                metadata = observedMetadata,
                                 storages = { key -> storages[key] },
                                 boundary = boundary,
                                 pipeline = EventPipeline(boundary, unitOfWork(SqliteUnitOfWork(state)), notifier),
                                 limits = VfsLimits(),
                             ),
                         nodes = nodes,
-                        metadata = SqliteMetadataRepository(state),
+                        metadata = metadata,
+                        observedMetadata = observedMetadata,
                         notifier = notifier,
                         rawUnitOfWork = SqliteUnitOfWork(state),
                         storages = storages,
@@ -482,6 +492,8 @@ class DefaultVfsRealStackTest {
         val vfs: DefaultVfs,
         val nodes: SqliteNodeRepository,
         val metadata: SqliteMetadataRepository,
+        /** 包了一层的 Metadata 仓库（[wrapMetadata] 的结果），A06 用它的调用记录。 */
+        val observedMetadata: MetadataRepository,
         val notifier: AsyncEventNotifier,
         /** 未包装的事务：A05 用来先真实地放一条事件进去。 */
         val rawUnitOfWork: SqliteUnitOfWork,
@@ -922,6 +934,269 @@ class DefaultVfsRealStackTest {
             }
         }
 
+    @Test
+    @Timeout(60)
+    fun `A02 the metadata survives a reopened database and an empty set clears the row`() =
+        runBlocking {
+            lateinit var id: NodeId
+            val full = NodeMetadata(setOf("ct", "影像"), "胸部 CT", buildJsonObject { put("dicom", "1.2.840") })
+            withStack { stack ->
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                id = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+
+                stack.vfs.setMetadata(id, full)
+                assertEquals(full, stack.metadata.get(id), "三个字段都真写进了 SQLite")
+                assertEquals(listOf("FILE_CREATED", "METADATA_UPDATED"), eventTypes())
+            }
+
+            withStack { stack ->
+                // 关掉重开：新连接、新事务，只有真落库的数据还在。
+                assertEquals(full, stack.vfs.getMetadata(id), "重新打开数据库后仍是完整的替换结果")
+                stack.vfs.setMetadata(id, NodeMetadata(description = "报告"))
+                assertEquals(
+                    NodeMetadata(description = "报告"),
+                    stack.vfs.getMetadata(id),
+                    "整体替换：不和上一批的 tags 合并",
+                )
+                stack.vfs.setMetadata(id, NodeMetadata())
+                assertEquals(NodeMetadata(), stack.vfs.getMetadata(id), "空对象清空")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A03 both operations work after the file vanishes and stop working after a delete`() =
+        runBlocking {
+            withStack { stack ->
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                stack.vfs.write(uri("/b.txt"), "hello".toByteArray())
+                val gone = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+                val deleted = stack.nodes.findByPath(VfsPath.parse("/resources/b.txt"))!!.id
+                // 绕过 VFS 直接删掉磁盘上的 a.txt：物理没了，逻辑记录还挂着。
+                Files.delete(diskRoot.resolve("a.txt"))
+
+                stack.vfs.setMetadata(gone, NodeMetadata(setOf("ct"), "物理文件已经不在了"))
+                assertEquals(NodeMetadata(setOf("ct"), "物理文件已经不在了"), stack.vfs.getMetadata(gone), "Metadata 不依赖物理可读")
+
+                stack.vfs.delete(uri("/b.txt"), DeleteOptions(recursive = true))
+                val missing = assertFailsWith<VfsException> { stack.vfs.getMetadata(deleted) }
+                assertEquals(VfsErrorCode.NOT_FOUND, missing.code, "经 VFS 删除后旧 ID 查不到")
+                val refused = assertFailsWith<VfsException> { stack.vfs.setMetadata(deleted, NodeMetadata(description = "x")) }
+                assertEquals(VfsErrorCode.NOT_FOUND, refused.code)
+                assertNull(stack.metadata.get(deleted), "删除时 Metadata 被清理")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A04 every set notifies once including a repeated value and get notifies nothing`() =
+        runBlocking {
+            withStack { stack ->
+                // 先订阅再操作：分发是异步的，订阅晚一步就可能收不到，也可能收到上次残留的。
+                val recorder = TailRecorder()
+                stack.notifier.subscribe(recorder)
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val id = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+                recorder.await(VfsEventId.parse(lastEventId())) // 按 ID 等创建事件真的被处理完
+                assertEquals(listOf(id), recorder.received.map { it.nodeId }, "基线只有创建事件")
+
+                val value = NodeMetadata(setOf("ct"), "报告")
+                stack.vfs.setMetadata(id, value)
+                recorder.await(VfsEventId.parse(lastEventId()))
+
+                // 传完全相同的值：仍然是一条事件（本轮不做相等比较）。
+                stack.vfs.setMetadata(id, value)
+                recorder.await(VfsEventId.parse(lastEventId()))
+
+                // 重复清空：两次各一条。
+                stack.vfs.setMetadata(id, NodeMetadata())
+                recorder.await(VfsEventId.parse(lastEventId()))
+                stack.vfs.setMetadata(id, NodeMetadata())
+                recorder.await(VfsEventId.parse(lastEventId()))
+
+                assertEquals(NodeMetadata(), stack.vfs.getMetadata(id), "清空之后读回空对象")
+
+                // 末尾哨兵：同一条分发链上，查询要是真发了通知，它一定排在哨兵之前。
+                val marker = EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/tail.txt"))
+                stack.notifier.publish(listOf(marker.toVfsEvent()))
+                recorder.await(marker.id)
+
+                val metadataEvents = recorder.received.filter { it.type == VfsEventType.METADATA_UPDATED }
+                assertEquals(4, metadataEvents.size, "四次 set（含同值与重复清空）各一条，查询零条")
+                assertTrue(metadataEvents.all { it.nodeId == id }, "事件带目标 ID")
+                assertTrue(metadataEvents.all { it.uri.path.toString() == "/resources/a.txt" }, "事件 URI 是 Node 当时所在路径")
+                assertEquals(
+                    listOf("FILE_CREATED") + List(4) { "METADATA_UPDATED" },
+                    eventTypes(),
+                    "库里也只有那五条：查询没写入任何事件",
+                )
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A04 the logical time moves and the identity stays when the metadata changes`() =
+        runBlocking {
+            withStack { stack ->
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val id = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+                val before = stack.nodes.findById(id)!!
+                val modifiedOnDisk = Files.getLastModifiedTime(diskRoot.resolve("a.txt"))
+
+                stack.vfs.setMetadata(id, NodeMetadata(description = "一次逻辑变更"))
+
+                val after = stack.nodes.findById(id)!!
+                assertEquals(before.id, after.id, "身份不变")
+                assertEquals(before.path, after.path, "路径不变")
+                assertEquals(before.type, after.type, "类型不变")
+                assertEquals(before.registeredAt, after.registeredAt, "登记时间不变")
+                assertTrue(after.updatedAt >= before.updatedAt, "逻辑更新时间推进，不要求严格递增")
+                assertEquals(modifiedOnDisk, Files.getLastModifiedTime(diskRoot.resolve("a.txt")), "不动物理文件时间")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A05 a real sqlite append conflict rolls the metadata and the node time back`() =
+        runBlocking {
+            // 测试装置：本次事务的第一条事件用固定 ID，和库里已存在的那条撞主键。
+            // 碰撞发生在 metadata.put 和 nodes.touch **之后**，所以回滚必须把三样东西一起恢复。
+            val colliding = VfsEventId.parse("018f0a5c-1b2c-7def-8abc-0000000000e7")
+            withStack(unitOfWork = { CollidingEventUnitOfWork(it, colliding) }) { stack ->
+                // 预置不走 DefaultVfs：这个包装器会让每个事务的第一条事件都撞主键。
+                val id = NodeId.parse("018f0a5c-1b2c-7def-8abc-0000000000a7")
+                val now = Instant.parse("2026-10-04T09:00:00Z")
+                stack.nodes.register(NodeRecord(id, VfsPath.parse("/resources/a.txt"), NodeType.FILE, true, now, now))
+                stack.metadata.put(id, NodeMetadata(setOf("ct"), "旧说明"))
+                stack.rawUnitOfWork.inTransaction { scope ->
+                    scope.events.append(
+                        EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/seed.txt")).copy(id = colliding),
+                    )
+                }
+                val before = stack.nodes.findById(id)!!
+                val recorder = TailRecorder()
+                stack.notifier.subscribe(recorder)
+
+                val failure =
+                    assertFailsWith<VfsException> {
+                        stack.vfs.setMetadata(id, NodeMetadata(setOf("mr"), "新说明"))
+                    }
+
+                assertEquals(VfsErrorCode.STATE_ERROR, failure.code)
+                assertEquals(VfsEffect.NONE, failure.effect, "这一批全在状态库里，没有 Storage 副作用，不套 PARTIAL")
+                assertNotNull(failure.cause, "底层原因保留在 cause 上")
+                assertEquals(NodeMetadata(setOf("ct"), "旧说明"), stack.metadata.get(id), "Metadata 随事务回滚")
+                assertEquals(before.updatedAt, stack.nodes.findById(id)?.updatedAt, "Node 逻辑时间一起回滚")
+                assertEquals(1, eventCount(), "事件没进库")
+
+                // 失败不该有通知：末尾哨兵按 ID 等，哨兵之前的任何通知都已经被看到。
+                val marker = EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/tail.txt"))
+                stack.notifier.publish(listOf(marker.toVfsEvent()))
+                recorder.await(marker.id)
+                assertEquals(listOf(marker.id.value), recorder.received.map { it.id.value }, "失败的事务没有成功通知")
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A06 a metadata query waits at the boundary and then reads the committed value`() =
+        runBlocking {
+            lateinit var pausing: PausingMetadataCommitUnitOfWork
+            lateinit var observed: RecordingMetadataRepository
+            withStack(
+                unitOfWork = { real -> PausingMetadataCommitUnitOfWork(real).also { wrapper -> pausing = wrapper } },
+                wrapMetadata = { real -> RecordingMetadataRepository(real).also { wrapper -> observed = wrapper } },
+            ) { stack ->
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val id = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+
+                pausing.arm()
+                val first = async(Dispatchers.Default) { stack.vfs.setMetadata(id, NodeMetadata(description = "first")) }
+                pausing.awaitEventAppend() // Metadata、Node 时间和事件都已真写进库，事务未提交，正拿着边界
+                assertEquals(1, pausing.pausedAppends())
+                val readsBefore = observed.callLog().size
+
+                val second =
+                    async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                        runCatching { stack.vfs.getMetadata(id) }.exceptionOrNull()
+                    }
+                // UNDISPATCHED：查询在当前线程直接开跑，第一个挂起点就是取锁——所以它现在一定卡在边界上。
+                assertFalse(second.isCompleted, "查询已经跑到第一个挂起点却直接跑完了——它没被边界挡住")
+                assertEquals(readsBefore, observed.callLog().size, "被挡住的查询一次状态库都没读")
+
+                pausing.release()
+
+                withTimeout(30_000) { first.await() }
+                val value = withTimeout(30_000) { second.await() }
+                assertNull(value, "放行后查询正常返回")
+                assertEquals(NodeMetadata(description = "first"), stack.vfs.getMetadata(id), "读到的是已提交的值")
+                assertTrue(observed.callLog().any { it.startsWith("get:") }, "查询确实读了状态库")
+                assertEquals(listOf("FILE_CREATED", "METADATA_UPDATED"), eventTypes())
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `A06 a metadata update cancelled before the commit rolls everything back and frees the lock`() =
+        runBlocking {
+            // 取消点放在事务最末尾：Metadata 替换、Node 时间和事件都已真写进库，COMMIT 还没发生。
+            lateinit var pausing: PausingMetadataCommitUnitOfWork
+            withStack(unitOfWork = { real -> PausingMetadataCommitUnitOfWork(real).also { wrapper -> pausing = wrapper } }) { stack ->
+                // 先订阅：分发是异步的，订阅晚一步就可能收不到预置那几条。
+                val recorder = TailRecorder()
+                stack.notifier.subscribe(recorder)
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val id = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+                stack.vfs.setMetadata(id, NodeMetadata(setOf("ct"), "旧说明"))
+                recorder.await(VfsEventId.parse(lastEventId())) // 按 ID 等预置阶段的两条事件真的被处理完
+                assertEquals(listOf(id, id), recorder.received.map { it.nodeId }, "基线确定")
+                val before = stack.nodes.findById(id)!!
+                val eventsBefore = eventCount()
+                val cancelled = CancellationException("cancelled while committing the metadata")
+
+                // 捕获发生在**调用 DefaultVfs 的协程内部**：被取消的 Deferred.await() 必然抛取消，拿它当证据等于什么都没测。
+                val escaped = CompletableDeferred<Throwable?>()
+                pausing.arm()
+                val job =
+                    async(Dispatchers.Default) {
+                        try {
+                            stack.vfs.setMetadata(id, NodeMetadata(setOf("mr"), "新说明"))
+                            escaped.complete(null)
+                        } catch (failure: Throwable) {
+                            escaped.complete(failure)
+                        }
+                    }
+                pausing.awaitEventAppend() // 三样都已经真写进库，事务还没 COMMIT
+
+                job.cancel(cancelled)
+                withTimeout(30_000) { job.join() }
+                val escapedFailure = withTimeout(30_000) { escaped.await() }
+                assertNotNull(escapedFailure, "更新链应该把取消抛出来，而不是安静地结束")
+                assertFalse(escapedFailure is VfsException, "取消没有被包装成 VfsException：$escapedFailure")
+                assertTrue(escapedFailure is CancellationException, "CancellationException 原样传播：$escapedFailure")
+                assertSame(cancelled, escapedFailure?.cause ?: escapedFailure, "取消原因一致")
+
+                assertEquals(NodeMetadata(setOf("ct"), "旧说明"), stack.metadata.get(id), "取消时事务回滚，Metadata 旧值还在")
+                assertEquals(before.updatedAt, stack.nodes.findById(id)?.updatedAt, "Node 逻辑时间一起回滚")
+                assertEquals(eventsBefore, eventCount(), "取消不追加事件")
+
+                // 锁已放行：紧接着的更新能拿到同一把边界并完成——能跑完就是锁没被留下的证据。
+                stack.vfs.setMetadata(id, NodeMetadata(description = "after"))
+                assertEquals(NodeMetadata(description = "after"), stack.vfs.getMetadata(id), "锁没有被留在手里")
+                assertEquals(1, pausing.pausedAppends(), "只有第一次挂起过")
+
+                // 末尾哨兵按 ID 等：被取消的那次一条通知都没有。
+                val marker = EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/tail.txt"))
+                stack.notifier.publish(listOf(marker.toVfsEvent()))
+                recorder.await(marker.id)
+                assertEquals(
+                    listOf(id, id, id, null),
+                    recorder.received.map { it.nodeId },
+                    "预置两条 + 取消后那次成功 + 哨兵",
+                )
+            }
+        }
+
     // __REAL_STACK_APPEND__
 }
 
@@ -1175,4 +1450,101 @@ private class CollidingEventUnitOfWork(
                 }
             block(decorated)
         }
+}
+
+/**
+ * 包一层 Metadata 仓库：按发生顺序记下每次 `get` / `put` / `delete`。
+ *
+ * 「一个被边界挡住的请求一次状态库都没碰」就是这么证的：不看它有没有返回（那随时会骗人），
+ * 看它的仓库调用记录有没有长。
+ */
+private class RecordingMetadataRepository(
+    private val delegate: MetadataRepository,
+) : MetadataRepository {
+    private val calls = CopyOnWriteArrayList<String>()
+
+    override suspend fun get(id: NodeId): NodeMetadata? {
+        calls += "get:$id"
+        return delegate.get(id)
+    }
+
+    override suspend fun put(
+        id: NodeId,
+        metadata: NodeMetadata,
+    ) {
+        calls += "put:$id"
+        delegate.put(id, metadata)
+    }
+
+    override suspend fun delete(id: NodeId) {
+        calls += "delete:$id"
+        delegate.delete(id)
+    }
+
+    /** 按发生顺序记下的仓库调用。 */
+    fun callLog(): List<String> = calls.toList()
+}
+
+/**
+ * 包一层事务：[arm] 之后的第一条事件**真写进库里**之后停一下。
+ *
+ * 「Metadata 替换 + Node 时间 + 事件」三样都落在同一个事务里，所以停在事件追加之后就是停在 COMMIT 之前：
+ * 取消从这里抛出来，能证明的是「这一次更新整体回滚了」，而不是「取消 = 什么都没发生」。
+ * 事务、回滚、NOT NULL 约束全都是真的（SqliteUnitOfWork 在 NonCancellable 里 ROLLBACK），包一层只多加一个挂起点。
+ */
+private class PausingMetadataCommitUnitOfWork(
+    private val delegate: SqliteUnitOfWork,
+) : UnitOfWork {
+    /** 是否还等着拦下一次事件追加；[arm] 打开、[compareAndSet] 关闭，所以只拦一次。 */
+    private val armed = AtomicBoolean(false)
+    private val paused = AtomicInteger()
+    private val arrivals = Channel<Unit>(Channel.UNLIMITED)
+    private val released = CompletableDeferred<Unit>()
+
+    /** 打开挂起点：从这里起的第一条事件追加会在写入之后停住。 */
+    fun arm() {
+        armed.set(true)
+    }
+
+    override suspend fun <T> inTransaction(block: suspend (TransactionScope) -> T): T =
+        delegate.inTransaction { scope ->
+            val decorated =
+                object : TransactionScope {
+                    override val nodes get() = scope.nodes
+
+                    override val metadata get() = scope.metadata
+
+                    override val events: EventRepository =
+                        object : EventRepository {
+                            override suspend fun append(event: EventRecord) {
+                                scope.events.append(event) // 先真的写进库里
+                                if (armed.compareAndSet(true, false)) {
+                                    paused.incrementAndGet()
+                                    arrivals.trySend(Unit)
+                                    // 并发排队用例靠放行，取消用例靠取消；两者都发生在 COMMIT 之前。
+                                    try {
+                                        released.await()
+                                    } catch (stopped: CancellationException) {
+                                        released.complete(Unit)
+                                        throw stopped
+                                    }
+                                }
+                            }
+                        }
+                }
+            block(decorated)
+        }
+
+    /** 三样都已写入、事务尚未提交。 */
+    suspend fun awaitEventAppend() {
+        withTimeout(30_000) { arrivals.receive() }
+    }
+
+    /** 放行挂起的追加（取消用例里由取消结束）。 */
+    fun release() {
+        released.complete(Unit)
+    }
+
+    /** 真的挂起过几次：取消之后仍应是 1，说明后来的操作没再被拦住。 */
+    fun pausedAppends(): Int = paused.get()
 }

@@ -34,6 +34,12 @@ class FakeStateUnitOfWork(
     // 故障注入开关
     var failOnStateWrite: VfsException? = null
     var failOnEventAppend: VfsException? = null
+
+    /**
+     * 抛一个**不是** [VfsException] 的失败：用来验证编排把普通异常映射成 `STATE_ERROR` 而不是原样漏给调用方。
+     * 真实 SQLite 实现自己就映射好了（见 `mapStateErrors`），所以这条只在替身上注入。
+     */
+    var failOnEventAppendRaw: Throwable? = null
     var failOnCommit: VfsException? = null
 
     /** 已提交状态只读快照。 */
@@ -207,6 +213,10 @@ class FakeStateUnitOfWork(
             calls += "events.append:$event"
             failOnEventAppend?.let {
                 calls += "events.append-failed"
+                throw it
+            }
+            failOnEventAppendRaw?.let {
+                calls += "events.append-raw-failed"
                 throw it
             }
             staged.add(event)

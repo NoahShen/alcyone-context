@@ -1,6 +1,7 @@
 package com.github.noahshen.alcyone.context.vfs.core
 
 import com.github.noahshen.alcyone.context.vfs.NodeId
+import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.NodeType
 import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.core.event.AsyncEventNotifier
@@ -10,6 +11,7 @@ import com.github.noahshen.alcyone.context.vfs.core.operation.CapabilitySnapshot
 import com.github.noahshen.alcyone.context.vfs.core.registry.NodeRegistry
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.InMemoryNodeRepository
+import com.github.noahshen.alcyone.context.vfs.core.repository.MetadataRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.MountRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository
@@ -67,6 +69,25 @@ internal class VfsHarness(
         return record
     }
 
+    /** 往事务那份状态库里放一条 Metadata：用在自己想造「已存在的非空 Metadata」的场景。 */
+    suspend fun seedMetadata(
+        id: NodeId,
+        metadata: NodeMetadata,
+    ) {
+        uow.inTransaction { scope -> scope.metadata.put(id, metadata) }
+    }
+
+    /**
+     * 把一条记录标记删除。
+     *
+     * 自动提交那份（Registry 查询用）和事务那份（写入用）要各自标一次：真实栈里它们是同一张表，
+     * 替身里是两份内存，漏掉哪份都会让「删除后旧 ID 仍然有效」这种假象溜过去。
+     */
+    suspend fun retireNode(id: NodeId) {
+        nodes.markDeleted(listOf(id), FIXED_CLOCK)
+        uow.inTransaction { scope -> scope.nodes.markDeleted(listOf(id), FIXED_CLOCK) }
+    }
+
     val nodes: NodeRepository =
         InMemoryNodeRepository().also { repo ->
             runBlocking { initialNodes.forEach { repo.register(it) } }
@@ -78,6 +99,22 @@ internal class VfsHarness(
     val boundary = StateBoundary()
 
     val uow = FakeStateUnitOfWork(initialNodes = initialNodes)
+
+    /**
+     * 自动提交的 Metadata 视图：读的是 [uow] 已提交的那份（测试里 Metadata 只经 `setMetadata` 进事务）。
+     * 写在这里直接报错——`setMetadata` 必须写事务视图，自动提交那份只用来读。
+     */
+    val metadata: MetadataRepository =
+        object : MetadataRepository {
+            override suspend fun get(id: NodeId): NodeMetadata? = uow.snapshot().second[id]
+
+            override suspend fun put(
+                id: NodeId,
+                metadata: NodeMetadata,
+            ): Unit = error("setMetadata must write through the transaction scope, not the auto-commit repository")
+
+            override suspend fun delete(id: NodeId): Unit = error("metadata deletion belongs to the delete operation")
+        }
 
     val capabilities =
         CapabilitySnapshot.of(
@@ -96,6 +133,7 @@ internal class VfsHarness(
             capabilities = capabilities,
             registry = registry,
             nodes = nodes,
+            metadata = metadata,
             storages = storages,
             boundary = boundary,
             pipeline = pipeline,

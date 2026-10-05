@@ -45,14 +45,6 @@ class DefaultVfsDeleteTest {
 
     private fun uri(path: String) = VfsUri.parse("alcyone://resources$path")
 
-    /** 往事务那份状态库里放一条 Metadata；setMetadata 属 T17，测试自己直接用仓库。 */
-    private suspend fun VfsHarness.seedMetadata(
-        id: com.github.noahshen.alcyone.context.vfs.NodeId,
-        metadata: NodeMetadata,
-    ) {
-        uow.inTransaction { scope -> scope.metadata.put(id, metadata) }
-    }
-
     @Test
     fun `A01 a registered file disappears with one FILE_DELETED and no new identity`() =
         runBlocking {

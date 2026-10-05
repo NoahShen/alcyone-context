@@ -25,6 +25,7 @@ import com.github.noahshen.alcyone.context.vfs.core.operation.CapabilitySnapshot
 import com.github.noahshen.alcyone.context.vfs.core.operation.OperationGuard
 import com.github.noahshen.alcyone.context.vfs.core.operation.OperationIntent
 import com.github.noahshen.alcyone.context.vfs.core.registry.NodeRegistry
+import com.github.noahshen.alcyone.context.vfs.core.repository.MetadataRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository
 import com.github.noahshen.alcyone.context.vfs.core.router.MountRouter
@@ -65,7 +66,7 @@ data class VfsLimits(
 
 /**
  * VFS 的基础文件操作（T15）：把已交付的路由、预检、Node Registry、事件提交和 Storage 拼成 `read` / `write` / `stat` /
- * `list` 和 `getNode`；T16 加上 `delete`。Core 只依赖 Port，具体 SQLite 与本地磁盘由调用方注入。
+ * `list` 和 `getNode`；T16 加上 `delete`；T17 加上 `getMetadata` / `setMetadata`。Core 只依赖 Port，具体 SQLite 与本地磁盘由调用方注入。
  *
  * 例：挂载 `/resources` 指向本地磁盘，`write(alcyone://resources/notes/a.txt, "hi")` 会
  * 自动建出 `notes` 目录、写文件、在同一个事务里登记 Node 并追加 `FILE_CREATED` 事件。
@@ -85,14 +86,18 @@ data class VfsLimits(
  * | Storage 写成功但状态或事件提交失败 | `STATE_ERROR` + `PARTIAL`（文件内容留着，Node 与事件一起回滚，没有成功通知） |
  * | 删除时 Storage 报错 | 原错误码 + 后端自己的 effect（原样带出，不降级）；逻辑状态先留着不清 |
  * | 删除已在盘上生效但状态或事件提交失败 | `STATE_ERROR` + `PARTIAL`（文件删了回不来，Node 与 Metadata 保持原样） |
+ * | Metadata 替换的事务失败 | `STATE_ERROR` + `NONE`（这一批状态与事件一起回滚，没有 Storage 副作用，不套 PARTIAL） |
  * | 通知队列满、Consumer 抛错 | 不影响已提交的结果（复用 T14 的 EventPipeline） |
  * | 协程被取消 | 取消原样传播；已提交的事实不撤回，不声称「取消 = 全部回滚」 |
  *
  * **删除（T16）**：物理删除走 Storage 自己的递归实现（Core 不重写遍历），逻辑侧把目标与「完整段边界内已登记的子树」
  * 标记删除、清掉各自 Metadata，追加**一条**目标级事件（目录删除表示整棵子树失效，不为后代逐个造事件）。
  *
- * **本轮没交付的方法**：[move] / [getMetadata] / [setMetadata] 明确抛
- * [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用，分别由 T17、T20～T22 接续。
+ * **Metadata（T17）是纯状态库操作**：不查挂载、不 stat 物理文件、不碰 Storage、不懒注册。
+ * 例：外部直接删掉了磁盘上的 `a.dcm`，它的 Node 还有效，标签和说明照样能读能改；
+ * 经 VFS 删掉之后同一个旧 ID 就报 `NOT_FOUND`，不会退化成「返回空 Metadata」。
+ *
+ * **本轮没交付的方法**：[move] 明确抛 [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用，由 T20～T22 接续。
  */
 class DefaultVfs(
     /** 挂载与配置目录（T09）。 */
@@ -103,6 +108,11 @@ class DefaultVfs(
     private val registry: NodeRegistry,
     /** 自动提交的 Node 仓库：写之前查逻辑记录、列表补已登记的 Node ID。 */
     private val nodes: NodeRepository,
+    /**
+     * 自动提交的 Metadata 仓库：只给 [getMetadata] 读用，写永远走事务里那一份（见 [setMetadata]）。
+     * 同一个文件里，属性名 `metadata` 指这里这个仓库；[setMetadata] 的同名参数只在该方法内指 `NodeMetadata`。
+     */
+    private val metadata: MetadataRepository,
     /** 按 [com.github.noahshen.alcyone.context.vfs.core.repository.MountRecord.storageKey] 取 Storage。 */
     private val storages: (String) -> Storage?,
     /** 状态库串行边界。整个 Runtime 共用一个实例，Registry 与 EventPipeline 也用同一个。 */
@@ -480,14 +490,61 @@ class DefaultVfs(
         return boundary.withLock { deleteInsideBoundary(uri, options) }
     }
 
-    /** 读 Metadata：T17 接续。 */
-    override suspend fun getMetadata(id: NodeId): NodeMetadata = throw notDeliveredYet("getMetadata", "planned for T17")
+    /**
+     * 读一个 Node 上保存的 Metadata（标签 / 说明 / 扩展字段）。
+     *
+     * 例：给 `a.dcm` 打上 `ct` 标签之后，`getMetadata(id)` 读回同一个对象；外部把磁盘上的 `a.dcm` 删了，
+     * 这个查询照样读得到——Metadata 存在状态库里，只跟 Node ID 走，不看物理文件在不在。
+     *
+     * 有效 Node 但从没设置过 → 返回空 [NodeMetadata]；ID 没登记过或者已被删除 → `NOT_FOUND`。
+     * **空对象和「查不到」是两回事**，无效 ID 不会被当成「没设置过」。
+     *
+     * 纯查询：不查挂载、不 stat 物理文件、不碰 Storage、不懒注册、不发事件。Node 校验和 Metadata 读取
+     * 共用同一次 [StateBoundary]，所以不会读到别人还没提交的中间状态。
+     */
+    override suspend fun getMetadata(id: NodeId): NodeMetadata =
+        boundary.withLock {
+            // 先确认这个 ID 现在还是有效 Node：查不到（含已标记删除）就 NOT_FOUND，
+            // 绝不把无效 ID 当成「没设置过 Metadata」返回空对象。
+            registry.getNodeInsideBoundary(id)
+            // 有效但还没设置过 → 空对象。查询不发事件，也不碰挂载和磁盘。
+            metadata.get(id) ?: NodeMetadata()
+        }
 
-    /** 写 Metadata：T17 接续。 */
+    /**
+     * 整体替换一个 Node 的 Metadata。
+     *
+     * 例：原来是 `tags = {ct}`、`description = 胸部 CT`，传一个只有 `description = 报告` 的对象进去，
+     * 结果是 `tags` 变空——这是替换，不是合并。传空对象就是清空；只改一个字段就自己
+     * `getMetadata(id).copy(...)` 再传回来（不提供字段级 patch）。
+     *
+     * Node 有效性校验、Metadata 替换、Node 逻辑更新时间（`updatedAt`）和 `METADATA_UPDATED` 事件
+     * 在**同一个事务**里提交，成功返回之后才通知；锁由 [EventPipeline.commit] 取，全链只取一次。
+     *
+     * 事件在每次有效调用后都发一条，**包括传入和当前完全相同的值、包括重复清空**——本轮不做相等比较。
+     */
     override suspend fun setMetadata(
         id: NodeId,
         metadata: NodeMetadata,
-    ): Unit = throw notDeliveredYet("setMetadata", "planned for T17")
+    ) {
+        try {
+            // 整条链只取这一次锁：commit 自己拿边界，里面用事务视图读写，不再套 withLock（锁不可重入）。
+            pipeline.commit { scope -> commitMetadata(scope, id, metadata) }
+        } catch (cancellation: CancellationException) {
+            // 取消原样传播。提交前的取消已经整体回滚；提交后的取消不证明提交被撤销，也不宣称「取消 = 没写入」。
+            throw cancellation
+        } catch (failure: VfsException) {
+            // 领域错误（NOT_FOUND）和状态库自己报出的 STATE_ERROR 原样保留，带它自己的 code 与 effect。
+            throw failure
+        } catch (failure: Exception) {
+            // 只收普通异常：JVM 的 Error（OOM、StackOverflow）原样抛出去。
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The metadata could not be committed: ${failure.message ?: failure::class.java.simpleName}",
+                effect = VfsEffect.NONE,
+            ).apply { initCause(failure) }
+        }
+    }
 
     /** 删链的锁内部分：先拒绝结构冲突，再按真实类型跑预检，最后物理删除 + 逻辑提交。 */
     private suspend fun deleteInsideBoundary(
@@ -600,6 +657,37 @@ class DefaultVfs(
         cleanup.ids.forEach { scope.metadata.delete(it) }
         val type = if (cleanup.type == NodeType.DIRECTORY) VfsEventType.DIRECTORY_DELETED else VfsEventType.FILE_DELETED
         scope.events.append(events.newRecord(type, cleanup.targetNodeId, uri))
+    }
+
+    /**
+     * 最后一个事务：整体替换 Metadata、推进 Node 逻辑时间、追加**一条**事件（T03 §4）。
+     *
+     * 例：原来存着 `tags = {ct}`、`description = 胸部 CT`，传一个只有 `description = 报告` 的对象进去，
+     * 结果就是 `tags` 变空——这是替换，不是合并。传空对象等于清空。
+     *
+     * **每次有效 set 都产生一条事件，包括传完全相同的值、包括重复清空**：本轮不做相等比较也不去重。
+     * 想判断「变没变」，调用方自己比 `getMetadata` 的前后两次结果。
+     *
+     * 顺带 [com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository.touch] 一下：
+     * `updatedAt` 是「逻辑记录最后被改动的时间」，不是磁盘文件的修改时间；ID、路径、类型和 `registeredAt` 都不变。
+     * 时钟精度内连续设置可能拿到相同时间，不要求严格递增。
+     *
+     * 事件里的路径取的是**这一次受保护读取**看到的 Node 路径：Node 已被删除的话，第一步的
+     * `findById` 就返回空，所以不会给已删除的 Node 写回 Metadata。
+     */
+    private suspend fun commitMetadata(
+        scope: TransactionScope,
+        id: NodeId,
+        metadata: NodeMetadata,
+    ) {
+        val record =
+            scope.nodes.findById(id) ?: throw VfsException(
+                VfsErrorCode.NOT_FOUND,
+                "No active node with the given id",
+            )
+        scope.metadata.put(id, metadata)
+        scope.nodes.touch(record.id, clock())
+        scope.events.append(events.newRecord(VfsEventType.METADATA_UPDATED, record.id, VfsUri.of(record.path)))
     }
 
     /** 读取实际上限：配置上限与单次上限里较小的那个。`null` 用配置，`0` 就是只接受空文件。 */
