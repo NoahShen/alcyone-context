@@ -93,14 +93,37 @@ class SqliteEventRepository(
     }
 }
 
-/** 挂载点仓库（R11）。本轮严格只读，映射写入由 T18 负责。 */
+/** 挂载点仓库（R11）。Core 端口只读；写入入口放在这里（T18），SQL 不外泄。 */
 class SqliteMountRepository(
     state: VfsStateDatabase,
 ) : MountRepository {
+    private val state = state
     private val queries = state.database.mountQueries
 
     override suspend fun list(): List<MountRecord> =
         stateCall {
-            queries.selectAllMounts().executeAsList().map { MountRecord(VfsPath.parse(it.vfs_path), it.storage_key) }
+            queries.selectAllMounts().executeAsList().map {
+                MountRecord(VfsPath.parse(it.vfs_path), it.storage_key, it.backend_type, it.physical_root)
+            }
         }
+
+    /**
+     * 整批替换挂载映射（首启保存、后续只增不改时都走这里），**一个事务里先清后写**。
+     *
+     * 例：首次启动把 `[("resources", "local", "local-fs", "/data/disk")]` 写进空库；
+     * 中途插入失败时这一批整体回滚，不会留下改了一半的映射。
+     *
+     * 调用方（Runtime）必须先核对旧映射再调这里：这里只负责「把已经确认可接受的一批写进去」，
+     * 冲突判定不在 persistence。
+     */
+    suspend fun replaceAll(records: List<MountRecord>) {
+        stateCall {
+            state.driver.inRawTransaction {
+                queries.deleteAllMounts()
+                records.forEach { record ->
+                    queries.insertMount(record.path.toString(), record.storageKey, record.backendType, record.physicalRoot)
+                }
+            }
+        }
+    }
 }

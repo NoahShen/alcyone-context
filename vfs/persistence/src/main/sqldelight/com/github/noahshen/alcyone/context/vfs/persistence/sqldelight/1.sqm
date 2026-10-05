@@ -1,0 +1,7 @@
+-- 版本 1 → 2（T18）：给挂载点补上物理身份的两列。
+--
+-- 旧库里已有的行拿不到真实的物理根，写成空串：由 Runtime 的配置核对明确拒绝并说明处理办法，
+-- 而不是拿当前配置自动认证成「这就是当初那块盘」。空 mount 的旧库迁移后正常初始化。
+ALTER TABLE mount ADD COLUMN backend_type TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE mount ADD COLUMN physical_root TEXT NOT NULL DEFAULT '';

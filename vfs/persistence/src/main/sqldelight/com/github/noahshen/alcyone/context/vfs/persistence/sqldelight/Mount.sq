@@ -1,10 +1,26 @@
--- 挂载点映射表：路径为主键，storage_key 只存实例标识，不存凭据或具体 URL。本轮只读（T18 负责写入）。
+-- 挂载点映射表：路径为主键，storage_key 只存实例标识，不存凭据或具体 URL。
+--
+-- 资源身份由三件套决定：storage_key + backend_type + physical_root（T18）。
+-- 只比 storage_key 不够：同一个 key 改挂到另一个物理根上，旧 Node 会指向新盘，必须在重开时被认出来。
+-- physical_root 存规范化后的绝对路径（T12 的 LocalFsRoots.normalize 已经消解过符号链接）。
+-- backend_type / physical_root 为空串表示「这条记录没有物理身份」，只会出现在迁移上来的旧库行里；
+-- 遇到它必须明确拒绝，不能拿当前配置替它认证。
 CREATE TABLE mount (
     vfs_path TEXT NOT NULL PRIMARY KEY,
-    storage_key TEXT NOT NULL
+    storage_key TEXT NOT NULL,
+    backend_type TEXT NOT NULL DEFAULT '',
+    physical_root TEXT NOT NULL DEFAULT ''
 );
 
--- 本轮严格只读（T18 负责写入），只暴露全量读取。
+-- 全量读取。首次启动存下的映射，重开时逐条与新配置核对（身份变化一律 CONFLICT）。
 selectAllMounts:
 SELECT * FROM mount
 ORDER BY vfs_path;
+
+-- 整批替换（T18 首启原子保存用）：同一个事务里先清后写，中途失败不会留下改了一半的映射。
+deleteAllMounts:
+DELETE FROM mount;
+
+insertMount:
+INSERT INTO mount (vfs_path, storage_key, backend_type, physical_root)
+VALUES (?, ?, ?, ?);

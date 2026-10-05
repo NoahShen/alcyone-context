@@ -157,10 +157,10 @@ class VfsStateDatabaseLifecycleTest {
             }
         }
 
-    /** 基线 schema 就是版本 1（A05）。 */
+    /** 基线 schema 是版本 2（T18 给 mount 表补物理身份，1.sqm 把 1 → 2）。 */
     @Test
-    fun `the baseline schema is version one`() {
-        assertEquals(1L, VfsDatabase.Schema.version)
+    fun `the baseline schema is version two`() {
+        assertEquals(2L, VfsDatabase.Schema.version)
     }
 
     /**
@@ -180,7 +180,7 @@ class VfsStateDatabaseLifecycleTest {
                 val newerVersion = VfsDatabase.Schema.version + 1
 
                 // 模拟「新版本代码写出来的库」：结构不变，只把版本号抬高。
-                assertEquals(1L, rawLong(file, "PRAGMA user_version"))
+                assertEquals(VfsDatabase.Schema.version, rawLong(file, "PRAGMA user_version"))
                 rawStatement(file, "PRAGMA user_version = $newerVersion")
 
                 val failure = assertThrows(VfsException::class.java) { VfsStateDatabase.file(file) }

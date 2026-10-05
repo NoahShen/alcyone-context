@@ -109,7 +109,10 @@ internal fun VfsStateDatabase.eventRows(): List<EventRow> =
             null,
         ).value
 
-/** Mount 写入本轮不提供接口（T18 负责），测试直接写库。 */
+/**
+ * 直写挂载行。T18 之后 Runtime 已有正式写入入口（[SqliteMountRepository.replaceAll]），
+ * 这里留给「造一条旧库形状的行」用（例如迁移测试）。
+ */
 internal fun VfsStateDatabase.insertMount(
     path: String,
     storageKey: String,

@@ -7,6 +7,7 @@ import com.github.noahshen.alcyone.context.vfs.VfsException
 import java.nio.file.Path
 import java.sql.DriverManager
 import java.util.Properties
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * VFS 状态库的打开与关闭入口（T03 §8 版本化升级、§9 释放资源）。
@@ -34,9 +35,20 @@ class VfsStateDatabase
         internal val database: VfsDatabase,
         internal val driver: JdbcDriver,
     ) : AutoCloseable {
+        private val closed = AtomicBoolean(false)
+
+        /**
+         * 连接是否已经释放（诊断用）。
+         *
+         * 只在 [close] 真的关掉连接之后才为 true：[close] 自己抛错时不置位，
+         * 那时连接还开着，调用方才知道资源没释放干净。
+         */
+        val isClosed: Boolean get() = closed.get()
+
         override fun close() {
             // 与其他状态库失败一致：JDBC 关闭异常也映射为 STATE_ERROR，cause 保留原始异常。
             mapStateErrors { driver.close() }
+            closed.set(true)
         }
 
         companion object {
