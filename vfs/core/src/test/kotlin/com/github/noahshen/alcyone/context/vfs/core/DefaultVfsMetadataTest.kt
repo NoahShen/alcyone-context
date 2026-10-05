@@ -14,6 +14,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Instant
@@ -205,6 +207,32 @@ class DefaultVfsMetadataTest {
             assertEquals(NodeMetadata(setOf("ct"), "旧说明"), harness.uow.snapshot().second[record.id], "同批回滚，旧值还在")
             assertEquals(before.updatedAt, harness.committedNodes().single().updatedAt, "Node 逻辑时间一起回滚")
             assertTrue(harness.committedEvents().isEmpty(), "没有成功事件")
+        }
+
+    @Test
+    fun `A05 a state failure that already carries an effect is passed through unchanged`() =
+        runBlocking {
+            val harness = harness()
+            val record = harness.seedNode("/resources/a.txt")
+            // 状态库自己报出的异常（带 UNKNOWN）原样抛出：不改写 code，也不把 effect 降成 NONE。
+            // 真实 SQLite 只会经 mapStateErrors 产出 STATE_ERROR + NONE，所以这一路只在替身上验证。
+            val unknown =
+                VfsException(
+                    VfsErrorCode.STATE_ERROR,
+                    "state store could not tell whether it committed",
+                    effect = VfsEffect.UNKNOWN,
+                )
+            harness.uow.failOnEventAppend = unknown
+
+            val failure =
+                assertFailsWith<VfsException> {
+                    harness.vfs.setMetadata(record.id, NodeMetadata(description = "x"))
+                }
+
+            assertSame(unknown, failure, "状态库自己报出的异常原样抛出，不重新包装")
+            assertEquals(VfsErrorCode.STATE_ERROR, failure.code)
+            assertEquals(VfsEffect.UNKNOWN, failure.effect, "UNKNOWN 不降级成 NONE")
+            assertNull(harness.uow.snapshot().second[record.id], "这一批仍然整体回滚，什么都没写进去")
         }
 
     // __METADATA_APPEND__

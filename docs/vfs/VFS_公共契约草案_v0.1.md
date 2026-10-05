@@ -263,7 +263,7 @@ JsonObject 来自 Kotlin Serialization。移除固定 owner 字段以避免与 A
 
 Metadata 绑定 Node ID，移动后保留。查询 / 替换已注册 Node 的 Metadata 不访问 Storage；其值不会因切换物理后端自动丢失。
 
-**替换与事件（T17 落实）**：`setMetadata` 整体替换，传空对象就是清空；每次有效调用都产生**一条** `METADATA_UPDATED`，包括传入与当前完全相同的值、包括重复清空——不提供相等比较或去重，想知道「变没变」由调用方自己比较前后两次 `getMetadata`。事件里的 `nodeId` 是目标 ID，`uri` 是这次受保护读取里看到的 Node 当时所在路径。
+**替换与事件（T17 落实）**：`setMetadata` 整体替换，传空对象就是清空；每次有效调用都产生**一条** `METADATA_UPDATED`，包括传入与当前完全相同的值、包括重复清空——不提供相等比较或去重。想知道「变没变」由调用方自己决定（例如读回当前值再决定是否发起替换），但这不是原子比较更新：并发下两次读取之间可能已有别的变更。事件里的 `nodeId` 是目标 ID，`uri` 是这次受保护读取里看到的 Node 当时所在路径。
 
 例：一个 Node 原本是 `tags = {ct, 影像}`、`description = 胸部 CT 报告`，传一个只有 `description = 报告` 的对象进去，结果是 `tags` 变空、`extensions` 也变空——整体替换，不与旧值合并；接着再传一次完全相同的对象，仍然发一条事件。
 

@@ -435,6 +435,8 @@ class DefaultVfsRealStackTest {
         wrapStorage: (Storage) -> Storage = { it },
         /** 包一层状态库：记下每次 Metadata 读 / 写，用来证明被挡住的请求还没碰状态库（A06）。 */
         wrapMetadata: (MetadataRepository) -> MetadataRepository = { it },
+        /** 包一层 Node 仓库：记下每次 `findById` 的**进入**，用来证明被挡住的查询还没进状态库（A06）。 */
+        wrapNodes: (NodeRepository) -> NodeRepository = { it },
         /** 包一层事务：让本次事务的第一条事件撞上库里的主键（A05）。 */
         unitOfWork: (SqliteUnitOfWork) -> UnitOfWork = { it },
         block: suspend (RealStack) -> T,
@@ -456,6 +458,7 @@ class DefaultVfsRealStackTest {
             val nodes = SqliteNodeRepository(state)
             val metadata = SqliteMetadataRepository(state)
             val observedMetadata = wrapMetadata(metadata)
+            val observedNodes = wrapNodes(nodes)
             try {
                 return block(
                     RealStack(
@@ -463,8 +466,8 @@ class DefaultVfsRealStackTest {
                             DefaultVfs(
                                 router = router,
                                 capabilities = CapabilitySnapshot.of(storages.mapValues { it.value.capabilities() }),
-                                registry = NodeRegistry(router, nodes, { key -> storages[key] }, boundary),
-                                nodes = nodes,
+                                registry = NodeRegistry(router, observedNodes, { key -> storages[key] }, boundary),
+                                nodes = observedNodes,
                                 metadata = observedMetadata,
                                 storages = { key -> storages[key] },
                                 boundary = boundary,
@@ -474,6 +477,7 @@ class DefaultVfsRealStackTest {
                         nodes = nodes,
                         metadata = metadata,
                         observedMetadata = observedMetadata,
+                        observedNodes = observedNodes,
                         notifier = notifier,
                         rawUnitOfWork = SqliteUnitOfWork(state),
                         storages = storages,
@@ -494,6 +498,8 @@ class DefaultVfsRealStackTest {
         val metadata: SqliteMetadataRepository,
         /** 包了一层的 Metadata 仓库（[wrapMetadata] 的结果），A06 用它的调用记录。 */
         val observedMetadata: MetadataRepository,
+        /** 包了一层的 Node 仓库（[wrapNodes] 的结果），A06 用它的进入记录。 */
+        val observedNodes: NodeRepository,
         val notifier: AsyncEventNotifier,
         /** 未包装的事务：A05 用来先真实地放一条事件进去。 */
         val rawUnitOfWork: SqliteUnitOfWork,
@@ -1102,10 +1108,12 @@ class DefaultVfsRealStackTest {
     fun `A06 a metadata query waits at the boundary and then reads the committed value`() =
         runBlocking {
             lateinit var pausing: PausingMetadataCommitUnitOfWork
-            lateinit var observed: RecordingMetadataRepository
+            lateinit var observedNodes: RecordingNodeRepository
+            lateinit var observedMetadata: RecordingMetadataRepository
             withStack(
                 unitOfWork = { real -> PausingMetadataCommitUnitOfWork(real).also { wrapper -> pausing = wrapper } },
-                wrapMetadata = { real -> RecordingMetadataRepository(real).also { wrapper -> observed = wrapper } },
+                wrapNodes = { real -> RecordingNodeRepository(real).also { wrapper -> observedNodes = wrapper } },
+                wrapMetadata = { real -> RecordingMetadataRepository(real).also { wrapper -> observedMetadata = wrapper } },
             ) { stack ->
                 stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
                 val id = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
@@ -1114,23 +1122,29 @@ class DefaultVfsRealStackTest {
                 val first = async(Dispatchers.Default) { stack.vfs.setMetadata(id, NodeMetadata(description = "first")) }
                 pausing.awaitEventAppend() // Metadata、Node 时间和事件都已真写进库，事务未提交，正拿着边界
                 assertEquals(1, pausing.pausedAppends())
-                val readsBefore = observed.callLog().size
+                val nodesBefore = observedNodes.callLog().size
+                val metadataBefore = observedMetadata.callLog().size
 
                 val second =
                     async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
-                        runCatching { stack.vfs.getMetadata(id) }.exceptionOrNull()
+                        stack.vfs.getMetadata(id)
                     }
                 // UNDISPATCHED：查询在当前线程直接开跑，第一个挂起点就是取锁——所以它现在一定卡在边界上。
                 assertFalse(second.isCompleted, "查询已经跑到第一个挂起点却直接跑完了——它没被边界挡住")
-                assertEquals(readsBefore, observed.callLog().size, "被挡住的查询一次状态库都没读")
+                // 确定性判据：查询链是「取锁 → findById → 切 IO → metadata.get」，
+                // 而 findById 的进入记录是在委托真仓库**之前**同步写下的——它没长，就说明查询还没进状态库。
+                // 只看「get 没被调」是不够的：锁被摘掉时，查询可以在 findById 切 IO 时挂住，那时 get 日志同样不变。
+                assertEquals(nodesBefore, observedNodes.callLog().size, "被挡住的查询还没进状态库：${observedNodes.callLog()}")
+                assertEquals(metadataBefore, observedMetadata.callLog().size, "被挡住的查询一次 Metadata 都没读")
 
                 pausing.release()
 
                 withTimeout(30_000) { first.await() }
+                // 排队的那一次查询自己返回的就是更新后的值，不拿另一次查询替代。
                 val value = withTimeout(30_000) { second.await() }
-                assertNull(value, "放行后查询正常返回")
-                assertEquals(NodeMetadata(description = "first"), stack.vfs.getMetadata(id), "读到的是已提交的值")
-                assertTrue(observed.callLog().any { it.startsWith("get:") }, "查询确实读了状态库")
+                assertEquals(NodeMetadata(description = "first"), value, "排队的那次查询返回的是已提交的值")
+                assertTrue(observedNodes.callLog().any { it.startsWith("findById:") }, "查询确实进了状态库")
+                assertTrue(observedMetadata.callLog().any { it.startsWith("get:") }, "查询确实读了 Metadata")
                 assertEquals(listOf("FILE_CREATED", "METADATA_UPDATED"), eventTypes())
             }
         }
@@ -1450,6 +1464,51 @@ private class CollidingEventUnitOfWork(
                 }
             block(decorated)
         }
+}
+
+/**
+ * 包一层 Node 仓库：记下每次 `findById` 的**进入**。
+ *
+ * 记录写在委托真仓库**之前**（同步执行，不经过任何挂起点），所以「这一行还没执行」就等价于
+ * 「查询还没进状态库」——这是 A06 并发判据的确定性来源：查询链是「取锁 → findById → 切 IO → metadata.get」，
+ * 只看 `metadata.get` 的调用记录是不够的（锁被摘掉时，查询可以在 findById 切 IO 时挂住，那时 get 日志同样不变）。
+ */
+private class RecordingNodeRepository(
+    private val delegate: NodeRepository,
+) : NodeRepository {
+    private val calls = CopyOnWriteArrayList<String>()
+
+    override suspend fun findById(id: NodeId): NodeRecord? {
+        calls += "findById:$id"
+        return delegate.findById(id)
+    }
+
+    override suspend fun findByPath(path: VfsPath): NodeRecord? = delegate.findByPath(path)
+
+    override suspend fun register(record: NodeRecord): NodeRecord = delegate.register(record)
+
+    override suspend fun updatePath(
+        id: NodeId,
+        newPath: VfsPath,
+        updatedAt: Instant,
+    ): Unit = delegate.updatePath(id, newPath, updatedAt)
+
+    override suspend fun touch(
+        id: NodeId,
+        updatedAt: Instant,
+    ): Unit = delegate.touch(id, updatedAt)
+
+    override suspend fun markDeleted(
+        ids: Collection<NodeId>,
+        deletedAt: Instant,
+    ): Unit = delegate.markDeleted(ids, deletedAt)
+
+    override suspend fun findSubtree(path: VfsPath): List<NodeRecord> = delegate.findSubtree(path)
+
+    override suspend fun findByPaths(paths: List<VfsPath>): List<NodeRecord> = delegate.findByPaths(paths)
+
+    /** 按发生顺序记下的仓库进入记录。 */
+    fun callLog(): List<String> = calls.toList()
 }
 
 /**
