@@ -87,29 +87,44 @@ class InitializationFailureTest {
             }
         }
 
-    /** 取消落在「资源都拿到了、还没交出去」这一刻：清理照做，取消原样传播，之后还能再建一次。 */
+    /**
+     * 取消落在「资源都拿到了、还没交出去」这一刻：清理照做，取消原样传播，之后还能再建一次。
+     *
+     * 被取消的协程自己 `await()` 必然会报取消，证明不了 `create` 内部没有把取消咽下去。
+     * 所以在协程内部把它真正抛出来的东西接进 [escaped]，取消之后再拿它做断言。
+     */
     @Test
     @Timeout(60)
     fun `a cancellation after acquiring resources releases them and propagates`() =
         runBlocking {
             prepare()
             val arrived = CompletableDeferred<AlcyoneVfs.Assembly>()
+            val escaped = CompletableDeferred<Throwable>()
+            val injected = CancellationException("cancel injected by the test")
             val job =
                 async(start = CoroutineStart.UNDISPATCHED) {
-                    AlcyoneVfs.create(
-                        config(),
-                        AlcyoneVfs.AssemblyProbe { assembly ->
-                            arrived.complete(assembly)
-                            CompletableDeferred<Unit>().await() // 挂在这里等取消
-                        },
-                    )
+                    try {
+                        AlcyoneVfs.create(
+                            config(),
+                            AlcyoneVfs.AssemblyProbe { assembly ->
+                                arrived.complete(assembly)
+                                CompletableDeferred<Unit>().await() // 挂在这里等取消
+                            },
+                        )
+                        // 正常返回时不去 complete，让下面 withTimeout 超时，这样问题会显形。
+                    } catch (failure: Throwable) {
+                        // complete 不是挂起函数，已经取消也执行得到。
+                        escaped.complete(failure)
+                        throw failure
+                    }
                 }
 
             val assembly = withTimeout(30_000) { arrived.await() }
-            job.cancel()
-            val thrown = assertFailsWith<Throwable> { job.await() }
+            job.cancel(injected)
+            val thrown = withTimeout(30_000) { escaped.await() }
 
             assertTrue(thrown is CancellationException, "取消原样传播，不被包装成业务异常：$thrown")
+            assertTrue(thrown === injected || thrown.cause === injected, "抛出来的是我们注入的那一个取消，不是别的：$thrown")
             assembly.storages.forEach { storage ->
                 assertEquals(VfsErrorCode.CLOSED, assertFailsWith<VfsException> { storage.stat(StoragePath.root) }.code)
             }

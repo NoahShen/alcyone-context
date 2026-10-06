@@ -95,12 +95,18 @@ internal fun VfsRuntimeConfig.resolve(): ResolvedConfig {
             throw invalidArgument("storageKey must be a non-blank name without whitespace or control characters")
         }
     }
-    // 同一个 key 只留一份物理根：同一个目录挂两次是「一块盘挂两个逻辑位置」，不是一个重叠根。
-    val rootsByKey = LinkedHashMap<String, Path>()
-    mounts.forEach { mount -> rootsByKey.putIfAbsent(mount.storageKey, mount.root) }
-    // 规范化 + 互不重叠检查：根目录必须是已经存在的目录，符号链接换成它指向的真实路径（T12）。
-    // 身份里存的必须是**规范化之后**的路径，否则换个写法（别名、相对路径）就会被当成换了根。
-    val normalizedByKey = rootsByKey.keys.zip(LocalFsRoots.requireNonOverlapping(rootsByKey.values)).toMap()
+    // 一个 storageKey 只能对应一个目录：先把每条挂载的物理根消解成真实路径（T12），
+    // 再按 key 归并。同一个 key 写成两个目录时，后一条会被静默丢掉，读写却都落到第一条，所以直接拒。
+    val normalizedByKey = LinkedHashMap<String, Path>()
+    mounts.forEach { mount ->
+        val normalized = LocalFsRoots.normalize(mount.root)
+        val already = normalizedByKey.putIfAbsent(mount.storageKey, normalized)
+        if (already != null && already != normalized) {
+            throw invalidArgument("storage key '${mount.storageKey}' is configured with different physical directories")
+        }
+    }
+    // 根目录必须是已经存在的目录，且彼此不重叠：同一个目录挂两次不算重叠，两个目录互相包含才算（T12）。
+    LocalFsRoots.requireNonOverlapping(normalizedByKey.values)
 
     val records =
         mounts.map { mount ->
@@ -115,9 +121,13 @@ internal fun VfsRuntimeConfig.resolve(): ResolvedConfig {
     val router = MountRouter.of(namespaces, records)
 
     val databasePath = normalizeStateDatabasePath(stateDatabase)
+    val lockPath = databasePath.resolveSibling(databasePath.fileName.toString() + LOCK_SUFFIX)
+    // 状态库和锁文件不能放在挂载目录里：挂载里的文件能通过公开的 delete 删掉，独占锁就失效了。
+    requireOutsideMounts(databasePath, "state database", normalizedByKey.values, records)
+    requireOutsideMounts(lockPath, "instance lock file", normalizedByKey.values, records)
     return ResolvedConfig(
         databasePath = databasePath,
-        lockPath = databasePath.resolveSibling(databasePath.fileName.toString() + LOCK_SUFFIX),
+        lockPath = lockPath,
         namespaces = namespaces,
         mounts = records,
         router = router,
@@ -143,14 +153,41 @@ internal fun normalizeStateDatabasePath(path: Path): Path {
     val parent = absolute.parent ?: throw invalidArgument("state database path has no parent directory")
     try {
         Files.createDirectories(parent)
-        // 文件本身已经是符号链接就整条解析；还不存在时只解析父目录。
-        val resolvedParent = parent.toRealPath()
-        return if (Files.exists(absolute)) absolute.toRealPath() else resolvedParent.resolve(absolute.fileName.toString())
+        val candidate = parent.toRealPath().resolve(absolute.fileName.toString())
+        // 文件本身是符号链接：目标还在就跟着走，目标没了就拒。
+        // 悬空链接必须拒：锁会加在链接名上，SQLite 却在链接指向的地方建库，两个写法就各拿了一把锁。
+        if (Files.isSymbolicLink(candidate)) {
+            if (!Files.exists(candidate)) {
+                throw invalidArgument("state database is a symbolic link whose target does not exist")
+            }
+            return candidate.toRealPath()
+        }
+        return candidate
     } catch (failure: IOException) {
         throw VfsException(
             VfsErrorCode.STATE_ERROR,
             "state database path cannot be prepared (${failure::class.simpleName})",
         ).apply { initCause(failure) }
+    }
+}
+
+/**
+ * 状态库文件或锁文件落在某个挂载目录里（正好等于也算）就拒。
+ *
+ * 例：把 `data` 挂到 `/resources`，状态库配成 `data/state.db`，公开的 `delete` 就能把库和锁删掉。
+ */
+private fun requireOutsideMounts(
+    statePath: Path,
+    what: String,
+    roots: Collection<Path>,
+    records: List<MountRecord>,
+) {
+    roots.firstOrNull { statePath.startsWith(it) }?.let { root ->
+        val at = records.firstOrNull { it.physicalRoot == root.toString() }?.path ?: VfsPath.root
+        throw invalidArgument(
+            "the $what must not be inside a mounted storage root (it is under the root mounted at '$at'); " +
+                "files under a mount can be listed and deleted through the VFS, which would break the single-instance lock",
+        )
     }
 }
 
