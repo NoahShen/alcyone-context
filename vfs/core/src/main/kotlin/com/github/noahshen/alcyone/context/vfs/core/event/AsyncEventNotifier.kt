@@ -122,6 +122,15 @@ class AsyncEventNotifier(
     val isClosed: Boolean get() = closed.get()
 
     /**
+     * 当前线程是不是正在某个 Consumer 回调里。
+     *
+     * 用途只有一个：Runtime 判断「这次的 close 是不是从回调里发起的」。回调里的那次 close 不能等
+     * 包含它自己的那次收尾——分发协程正卡在这个回调上，等下去就是自己等自己。
+     * 本类自己的 [close] 也靠同一个标记来决定要不要等分发协程。
+     */
+    fun isInsideConsumer(): Boolean = insideConsumer.get()
+
+    /**
      * 停掉自己的分发协程并等它结束，幂等：重复调用直接返回。
      *
      * 协作取消：Consumer 挂在可取消的挂起点（`awaitCancellation`、挂起的网络读）会立刻收到取消；

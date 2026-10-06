@@ -7,11 +7,14 @@ import com.github.noahshen.alcyone.context.vfs.VfsUri
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
@@ -20,6 +23,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertFailsWith
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -304,5 +308,100 @@ class RuntimeLifecycleTest {
             assertEquals("/resources/from-callback.txt", written.uri.path.toString(), "write 正常返回了 NodeInfo")
             val refused = assertFailsWith<VfsException> { vfs.list(VfsUri.parse("alcyone://resources")) }
             assertEquals(VfsErrorCode.CLOSED, refused.code, "确实已经关掉了")
+        }
+
+    /**
+     * R6：取消请求发出后，close 必须等在途操作真的收尾完（含 NonCancellable 回滚），才能关库和放锁。
+     * 收尾还在跑的时候，close 不能返回、同一个库的锁不能被放掉。
+     */
+    @Test
+    @Timeout(60)
+    fun `close waits for an admitted operation to finish its cleanup before releasing the database`() =
+        runBlocking {
+            prepare()
+            val entered = CompletableDeferred<Unit>()
+            val cleanupStarted = CompletableDeferred<Unit>()
+            val cleanupGate = CompletableDeferred<Unit>()
+            val cleanupDone = CompletableDeferred<Unit>()
+
+            val vfs = AlcyoneVfs.create(config(closeGracePeriod = Duration.ZERO))
+            vfs.beforeOperation = {
+                try {
+                    entered.complete(Unit)
+                    CompletableDeferred<Unit>().await()
+                } catch (cancellation: CancellationException) {
+                    // 模拟在途操作在 NonCancellable 里做清理 / 回滚
+                    withContext(NonCancellable) {
+                        cleanupStarted.complete(Unit)
+                        cleanupGate.await()
+                        cleanupDone.complete(Unit)
+                    }
+                    throw cancellation
+                }
+            }
+            val stuck = async(start = CoroutineStart.UNDISPATCHED) { vfs.list(VfsUri.parse("alcyone://resources")) }
+            withTimeout(30_000) { entered.await() }
+
+            val closing = async { vfs.close() }
+            withTimeout(30_000) { cleanupStarted.await() }
+
+            // 收尾没跑完时：close 不能先返回，锁也必须还占着
+            assertFalse(closing.isCompleted, "收尾没结束，close 不能先返回")
+            val lockConflict = assertFailsWith<VfsException> { AlcyoneVfs.create(config()) }
+            assertEquals(VfsErrorCode.CONFLICT, lockConflict.code, "收尾期间独占锁不能提前放掉")
+
+            cleanupGate.complete(Unit)
+            withTimeout(30_000) { cleanupDone.await() }
+            withTimeout(30_000) { closing.await() }
+
+            // 收尾彻底完成之后，同一个库能正常重开
+            withVfs(config()) { reopened ->
+                assertEquals(
+                    "/resources",
+                    reopened
+                        .stat(VfsUri.parse("alcyone://resources"))
+                        .uri.path
+                        .toString(),
+                )
+            }
+            // 最后一句必须返回 Unit：Kotlin 会把返回 kotlin.Result 的方法名字混淆，JUnit 就会把它静默跳过
+            stuck.join()
+        }
+
+    /**
+     * R7：外部先开始 close，回调随后也发起 close，两边都不许死锁。
+     * 回调里的 close 只是「提交了关闭请求」，不能在 completion.await 上等外部那次把分发协程关掉。
+     */
+    @Test
+    @Timeout(60)
+    fun `an external close and a callback close do not wait for each other`() =
+        runBlocking {
+            prepare()
+            val callbackEntered = CompletableDeferred<Unit>()
+            val allowCallbackClose = CompletableDeferred<Unit>()
+            val callbackClosed = CompletableDeferred<Unit>()
+
+            val vfs = AlcyoneVfs.create(config())
+            vfs.subscribe {
+                callbackEntered.complete(Unit)
+                runBlocking {
+                    allowCallbackClose.await()
+                    vfs.close() // 这时外部 close 已经在关，这次调用不能等包含它自己的那次收尾
+                    callbackClosed.complete(Unit)
+                }
+            }
+
+            vfs.write(uri("event.txt"), "x".toByteArray())
+            withTimeout(30_000) { callbackEntered.await() }
+
+            val external = async { vfs.close() }
+            awaitClosing(vfs)
+
+            allowCallbackClose.complete(Unit)
+            withTimeout(30_000) { callbackClosed.await() } // 死锁的话这里会超时
+            withTimeout(30_000) { external.await() } // 外部 close 也要正常走完
+
+            val refused = assertFailsWith<VfsException> { vfs.list(VfsUri.parse("alcyone://resources")) }
+            assertEquals(VfsErrorCode.CLOSED, refused.code)
         }
 }

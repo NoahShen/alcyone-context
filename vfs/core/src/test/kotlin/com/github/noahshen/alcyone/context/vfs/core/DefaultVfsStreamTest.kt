@@ -129,4 +129,56 @@ class DefaultVfsStreamTest {
                 assertEquals("0123456789", result.stream.readBytes().toString(Charsets.UTF_8), "流式读取不受 ByteArray 限额影响")
             }
         }
+
+    /**
+     * R8 场景 1：openStream() 自身失败时，清理抛出的异常不顶掉原异常，而是挂在 suppressed 上。
+     */
+    @Test
+    fun `open failure keeps the original exception and attaches close failure as suppressed`() =
+        runBlocking {
+            val disk =
+                StorageFakeImpl(
+                    openStreamThrows = true,
+                    closeThrows = true,
+                )
+            val harness = harness(disk)
+            disk.withFile("a.txt", "content")
+
+            val thrown =
+                assertFailsWith<IllegalStateException> {
+                    harness.vfs.openStream(uri("/a.txt"))
+                }
+
+            assertEquals("open failed", thrown.message, "主异常是 openStream 的原异常")
+            val suppressed = thrown.suppressed.filterIsInstance<IllegalStateException>()
+            assertEquals(1, suppressed.size, "close 抛出的异常挂在 suppressed 里")
+            assertEquals("close failed", suppressed.single().message)
+        }
+
+    /**
+     * R8 场景 2：流包装器 close 时，内容流先报错、后端存储流后报错，主异常是内容流的，后端流异常挂在 suppressed。
+     */
+    @Test
+    fun `both closes fail keeps stream close as main and attaches storage close as suppressed`() =
+        runBlocking {
+            val disk =
+                StorageFakeImpl(
+                    openStreamCloseThrows = true,
+                    closeThrows = true,
+                )
+            val harness = harness(disk)
+            disk.withFile("a.txt", "content")
+
+            val result = harness.vfs.openStream(uri("/a.txt"))
+
+            val thrown =
+                assertFailsWith<IllegalStateException> {
+                    result.close()
+                }
+
+            assertEquals("stream close failed", thrown.message, "主异常保留最先发生的 stream close 异常")
+            val suppressed = thrown.suppressed.filterIsInstance<IllegalStateException>()
+            assertEquals(1, suppressed.size, "后发生的 storage close 异常挂在 suppressed 里")
+            assertEquals("close failed", suppressed.single().message)
+        }
 }

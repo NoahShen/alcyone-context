@@ -190,7 +190,8 @@ class DefaultVfs(
                 opened.openStream()
             } catch (failure: Throwable) {
                 // 流已经建出来、还没交出去就失败了：当场放掉，别把文件句柄留在盘上。
-                runCatching { opened.close() }
+                // 清理自己报错不顶掉原始失败，挂 suppressed。
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
                 throw failure
             }
         return VfsStreamResult(
@@ -200,12 +201,23 @@ class DefaultVfs(
             // 关流时把后端那份也放掉：两者共用同一个文件句柄，关掉谁都行，只能生效一次。
             stream =
                 object : FilterInputStream(stream) {
+                    /**
+                     * 两步都要试：内容流关了、后端那份也要关。
+                     * 第一个失败当主异常，第二个挂 suppressed——不能因为第一步报错就把句柄漏在盘上。
+                     */
                     override fun close() {
+                        var failure: Throwable? = null
                         try {
                             super.close()
-                        } finally {
-                            opened.close()
+                        } catch (problem: Throwable) {
+                            failure = problem
                         }
+                        try {
+                            opened.close()
+                        } catch (problem: Throwable) {
+                            if (failure == null) failure = problem else failure.addSuppressed(problem)
+                        }
+                        failure?.let { throw it }
                     }
                 },
         )

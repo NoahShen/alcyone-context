@@ -145,24 +145,26 @@ class AlcyoneVfs private constructor(
     override suspend fun openStream(
         uri: VfsUri,
         options: VfsStreamOptions,
-    ): VfsStreamResult {
-        var opened: VfsStreamResult? = null
-        try {
-            return operation("openStream") {
-                // 关流时再读 opened：那时它已经指向真正加进集合的那个对象（建流那一刻它还是 null）。
+    ): VfsStreamResult =
+        operation("openStream") {
+            // opened 放在 block 里面：清理期间这次调用还挂在 inFlight 上，close 会等它收完。
+            var opened: VfsStreamResult? = null
+            try {
                 delegate
+                    // 关流时再读 opened：那时它已经指向真正加进集合的那个对象（建流那一刻它还是 null）。
                     .openStream(uri, options) { opened?.let { openStreams.remove(it) } }
                     .also {
                         opened = it
                         openStreams.add(it)
                         streamHandover?.invoke(it)
                     }
+            } catch (failure: Throwable) {
+                // 流建出来了、还没交给调用方就失败：当场放掉，别留一个没人管的句柄。
+                // 清理自己报错不顶掉原始异常（取消就是这么被吞掉的），挂 suppressed。
+                opened?.let { stream -> runCatching { stream.close() }.exceptionOrNull()?.let(failure::addSuppressed) }
+                throw failure
             }
-        } catch (failure: Throwable) {
-            opened?.close()
-            throw failure
         }
-    }
 
     override suspend fun write(
         uri: VfsUri,
@@ -243,9 +245,14 @@ class AlcyoneVfs private constructor(
      * 挂起函数：等待期里要挂起，不能承诺 `AutoCloseable` 那种阻塞语义，示例用 `try/finally`。
      */
     suspend fun close() {
+        // 先记下这是不是从 Consumer 回调里发起的。必须放在第一个挂起点之前：
+        // 分发协程正卡在回调上等着这个 close 返回，再去等它就是自己等自己。
+        val fromConsumer = notifier.isInsideConsumer()
         val (mine, completion) = beginClose()
         if (!mine) {
-            completion.await() // 已经有人在关了；共享它的结果，包括失败
+            // 回调里的这次 close 只是「提交了关闭请求」：已经在关的那一次会把资源收干净，
+            // 所以这里直接返回，不去等包含自己的那次收尾。
+            if (!fromConsumer) completion.await() // 普通的并发关闭：共享同一次结果，包括失败
             return
         }
         try {
@@ -269,6 +276,9 @@ class AlcyoneVfs private constructor(
     private suspend fun releaseEverything() {
         awaitGracePeriod()
         cancelInFlight()
+        // 取消只是「请求停止」：等它们真的收完（含 NonCancellable 里的回滚），再去关数据库和放锁。
+        // 不等的话，一个正在回滚的写可能撞上刚关的连接，新实例又可能在旧锁没放之前就开了。
+        inFlight.toList().joinAll()
 
         val failures = mutableListOf<Throwable>()
         // 流先关：它们还指着块盘上的文件句柄，块盘关了之后就没人能再收它们了。

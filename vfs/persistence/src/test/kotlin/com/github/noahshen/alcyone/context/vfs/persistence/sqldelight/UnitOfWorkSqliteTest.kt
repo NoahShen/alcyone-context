@@ -181,6 +181,8 @@ class UnitOfWorkSqliteTest {
 
                 val leaked = requireNotNull(escaped)
                 assertThrows(IllegalStateException::class.java) { runBlocking { leaked.nodes.findByPath(path) } }
+                // 最后一句得返回 Unit：返回异常对象会被 Kotlin 名字混淆，JUnit 就把这个用例静默跳过
+                Unit
             }
         }
 

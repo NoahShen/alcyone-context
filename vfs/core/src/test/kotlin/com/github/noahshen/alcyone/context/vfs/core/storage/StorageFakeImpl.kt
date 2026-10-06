@@ -15,6 +15,9 @@ import java.time.Instant
  */
 class StorageFakeImpl(
     private var capabilities: StorageCapabilities = StorageCapabilities(),
+    private val openStreamThrows: Boolean = false,
+    private val openStreamCloseThrows: Boolean = false,
+    private val closeThrows: Boolean = false,
 ) : Storage {
     /**
      * 故障注入开关。字段非空时，对应操作在执行任何副作用前直接抛出该异常。
@@ -136,33 +139,32 @@ class StorageFakeImpl(
 
             override fun openStream(): InputStream {
                 if (closed) throw IllegalStateException("Stream is closed")
+                if (openStreamThrows) throw IllegalStateException("open failed")
                 val stream = ByteArrayInputStream(file.bytes.copyOf())
-                return if (maxBytes != null) {
-                    object : InputStream() {
-                        private var count = 0L
+                return object : InputStream() {
+                    private var count = 0L
 
-                        override fun read(): Int {
-                            val b = stream.read()
-                            if (b != -1) {
-                                count++
-                                if (count > maxBytes) {
-                                    throw VfsException(VfsErrorCode.LIMIT_EXCEEDED, "Stream exceeded limit $maxBytes")
-                                }
+                    override fun read(): Int {
+                        val b = stream.read()
+                        if (b != -1 && maxBytes != null) {
+                            count++
+                            if (count > maxBytes) {
+                                throw VfsException(VfsErrorCode.LIMIT_EXCEEDED, "Stream exceeded limit $maxBytes")
                             }
-                            return b
                         }
-
-                        override fun close() {
-                            stream.close()
-                        }
+                        return b
                     }
-                } else {
-                    stream
+
+                    override fun close() {
+                        if (openStreamCloseThrows) throw IllegalStateException("stream close failed")
+                        stream.close()
+                    }
                 }
             }
 
             override fun close() {
                 closed = true
+                if (closeThrows) throw IllegalStateException("close failed")
             }
         }
     }
