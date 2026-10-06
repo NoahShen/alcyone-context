@@ -9,14 +9,18 @@ import com.github.noahshen.alcyone.context.vfs.VfsStreamResult
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -30,6 +34,8 @@ import java.nio.file.Path
 import java.sql.DriverManager
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertFailsWith
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * T18 A05：公共流式读取入口。真的 SQLite + 真的本机目录，走 `AlcyoneVfs` 公开方法。
@@ -49,13 +55,16 @@ class RuntimeStreamTest {
         disk = Files.createDirectory(tempDir.resolve("docs"))
     }
 
-    private fun config(streamTotalLimit: Long? = null) =
-        VfsRuntimeConfig(
-            stateDatabase = database,
-            namespaces = setOf("resources"),
-            mounts = listOf(MountConfig(VfsPath.parse("/resources"), "local", disk)),
-            streamTotalLimit = streamTotalLimit,
-        )
+    private fun config(
+        streamTotalLimit: Long? = null,
+        closeGracePeriod: Duration = 30.seconds,
+    ) = VfsRuntimeConfig(
+        stateDatabase = database,
+        namespaces = setOf("resources"),
+        mounts = listOf(MountConfig(VfsPath.parse("/resources"), "local", disk)),
+        streamTotalLimit = streamTotalLimit,
+        closeGracePeriod = closeGracePeriod,
+    )
 
     private fun uri(name: String) = VfsUri.parse("alcyone://resources/$name")
 
@@ -442,6 +451,101 @@ class RuntimeStreamTest {
                 assertEquals(0, vfs.trackedStreamCount, "反复开关也不会累积")
             }
         }
+
+    /**
+     * R6（复核 §9.2 原场景）：内部块已经跑完、`coroutineScope` 退出时才发现取消。
+     *
+     * 探针在钩子里排一个子协程：让内部块先返回，等作用域收子任务时再取消这次调用。
+     * 这种情况下「块跑完了」不等于「流交给了调用方」，流必须当场关掉、跟踪计数归零，不用等 Runtime close。
+     */
+    @Test
+    @Timeout(60)
+    fun `cancellation in scope child after block completes closes stream before runtime close`() =
+        runBlocking {
+            prepare()
+            putOnDisk("scope-boundary.bin", 2048)
+            val captured = CompletableDeferred<VfsStreamResult>()
+
+            val vfs = AlcyoneVfs.create(config())
+            try {
+                vfs.streamHandover = { stream ->
+                    captured.complete(stream)
+                    val parentJob = currentCoroutineContext().job
+                    // 排一个子任务：内部块先返回，作用域收子任务时它再取消这次调用。
+                    CoroutineScope(currentCoroutineContext()).launch {
+                        yield()
+                        parentJob.cancel(CancellationException("cancelled at scope boundary"))
+                    }
+                }
+
+                val thrown =
+                    assertFailsWith<CancellationException> {
+                        vfs.openStream(uri("scope-boundary.bin"))
+                    }
+                assertTrue(thrown.message == "cancelled at scope boundary", "抛出的就是作用域边界那次取消：$thrown")
+
+                val stream = withTimeout(30_000) { captured.await() }
+                assertTrue(stream.isClosed, "作用域退出时取消，流必须已经被关闭")
+                assertEquals(0, vfs.trackedStreamCount, "跟踪集合必须归零，不能拖到 Runtime close")
+            } finally {
+                vfs.close()
+            }
+        }
+
+    /**
+     * R6：交接失败后的清理如果被卡住，`close()` 必须等它做完才能关库放锁。
+     *
+     * 清理跑在 inFlight 里（tracking Job 还没 complete），所以期间同库的独占锁不能被放掉。
+     */
+    @Test
+    @Timeout(60)
+    fun `close waits for stream cleanup to complete before releasing the database`() =
+        runBlocking {
+            prepare()
+            putOnDisk("cleanup-gate.bin", 2048)
+            val captured = CompletableDeferred<VfsStreamResult>()
+            val cleanupStarted = CompletableDeferred<Unit>()
+            val cleanupGate = CompletableDeferred<Unit>()
+            val cleanupDone = CompletableDeferred<Unit>()
+
+            val vfs = AlcyoneVfs.create(config(closeGracePeriod = Duration.ZERO))
+            try {
+                vfs.streamHandover = { stream ->
+                    captured.complete(stream)
+                    // 把关流这一步拖住：取消触发的清理就会卡在这里。
+                    swapStream(stream, BlockingCloseStream(cleanupStarted, cleanupGate, cleanupDone))
+                    CompletableDeferred<Unit>().await() // 挂起等取消
+                }
+                val job = async(start = CoroutineStart.UNDISPATCHED) { vfs.openStream(uri("cleanup-gate.bin")) }
+                withTimeout(30_000) { captured.await() }
+                job.cancel(CancellationException("injected cancellation"))
+
+                withTimeout(30_000) { cleanupStarted.await() }
+                val closing = async { vfs.close() }
+
+                // 清理还卡着：close 不能返回，独占锁也不能放。
+                assertFalse(closing.isCompleted, "流清理没结束，close 不能先返回")
+                val conflict = assertFailsWith<VfsException> { AlcyoneVfs.create(config()) }
+                assertEquals(VfsErrorCode.CONFLICT, conflict.code, "流清理期间独占锁不能释放")
+
+                cleanupGate.complete(Unit)
+                withTimeout(30_000) { cleanupDone.await() }
+                withTimeout(30_000) { closing.await() }
+
+                // 清理做完之后，同一个库能正常重开。
+                withVfs(config()) { reopened ->
+                    assertEquals(
+                        "/resources",
+                        reopened
+                            .stat(VfsUri.parse("alcyone://resources"))
+                            .uri.path
+                            .toString(),
+                    )
+                }
+            } finally {
+                runCatching { vfs.close() }
+            }
+        }
 }
 
 /** 专门用来制造「关流失败」的流：close() 抛出造流时给的那个异常。 */
@@ -474,4 +578,21 @@ private fun swapStream(
                     .lookup(),
             )
     lookup.unreflectSetter(field).invoke(result, replacement)
+}
+
+/** 用来把「关流」这一步拖住的流：close() 会先报「开始清理」，卡在 gate 上，放行后再关底层。 */
+private class BlockingCloseStream(
+    private val started: CompletableDeferred<Unit>,
+    private val gate: CompletableDeferred<Unit>,
+    private val done: CompletableDeferred<Unit>,
+) : InputStream() {
+    override fun read(): Int = -1
+
+    override fun close() {
+        runBlocking {
+            started.complete(Unit)
+            gate.await()
+            done.complete(Unit)
+        }
+    }
 }

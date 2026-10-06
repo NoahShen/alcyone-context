@@ -35,7 +35,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.sync.Mutex
@@ -147,15 +146,17 @@ class AlcyoneVfs private constructor(
         uri: VfsUri,
         options: VfsStreamOptions,
     ): VfsStreamResult {
-        // opened 放在最外层：清理期间这次调用还挂在 inFlight 上，close 会等它收完。
+        // 这次调用在 inFlight 里挂的是 tracking 这个 Job，而不是 coroutineScope 自己的 Job。
+        // 为什么：coroutineScope 退出前可能因为取消再抛异常，那时「里面已经跑完了」不代表流交到了调用方；
+        // 而 operation 的 finally 已经把它自己从 inFlight 摘掉了，后续清理就没人等。
+        // 用 tracking 就简单了：清理做完才 complete，close() 才对它放手。
+        val tracking = Job()
+        admit("openStream", tracking)
         var opened: VfsStreamResult? = null
-        // 第一次关流失败（如果有）先记着：VfsStreamResult.close() 幂等，第二次关不会再报一次，
-        // 而 coroutineScope 退出时可能换一个新的异常抛出来，那时得把这个失败挂到新异常上。
-        var closeFailure: Throwable? = null
-        var handedOver = false
         try {
-            return operation("openStream") {
-                try {
+            val result =
+                coroutineScope {
+                    beforeOperation?.invoke("openStream")
                     delegate
                         // 关流时再读 opened：那时它已经指向真正加进集合的那个对象（建流那一刻它还是 null）。
                         .openStream(uri, options) { opened?.let { openStreams.remove(it) } }
@@ -163,26 +164,22 @@ class AlcyoneVfs private constructor(
                             opened = it
                             openStreams.add(it)
                             streamHandover?.invoke(it)
-                            // 钩子里被取消的话在这里就抛出，交给下面的 catch 当场清掉——
-                            // 不然等 coroutineScope 退出时才发现取消，块里的 catch 已经错过了。
-                            currentCoroutineContext().ensureActive()
-                            handedOver = true
                         }
-                } catch (failure: Throwable) {
-                    // 流建出来了、还没交给调用方就失败：当场放掉，别留一个没人管的句柄。
-                    // 关闭失败先记下来，由外层挂到真正抛出去的那个异常上（这里抛出的异常可能在中途被换掉）。
-                    closeFailure = runCatching { opened?.close() }.exceptionOrNull()
-                    throw failure
                 }
-            }
+            // 只有 coroutineScope 正常返回到这里，流才算真的交出去了。
+            return result
         } catch (failure: Throwable) {
-            // 最后一道防线：没交出去的流在这里确认一次，并把第一次关闭的失败挂到真正抛出的异常上。
-            if (!handedOver) {
-                val failedNow = runCatching { opened?.close() }.exceptionOrNull()
-                closeFailure?.let(failure::addSuppressed)
-                failedNow?.takeIf { it !== closeFailure }?.let(failure::addSuppressed)
+            // 走到这里就说明这次公开调用失败了（无论是块里抛错，还是 coroutineScope 因取消抛错）。
+            // 流已经建出来、还没交出去：当场关掉，关闭失败挂 suppressed，原异常照抛。
+            // 这时 tracking 还在 inFlight 里，close() 会等这段清理做完才去关库放锁。
+            withContext(NonCancellable) {
+                runCatching { opened?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
             }
             throw failure
+        } finally {
+            // 交接完成或清理完成，这里才摘掉跟踪；之前任何 close() 都得等。
+            tracking.complete()
+            inFlight.remove(tracking)
         }
     }
 
