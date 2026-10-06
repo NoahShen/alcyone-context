@@ -1,5 +1,9 @@
 # VFS 公共契约草案 v0.1
 
+## 本次修改（2026-10-05，T18 实现回写公共流与生命周期）
+
+- 第 5 节把流式读取从「签名待定」收敛为已落地的具体签名：`openStream(uri, options) → VfsStreamResult`、`VfsStreamOptions.maxTotalBytes`；第 9 节把生命周期从建议收敛为 T18 实现口径（closing / 等待期 / 超时取消 / 幂等并发 close / `suspend close()`）。涉及第 5、9 节；其他接口与字段未变。
+
 ## 本次修改（2026-10-04，T17 实现回写 Metadata 事件与更新时间）
 
 - 第 6.2 节补上 T17 落实的两个选择：**每次 `setMetadata` 都发一条 `METADATA_UPDATED`（含传相同值、含重复清空）**，以及**同一事务内 touch Node 的逻辑更新时间**；用一个「替换清空」例子解释。涉及第 6.2 节；接口签名与字段未变。
@@ -166,7 +170,7 @@ alcyone://resources/research/
 
 ## 5. Vfs 接口草案
 
-以下代码为已审阅的公共接口形状，不是已经编译发布的 SDK。集合分页、大文件流式接口以及可靠事件订阅签名尚未确定。
+以下代码为已审阅的公共接口形状，不是已经编译发布的 SDK。集合分页与可靠事件订阅签名尚未确定；**大文件流式接口已在 T18 落地**（见下方 `openStream`）。
 
 ```kotlin
 interface Vfs {
@@ -174,6 +178,11 @@ interface Vfs {
         uri: VfsUri,
         options: ReadOptions = ReadOptions(),
     ): ByteArray
+
+    suspend fun openStream(
+        uri: VfsUri,
+        options: VfsStreamOptions = VfsStreamOptions(),
+    ): VfsStreamResult
 
     suspend fun write(
         uri: VfsUri,
@@ -203,6 +212,12 @@ interface Vfs {
 }
 
 data class ReadOptions(val maxBytes: Long? = null)
+data class VfsStreamOptions(val maxTotalBytes: Long? = null)
+class VfsStreamResult(
+    val uri: VfsUri,
+    val sizeBytes: Long?,
+    val stream: java.io.InputStream,
+) : java.io.Closeable
 enum class WriteMode { CREATE_NEW, REPLACE_EXISTING, UPSERT }
 data class WriteOptions(val mode: WriteMode = WriteMode.UPSERT)
 data class StatOptions(val includeStorage: Boolean = true)
@@ -214,6 +229,7 @@ data class DeleteOptions(val recursive: Boolean = false)
 | 操作 | 输入与返回 | 建议语义 |
 | --- | --- | --- |
 | `read` | URI → bytes | 仅读取文件，不懒注册，不产生变更事件；目录输入报类型错误 |
+| `openStream` | URI、流选项 → `VfsStreamResult` | 只读语义同 `read`（不懒注册、不发事件、分块读）；实际上限取 Runtime 配置与 `maxTotalBytes` 较小者，超限报 `LIMIT_EXCEEDED`；目录报类型错误、缺失报 Not Found |
 | `write` | URI、bytes、模式 → NodeInfo | 创建或更新文件，并持久化 Node；返回信息不额外调用 Storage stat，`storage` 可空 |
 | `stat` | URI、查询选项 → NodeInfo | 默认取得底层属性；Node 不存在时可懒注册。`includeStorage=false` 仅允许已有 Node 走逻辑查询，未注册时仍须调用 Storage stat 以确认资源 |
 | `getNode` | Node ID → NodeInfo | 查询已注册 Node 的当前位置等逻辑信息，`storage=null`；未知 ID 报 Not Found，不隐式寻找外部文件 |
@@ -231,7 +247,7 @@ data class DeleteOptions(val recursive: Boolean = false)
 - `write` 的缺失父目录、空目录创建、目录移动与嵌套 Mount 的组合支持由 T02 明确；本稿暂不增加 `mkdir`，若空目录是必需场景则补充接口。
 - `list` 返回完整单层列表，适合首版有限规模目录；不能静默截断。分页及容量上限是否需要纳入首版由 T02 / T04 明确。
 - 对 Node ID 输入直接查询逻辑记录，不需要 Storage；仅有 URI 的 Metadata 调用可先使用 `stat(uri, StatOptions(includeStorage=false))` 获取 ID。
-- **流式读取（2026-09-29 T07 B1 评审确认）**：`read()` 保持 `ByteArray` 签名与 T04 确认的 16 MiB 默认限额（可配置），**新增大文件流式读取方法**。原“流式 API 是否首版必需”问题的结论改为“必需”。流式方法的具体签名在 T07 B3 给出 Interface 契约建议，由后续实现任务落地；`read()` 内部仍须在内容进入内存前中止超限读取。
+- **流式读取（T18 落地）**：`read()` 保持 `ByteArray` 签名与 16 MiB 默认限额（可配置）；`openStream` 与它**分开限额**，默认不设总量上限、仍分块读，不会把整个文件读进内存。`VfsStreamResult` 持有 `InputStream`，重复 `close()` 幂等、关闭后不可再读；调用方忘记关闭时由 Runtime `close()` 回收。调用级 `maxTotalBytes` 只能**收紧** Runtime 配置上限。
 
 ## 6. 存储约束与 Metadata
 
@@ -355,6 +371,7 @@ class AlcyoneVfs : Vfs {
 - `create` 可能访问数据库、加载 native 依赖和初始化资源，因此采用挂起函数。初始化失败时清理已经创建的资源。
 - 初始配置至少描述 VFS 状态库位置、Mount 列表、I/O 限额和关闭策略；初始配置和持久化状态的优先关系由 T03 定义。
 - `close` 幂等，并发关闭只执行一次资源释放。进入关闭状态后拒绝新操作，等待在途操作至配置期限，超时后取消剩余工作并释放资源，不保存续做进度。
+- **T18 实现口径（2026-10-05）**：`close()` 是挂起函数；先转 closing（新操作报 `CLOSED`），再等在途操作至 `closeGracePeriod`，到点发**协作取消**（不碰宿主父 Job、不强杀 native 卡死线程）；随后按「流 → 通知器 → 各块盘 → 状态库 → 独占锁」释放，清理在 `NonCancellable` 内跑，一个资源失败不阻止其余。等待期是自助时间，不是强杀期限。
 - 关闭应终止 Runtime 自己的事件分发任务并释放其 Operator、DB 等资源，不关闭宿主提供且仍由宿主持有的共享资源。
 - 关闭不等待 Git push 等外围 Consumer 业务完成；首版不保证关闭后补发，可靠消费由后续 E05 提供。
 - 采用 `suspend close()`，首版不同时承诺 Java `AutoCloseable.close()` 的阻塞语义；示例使用协程内 `try/finally`。实现需使必要清理不被宿主协程取消直接中断，精确超时行为在 T03 明确。
