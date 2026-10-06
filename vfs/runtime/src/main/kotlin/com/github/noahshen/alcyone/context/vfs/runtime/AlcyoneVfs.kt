@@ -36,7 +36,6 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -99,10 +98,47 @@ class AlcyoneVfs private constructor(
     /** 第一次 close 放进去的完成信号；后来的 close 只是等它。 */
     private var closing: CompletableDeferred<Unit>? = null
 
-    /** 正在跑的公共操作（每个一个协程）。关它时用来等、用来请求取消。 */
-    private val inFlight = ConcurrentHashMap.newKeySet<Job>()
+    /** 正在跑的公共操作。每条记录把「取消谁」和「等谁」分成两件事，见 [InFlightOp]。 */
+    private val inFlight = ConcurrentHashMap.newKeySet<InFlightOp>()
 
-    /** 已经交到调用者手上的流。调用者忘了关的，close() 替它收。 */
+    /**
+     * 一条在途记录。为什么要分成两个字段，而不是只放一个 Job：
+     *
+     * - [done] 是「这次调用彻底结束」的信号，**只能**由调用自己的 finally 完成。
+     *   close() 只 `await()` 它，绝不去 cancel 它——用 Job 的话，`cancel()` 会让它立刻变成已完成，
+     *   等待就成了空等，数据库在清理还没跑完时就被关掉了。
+     * - [work] 是「这次调用真正在干活的那个子协程」，close() 的取消请求发给它。
+     *   它晚一点才有值（要在 coroutineScope 里拿到自己的 Job），所以用 `CompletableDeferred` 兜一下：
+     *   关闭来得比赋值早时，[InFlightOp.cancelWork] 会记住这笔账，等 Job 一到位就补上取消。
+     */
+    private class InFlightOp {
+        /** 这次调用自己的子协程；还在建时是 null，建好后立刻填上。 */
+        private var work: Job? = null
+
+        /** 关闭已经请求过取消、但 work 还没到位时记下来，等 work 填上时补一次。 */
+        private var cancelPending: CancellationException? = null
+
+        /** 彻底结束的信号（含失败清理）。只有调用自己的 finally 能完成它，外部 cancel 不了。 */
+        val done = CompletableDeferred<Unit>()
+
+        /** 把这次调用的子协程挂上来；如果之前已经请求过取消，当场补发。 */
+        fun attachWork(job: Job) {
+            work = job
+            cancelPending?.let { job.cancel(it) }
+        }
+
+        /** 请求取消这次工作。[job] 是这次调用自己的子协程，不是宿主的父 Job。 */
+        fun cancelWork(reason: CancellationException) {
+            val target = work
+            if (target == null) {
+                cancelPending = reason
+                return
+            }
+            target.cancel(reason)
+        }
+    }
+
+/** 已经交到调用者手上的流。调用者忘了关的，close() 替它收。 */
     private val openStreams = ConcurrentHashMap.newKeySet<VfsStreamResult>()
 
     /** 同模块测试用的挂钩：公共操作真正开跑之前调一次（参数是操作名）。生产代码不设置。 */
@@ -111,8 +147,11 @@ class AlcyoneVfs private constructor(
     /** 同模块测试用的挂钩：`openStream` 已经拿到流、还没交给调用方时调一次，用来制造取消窗口。 */
     internal var streamHandover: (suspend (VfsStreamResult) -> Unit)? = null
 
-/** 同模块测试用的诊断：Runtime 现在还记着几条没关的流。调用方自己关了的流不计入。 */
+    /** 同模块测试用的诊断：Runtime 现在还记着几条没关的流。调用方自己关了的流不计入。 */
     internal val trackedStreamCount: Int get() = openStreams.size
+
+    /** 同模块测试用的挂钩：关闭走到「发完取消、开始等在途收尾」这一刻调一次。生产代码不设置。 */
+    internal var beforeWaitingForInFlight: (suspend () -> Unit)? = null
 
     /**
      * 订阅已提交的事件（T14 的有界进程内通知）。
@@ -146,40 +185,23 @@ class AlcyoneVfs private constructor(
         uri: VfsUri,
         options: VfsStreamOptions,
     ): VfsStreamResult {
-        // 这次调用在 inFlight 里挂的是 tracking 这个 Job，而不是 coroutineScope 自己的 Job。
-        // 为什么：coroutineScope 退出前可能因为取消再抛异常，那时「里面已经跑完了」不代表流交到了调用方；
-        // 而 operation 的 finally 已经把它自己从 inFlight 摘掉了，后续清理就没人等。
-        // 用 tracking 就简单了：清理做完才 complete，close() 才对它放手。
-        val tracking = Job()
-        admit("openStream", tracking)
         var opened: VfsStreamResult? = null
-        try {
-            val result =
-                coroutineScope {
-                    beforeOperation?.invoke("openStream")
-                    delegate
-                        // 关流时再读 opened：那时它已经指向真正加进集合的那个对象（建流那一刻它还是 null）。
-                        .openStream(uri, options) { opened?.let { openStreams.remove(it) } }
-                        .also {
-                            opened = it
-                            openStreams.add(it)
-                            streamHandover?.invoke(it)
-                        }
-                }
-            // 只有 coroutineScope 正常返回到这里，流才算真的交出去了。
-            return result
-        } catch (failure: Throwable) {
-            // 走到这里就说明这次公开调用失败了（无论是块里抛错，还是 coroutineScope 因取消抛错）。
-            // 流已经建出来、还没交出去：当场关掉，关闭失败挂 suppressed，原异常照抛。
-            // 这时 tracking 还在 inFlight 里，close() 会等这段清理做完才去关库放锁。
-            withContext(NonCancellable) {
+        return operation(
+            name = "openStream",
+            // 只有 operation 真的正常返回才算交接成功；任何失败都走到这里，把没交出去的流当场关掉。
+            // 清理失败挂 suppressed，原异常照抛；这段清理跑在 done.complete 之前，close() 会等它。
+            onFailure = { failure ->
                 runCatching { opened?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
-            }
-            throw failure
-        } finally {
-            // 交接完成或清理完成，这里才摘掉跟踪；之前任何 close() 都得等。
-            tracking.complete()
-            inFlight.remove(tracking)
+            },
+        ) {
+            delegate
+                // 关流时再读 opened：那时它已经指向真正加进集合的那个对象（建流那一刻它还是 null）。
+                .openStream(uri, options) { opened?.let { openStreams.remove(it) } }
+                .also {
+                    opened = it
+                    openStreams.add(it)
+                    streamHandover?.invoke(it)
+                }
         }
     }
 
@@ -223,31 +245,37 @@ class AlcyoneVfs private constructor(
      */
     private suspend fun <T> operation(
         name: String,
+        onFailure: (suspend (Throwable) -> Unit)? = null,
         block: suspend () -> T,
-    ): T =
-        coroutineScope {
-            val handle = currentCoroutineContext().job
-            admit(name, handle)
-            try {
+    ): T {
+        val op = admit(name)
+        try {
+            return coroutineScope {
+                op.attachWork(currentCoroutineContext().job)
                 beforeOperation?.invoke(name)
                 block()
-            } finally {
-                inFlight.remove(handle)
             }
+        } catch (failure: Throwable) {
+            // 走到这里就是这次调用没成功。清理放在 done.complete 之前：期间 close() 还得等这条记录。
+            if (onFailure != null) {
+                withContext(NonCancellable) { onFailure(failure) }
+            }
+            throw failure
+        } finally {
+            // 交接完成或失败清理都做完了，才算这次调用真的结束；close() 的等以这个为准。
+            op.done.complete(Unit)
+            inFlight.remove(op)
         }
+    }
 
     /** 登记在途；已经开始关闭就直接拒。和 [beginClose] 共用一把锁，所以不会有「登记与关闭交错」的窗口。 */
-    private suspend fun admit(
-        name: String,
-        handle: Job,
-    ) {
+    private suspend fun admit(name: String): InFlightOp =
         gate.withLock {
             if (lifecycle != Lifecycle.OPEN) {
                 throw VfsException(VfsErrorCode.CLOSED, "The VFS instance is closing or closed; '$name' was refused")
             }
-            inFlight.add(handle)
+            InFlightOp().also { inFlight.add(it) }
         }
-    }
 
     /**
      * 关闭这个实例：先转 closing，再等在途操作，然后逐个释放资源。幂等，并发调用共享同一次结果。
@@ -293,9 +321,12 @@ class AlcyoneVfs private constructor(
     private suspend fun releaseEverything() {
         awaitGracePeriod()
         cancelInFlight()
+        // 到这里取消已经发出去了，接下来是等收尾。测试用这个钩子确认「close 确实走到等待阶段」，
+        // 而不是「close 还没被调度」——不然 isCompleted=false 这种断言会假阳性。
+        beforeWaitingForInFlight?.invoke()
         // 取消只是「请求停止」：等它们真的收完（含 NonCancellable 里的回滚），再去关数据库和放锁。
-        // 不等的话，一个正在回滚的写可能撞上刚关的连接，新实例又可能在旧锁没放之前就开了。
-        inFlight.toList().joinAll()
+        // 等的是 done，不是被取消的那个 Job——done 只有调用自己清理完才会完成，没法被提前弄完。
+        inFlight.toList().forEach { it.done.await() }
 
         val failures = mutableListOf<Throwable>()
         // 流先关：它们还指着块盘上的文件句柄，块盘关了之后就没人能再收它们了。
@@ -318,7 +349,7 @@ class AlcyoneVfs private constructor(
     private suspend fun awaitGracePeriod() {
         val waiting = inFlight.toList()
         if (waiting.isEmpty()) return
-        withTimeoutOrNull(closeGracePeriod) { waiting.joinAll() }
+        withTimeoutOrNull(closeGracePeriod) { waiting.forEach { it.done.await() } }
     }
 
     /**
@@ -326,9 +357,8 @@ class AlcyoneVfs private constructor(
      * 卡着不动的那个可能拿到 `STATE_ERROR`，这是本轮明确的边界。
      */
     private fun cancelInFlight() {
-        inFlight.forEach { handle ->
-            handle.cancel(CancellationException("the VFS instance is closing after its grace period"))
-        }
+        val reason = CancellationException("the VFS instance is closing after its grace period")
+        inFlight.forEach { op -> op.cancelWork(reason) }
     }
 
     /** 组装用的内部回调：只在同模块测试里用来卡住 / 失败某个时刻，不对外开挂载开关。 */

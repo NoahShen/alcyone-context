@@ -6,9 +6,12 @@ import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -141,6 +144,61 @@ class RuntimeLifecycleTest {
             withTimeout(30_000) { closing.await() }
 
             assertTrue(entries.isEmpty(), "挂起的那次 list 正常跑完，没有被取消")
+        }
+
+    /**
+     * R6（复核 §10.3）：等待期到点后，**实际工作**必须收到取消，且不牵连宿主的父 Job。
+     *
+     * 时序确定：等 close 真到「发完取消、开始等收尾」再放行等待期，而不是靠「协程还没完成」当证据。
+     */
+    @Test
+    @Timeout(10)
+    fun `a close after the grace period cancels the real work without touching the parent job`() =
+        runBlocking {
+            prepare()
+            val entered = CompletableDeferred<Unit>()
+            val cancelled = CompletableDeferred<Unit>()
+            val closeWaiting = CompletableDeferred<Unit>()
+            val parent = CompletableDeferred<Unit>()
+
+            val vfs = AlcyoneVfs.create(config(closeGracePeriod = Duration.ZERO))
+            vfs.beforeOperation = {
+                entered.complete(Unit)
+                try {
+                    awaitCancellation()
+                } catch (cancellation: CancellationException) {
+                    cancelled.complete(Unit)
+                    throw cancellation
+                }
+            }
+            vfs.beforeWaitingForInFlight = { closeWaiting.complete(Unit) }
+
+            // 调用方协程挂在一个父 Job 下，用来验证取消不会顺着冒到父 Job。
+            val parentJob = Job()
+            val caller =
+                CoroutineScope(coroutineContext + parentJob).async(start = CoroutineStart.UNDISPATCHED) {
+                    runCatching { vfs.list(VfsUri.parse("alcyone://resources")) }
+                }
+            withTimeout(30_000) { entered.await() }
+
+            val closing = async(kotlinx.coroutines.Dispatchers.Default) { vfs.close() }
+            withTimeout(30_000) { closeWaiting.await() } // 确定 close 已发取消、进入等收尾
+
+            try {
+                // 给 2 秒等待实际工作收到取消；如果 cancelWork 没起作用，这里超时抛错并进入 catch
+                withTimeout(2_000) { cancelled.await() }
+            } catch (t: Throwable) {
+                // 如果实际工作没被取消，主动取消它并释放，让测试失败并顺利退出，避免卡死
+                caller.cancel()
+                closing.cancel()
+                throw AssertionError("实际工作未收到取消！变异被咬住: $t")
+            }
+            assertTrue(parentJob.isActive || parentJob.children.none { it.isActive }, "宿主的父 Job 不该被取消传播打挂：$parentJob")
+
+            withTimeout(10_000) { closing.await() }
+            withTimeout(10_000) { caller.join() }
+            parent.complete(Unit)
+            Unit
         }
 
     /** 等待期到了还在跑的：收到协作取消，close 照常走完并把资源放掉。 */

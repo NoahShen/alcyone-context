@@ -11,6 +11,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -495,7 +496,9 @@ class RuntimeStreamTest {
     /**
      * R6：交接失败后的清理如果被卡住，`close()` 必须等它做完才能关库放锁。
      *
-     * 清理跑在 inFlight 里（tracking Job 还没 complete），所以期间同库的独占锁不能被放掉。
+     * 时序是确定的：不快 `async { close() }` 就断言，而是等 close 真的走到「取消已发、开始等收尾」那一步
+     * （靠 `beforeWaitingForInFlight` 挂钩确认），再检查它没完成、锁还占着。`assertFalse(isCompleted)`
+     * 只有在这个时刻才有意义，否则只能证明 close 还没被调度。
      */
     @Test
     @Timeout(60)
@@ -507,6 +510,7 @@ class RuntimeStreamTest {
             val cleanupStarted = CompletableDeferred<Unit>()
             val cleanupGate = CompletableDeferred<Unit>()
             val cleanupDone = CompletableDeferred<Unit>()
+            val closeWaiting = CompletableDeferred<Unit>()
 
             val vfs = AlcyoneVfs.create(config(closeGracePeriod = Duration.ZERO))
             try {
@@ -516,15 +520,25 @@ class RuntimeStreamTest {
                     swapStream(stream, BlockingCloseStream(cleanupStarted, cleanupGate, cleanupDone))
                     CompletableDeferred<Unit>().await() // 挂起等取消
                 }
-                val job = async(start = CoroutineStart.UNDISPATCHED) { vfs.openStream(uri("cleanup-gate.bin")) }
+                // close 走到「发完取消、开始等在途收尾」时叫一声，测试据此建立确定时序。
+                vfs.beforeWaitingForInFlight = { closeWaiting.complete(Unit) }
+
+                val caller = async(start = CoroutineStart.UNDISPATCHED) { vfs.openStream(uri("cleanup-gate.bin")) }
                 withTimeout(30_000) { captured.await() }
-                job.cancel(CancellationException("injected cancellation"))
-
+                caller.cancel(CancellationException("injected cancellation"))
                 withTimeout(30_000) { cleanupStarted.await() }
-                val closing = async { vfs.close() }
 
-                // 清理还卡着：close 不能返回，独占锁也不能放。
+                // 调度在 Default 线程池上，确保 close() 能并发执行到等待收尾阶段，而不是单线程假相遇
+                val closing = async(Dispatchers.Default) { vfs.close() }
+                withTimeout(30_000) { closeWaiting.await() }
+                // 稍微延时让可能提前放锁的变异显形：若 close() 没等 inFlight，它在此时早已跑完并放锁
+                kotlinx.coroutines.delay(50)
+
+                // 此刻清理还卡着：close 不能返回，独占锁也不能放。
                 assertFalse(closing.isCompleted, "流清理没结束，close 不能先返回")
+                // 等待期是 ZERO，如果 close 没等清理收尾，它会直接跑完 releaseEverything 把独占锁放掉；
+                // 此时第二个实例就能成功创建！
+                // 反之，如果 close 老实等清理，它的 releaseEverything 会卡在 done.await()，独占锁还在第一实例手里，第二个实例必定 CONFLICT！
                 val conflict = assertFailsWith<VfsException> { AlcyoneVfs.create(config()) }
                 assertEquals(VfsErrorCode.CONFLICT, conflict.code, "流清理期间独占锁不能释放")
 
@@ -543,6 +557,8 @@ class RuntimeStreamTest {
                     )
                 }
             } finally {
+                // 断言失败了也不能让测试挂死：把清理门放掉再收尾。
+                cleanupGate.complete(Unit)
                 runCatching { vfs.close() }
             }
         }
@@ -580,7 +596,11 @@ private fun swapStream(
     lookup.unreflectSetter(field).invoke(result, replacement)
 }
 
-/** 用来把「关流」这一步拖住的流：close() 会先报「开始清理」，卡在 gate 上，放行后再关底层。 */
+/**
+ * 受控替身：把「关流」这一步拖住。close() 先报「开始清理」，卡在 gate 上，放行后算清理完成。
+ *
+ * 它本身就是被关的那个流，没有别的底层流要转发；不持有、也不关真实文件流。真实 native 关闭不在本用例范围。
+ */
 private class BlockingCloseStream(
     private val started: CompletableDeferred<Unit>,
     private val gate: CompletableDeferred<Unit>,
