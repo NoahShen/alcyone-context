@@ -35,6 +35,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.sync.Mutex
@@ -145,26 +146,45 @@ class AlcyoneVfs private constructor(
     override suspend fun openStream(
         uri: VfsUri,
         options: VfsStreamOptions,
-    ): VfsStreamResult =
-        operation("openStream") {
-            // opened 放在 block 里面：清理期间这次调用还挂在 inFlight 上，close 会等它收完。
-            var opened: VfsStreamResult? = null
-            try {
-                delegate
-                    // 关流时再读 opened：那时它已经指向真正加进集合的那个对象（建流那一刻它还是 null）。
-                    .openStream(uri, options) { opened?.let { openStreams.remove(it) } }
-                    .also {
-                        opened = it
-                        openStreams.add(it)
-                        streamHandover?.invoke(it)
-                    }
-            } catch (failure: Throwable) {
-                // 流建出来了、还没交给调用方就失败：当场放掉，别留一个没人管的句柄。
-                // 清理自己报错不顶掉原始异常（取消就是这么被吞掉的），挂 suppressed。
-                opened?.let { stream -> runCatching { stream.close() }.exceptionOrNull()?.let(failure::addSuppressed) }
-                throw failure
+    ): VfsStreamResult {
+        // opened 放在最外层：清理期间这次调用还挂在 inFlight 上，close 会等它收完。
+        var opened: VfsStreamResult? = null
+        // 第一次关流失败（如果有）先记着：VfsStreamResult.close() 幂等，第二次关不会再报一次，
+        // 而 coroutineScope 退出时可能换一个新的异常抛出来，那时得把这个失败挂到新异常上。
+        var closeFailure: Throwable? = null
+        var handedOver = false
+        try {
+            return operation("openStream") {
+                try {
+                    delegate
+                        // 关流时再读 opened：那时它已经指向真正加进集合的那个对象（建流那一刻它还是 null）。
+                        .openStream(uri, options) { opened?.let { openStreams.remove(it) } }
+                        .also {
+                            opened = it
+                            openStreams.add(it)
+                            streamHandover?.invoke(it)
+                            // 钩子里被取消的话在这里就抛出，交给下面的 catch 当场清掉——
+                            // 不然等 coroutineScope 退出时才发现取消，块里的 catch 已经错过了。
+                            currentCoroutineContext().ensureActive()
+                            handedOver = true
+                        }
+                } catch (failure: Throwable) {
+                    // 流建出来了、还没交给调用方就失败：当场放掉，别留一个没人管的句柄。
+                    // 关闭失败先记下来，由外层挂到真正抛出去的那个异常上（这里抛出的异常可能在中途被换掉）。
+                    closeFailure = runCatching { opened?.close() }.exceptionOrNull()
+                    throw failure
+                }
             }
+        } catch (failure: Throwable) {
+            // 最后一道防线：没交出去的流在这里确认一次，并把第一次关闭的失败挂到真正抛出的异常上。
+            if (!handedOver) {
+                val failedNow = runCatching { opened?.close() }.exceptionOrNull()
+                closeFailure?.let(failure::addSuppressed)
+                failedNow?.takeIf { it !== closeFailure }?.let(failure::addSuppressed)
+            }
+            throw failure
         }
+    }
 
     override suspend fun write(
         uri: VfsUri,

@@ -11,7 +11,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -292,6 +294,102 @@ class RuntimeStreamTest {
             }
         }
 
+    /**
+     * R6 边界：取消发生在 `streamHandover` 钩子里（钩子自己取消当前调用，不主动抛错）。
+     *
+     * 这种取消只有等 `coroutineScope` 退出时才会报出来，块里的 catch 是错过的。
+     * 这里就断言那时流已经被清掉，不用等到 `vfs.close()` 才回收。
+     */
+    @Test
+    @Timeout(60)
+    fun `cancellation at handover boundary closes the stream before runtime close`() =
+        runBlocking {
+            prepare()
+            putOnDisk("boundary.bin", 2048)
+            val captured = CompletableDeferred<VfsStreamResult>()
+            val injected = CancellationException("cancel injected at handover")
+            val escaped = CompletableDeferred<Throwable>()
+
+            val vfs = AlcyoneVfs.create(config())
+            try {
+                vfs.streamHandover = { stream ->
+                    captured.complete(stream)
+                    // 钩子里直接把当前调用取消掉，然后正常返回：
+                    // 这次取消只有 coroutineScope 退出时才会报出来。
+                    currentCoroutineContext().job.cancel(injected)
+                }
+                val caller =
+                    async(start = CoroutineStart.UNDISPATCHED) {
+                        try {
+                            vfs.openStream(uri("boundary.bin"))
+                            escaped.complete(IllegalStateException("openStream 不该正常返回"))
+                        } catch (failure: Throwable) {
+                            escaped.complete(failure)
+                            throw failure
+                        }
+                    }
+
+                val stream = withTimeout(30_000) { captured.await() }
+                val thrown = withTimeout(30_000) { escaped.await() }
+                withTimeout(30_000) { runCatching { caller.join() } }
+
+                assertTrue(thrown is CancellationException, "取消原样传播，不被包装成业务异常：$thrown")
+
+                // 关键：这里还没调 vfs.close()，流就该已经被清掉了。
+                assertTrue(stream.isClosed, "交接边界上的取消必须当场关流，不能拖到 Runtime close")
+                assertEquals(0, vfs.trackedStreamCount, "也不该留在在途列表里")
+            } finally {
+                vfs.close()
+            }
+        }
+
+    /**
+     * R8：交接取消的同时关流也失败，原取消不能被顶掉，关流失败挂 suppressed，资源同样要从在途列表里摘掉。
+     */
+    @Test
+    @Timeout(60)
+    fun `cancelling during handover with failing close preserves cancellation and attaches failure as suppressed`() =
+        runBlocking {
+            prepare()
+            putOnDisk("failing-close.bin", 2048)
+            val captured = CompletableDeferred<VfsStreamResult>()
+            val injected = CancellationException("cancel injected at handover")
+            val escaped = CompletableDeferred<Throwable>()
+
+            val vfs = AlcyoneVfs.create(config())
+            try {
+                vfs.streamHandover = { stream ->
+                    captured.complete(stream)
+                    // 把底层内容流换成一个 close 就报错的流：取消触发的清理会走到它。
+                    swapStream(stream, FailingCloseStream(IllegalStateException("close failed")))
+                    currentCoroutineContext().job.cancel(injected)
+                }
+                val caller =
+                    async(start = CoroutineStart.UNDISPATCHED) {
+                        try {
+                            vfs.openStream(uri("failing-close.bin"))
+                            escaped.complete(IllegalStateException("openStream 不该正常返回"))
+                        } catch (failure: Throwable) {
+                            escaped.complete(failure)
+                            throw failure
+                        }
+                    }
+
+                val thrown = withTimeout(30_000) { escaped.await() }
+                withTimeout(30_000) { runCatching { caller.join() } }
+
+                assertTrue(thrown is CancellationException, "主异常仍然是取消：$thrown")
+                assertTrue(thrown === injected || thrown.cause === injected, "抛出的就是我们注入的那一个取消：$thrown")
+                assertTrue(
+                    thrown.suppressed.any { it.message == "close failed" },
+                    "关流失败必须挂在 suppressed 里，不能被吞掉：${thrown.suppressed.toList()}",
+                )
+                assertEquals(0, vfs.trackedStreamCount, "失败的流也不能留在在途列表里")
+            } finally {
+                vfs.close()
+            }
+        }
+
     /** 调用方忘了关流：`close()` 负责把它收回来，不留悬着的文件句柄。 */
     @Test
     @Timeout(60)
@@ -344,4 +442,36 @@ class RuntimeStreamTest {
                 assertEquals(0, vfs.trackedStreamCount, "反复开关也不会累积")
             }
         }
+}
+
+/** 专门用来制造「关流失败」的流：close() 抛出造流时给的那个异常。 */
+private class FailingCloseStream(
+    private val failure: Throwable,
+) : InputStream() {
+    override fun read(): Int = -1
+
+    override fun close() = throw failure
+}
+
+/**
+ * 把 [VfsStreamResult] 里的内容流换成别的实现。
+ *
+ * 真磁盘读文件时没办法让 close 失败，所以这里直接改那个 private 字段，只为验证 Runtime 的清理路径。
+ */
+private fun swapStream(
+    result: VfsStreamResult,
+    replacement: InputStream,
+) {
+    // 主构造器属性在 JVM 上是 private final 字段，普通反射改不动；
+    // 用 privateLookupIn 拿到对该类的私有访问权，才能写这个 final 字段（只在测试里这么干）。
+    val field = VfsStreamResult::class.java.getDeclaredField("stream")
+    field.isAccessible = true
+    val lookup =
+        java.lang.invoke.MethodHandles
+            .privateLookupIn(
+                VfsStreamResult::class.java,
+                java.lang.invoke.MethodHandles
+                    .lookup(),
+            )
+    lookup.unreflectSetter(field).invoke(result, replacement)
 }
