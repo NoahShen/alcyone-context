@@ -59,7 +59,7 @@ class RuntimePublicEntryTest {
             prepare()
             val received = CopyOnWriteArrayList<VfsEvent>()
 
-            AlcyoneVfs.create(config()).use { vfs ->
+            withVfs(config()) { vfs ->
                 vfs.subscribe { event -> received.add(event) }
 
                 val written = vfs.write(uri("/a.txt"), "hello".toByteArray())
@@ -124,6 +124,19 @@ class RuntimePublicEntryTest {
         assertEquals(VfsErrorCode.INVALID_ARGUMENT, failure.code)
         assertTrue(Files.notExists(database), "非法配置不打开状态库，也就不会写下任何挂载映射")
         assertTrue(Files.notExists(database.resolveSibling("state.db.lock")), "非法配置不占独占锁")
+    }
+
+    /** create → 用 → close 的三步。`close()` 是挂起函数，所以用 `try/finally` 而不是 `use`。 */
+    private suspend fun <T> withVfs(
+        config: VfsRuntimeConfig,
+        block: suspend (AlcyoneVfs) -> T,
+    ): T {
+        val vfs = AlcyoneVfs.create(config)
+        return try {
+            block(vfs)
+        } finally {
+            vfs.close()
+        }
     }
 
     /** 直查状态库，只读统计与事件 / 挂载行；绕开 VFS 打开逻辑看文件本身。 */

@@ -55,6 +55,19 @@ class VfsRuntimeConfigGuardTest {
         assertEquals(VfsErrorCode.INVALID_ARGUMENT, failure.code)
     }
 
+    /** create → 用 → close 的三步。`close()` 是挂起函数，所以用 `try/finally` 而不是 `use`。 */
+    private suspend fun <T> withVfs(
+        config: VfsRuntimeConfig,
+        block: suspend (AlcyoneVfs) -> T,
+    ): T {
+        val vfs = AlcyoneVfs.create(config)
+        return try {
+            block(vfs)
+        } finally {
+            vfs.close()
+        }
+    }
+
     /** 同一个 key 指向同一个目录（这里一个是符号链接别名）不算冲突：这就是一块盘挂两个逻辑位置。 */
     @Test
     @Timeout(60)
@@ -143,7 +156,7 @@ class VfsRuntimeConfigGuardTest {
             val database = tempDir.resolve("state.db")
             val first = config(listOf(mount("/resources", "local", disk)), database, setOf("resources", "memory"))
 
-            AlcyoneVfs.create(first).use { vfs ->
+            withVfs(first) { vfs ->
                 val node = vfs.stat(VfsUri.parse("alcyone://memory"))
                 assertEquals("/memory", node.uri.path.toString(), "命名空间根就是一个虚拟目录")
             }

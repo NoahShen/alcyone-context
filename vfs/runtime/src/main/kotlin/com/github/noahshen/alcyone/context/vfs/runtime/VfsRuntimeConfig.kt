@@ -34,8 +34,8 @@ data class MountConfig(
  *
  * 例：状态库放 `data/state.db`，命名空间 `resources` / `memory`，各挂一块本机目录，读写限额都是 16 MiB。
  *
- * 本轮（S1 + S2）只组装，不含流式读取与关闭等待期：[closeGracePeriod] 只是先留在配置里，
- * 真正实现它的是 T18 第二片。
+ * 本轮（S1～S4）只组装到本地目录：公共流式读取 [AlcyoneVfs.openStream] 与挂载配置、
+ * 关闭等待期都在实例里做。WebDAV 不在 T18 范围（T24 / T25）。
  */
 data class VfsRuntimeConfig(
     /** 状态库文件。相对路径按当前工作目录解析；符号链接别名会被规范化成同一个真实路径。 */
@@ -46,9 +46,19 @@ data class VfsRuntimeConfig(
     val mounts: List<MountConfig>,
     /** 读写的默认限额。 */
     val limits: VfsLimits = VfsLimits(),
+    /**
+     * `openStream` 的总量上限（字节）。`null` = 不设总量上限，仍然分块读，不会把整个文件读进内存。
+     *
+     * 和 [limits] 分开：`limits` 管的是 ByteArray 读，16 MiB 默认不变；这里管的是一条流累计读到的字节数。
+     * 调用方的 `VfsStreamOptions.maxTotalBytes` 只能进一步收紧它。
+     */
+    val streamTotalLimit: Long? = null,
     /** 进程内事件队列容量，沿用 T14 的有界通知。 */
     val eventBufferCapacity: Int = AsyncEventNotifier.DEFAULT_CAPACITY,
-    /** 关闭时等待在途操作的期限。**本轮尚未实现**，只是先把配置位置留出来。 */
+    /**
+     * 关闭时等待在途操作的期限。进入 closing 之后，已接纳的操作在这段时间里可以自己跑完；
+     * 到点还在跑的会被**请求取消**（协作取消，不是强杀）。
+     */
     val closeGracePeriod: Duration = 30.seconds,
 )
 
@@ -70,6 +80,7 @@ internal class ResolvedConfig(
     /** 每个 storageKey 对应的规范化物理根；同一 key 只开一个存储实例。 */
     val roots: Map<String, Path>,
     val limits: VfsLimits,
+    val streamTotalLimit: Long?,
     val eventBufferCapacity: Int,
     val closeGracePeriod: Duration,
 ) {
@@ -89,6 +100,13 @@ internal class ResolvedConfig(
  * 两个不同的目录互相包含才是重叠，配置在这里就被拒。
  */
 internal fun VfsRuntimeConfig.resolve(): ResolvedConfig {
+    // 能在这里判的数值先判掉：非法值不必等到真的要建通知器或者真的要关闭时才报。
+    if (streamTotalLimit != null && streamTotalLimit < 0) {
+        throw invalidArgument("streamTotalLimit must not be negative: $streamTotalLimit")
+    }
+    if (closeGracePeriod.isNegative()) {
+        throw invalidArgument("closeGracePeriod must not be negative: $closeGracePeriod")
+    }
     val keys = mounts.map { it.storageKey }
     keys.forEach { key ->
         if (key.isBlank() || key.any { it.isWhitespace() || it.isISOControl() }) {
@@ -133,6 +151,7 @@ internal fun VfsRuntimeConfig.resolve(): ResolvedConfig {
         router = router,
         roots = normalizedByKey,
         limits = limits,
+        streamTotalLimit = streamTotalLimit,
         eventBufferCapacity = eventBufferCapacity,
         closeGracePeriod = closeGracePeriod,
     )

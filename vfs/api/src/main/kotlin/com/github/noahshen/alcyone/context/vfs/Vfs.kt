@@ -13,6 +13,20 @@ interface Vfs {
         options: ReadOptions = ReadOptions(),
     ): ByteArray
 
+    /**
+     * 流式读取一个文件，用来读大于 ByteArray 限额的内容。返回的 [VfsStreamResult] **必须 close**。
+     *
+     * 和 [read] 一样只读：不登记 Node、不发事件、不把整个文件读进内存。
+     * 实际上限取 Runtime 配置的总量上限与 [VfsStreamOptions.maxTotalBytes] 里**较小**的那个，
+     * 默认不设总量上限；读到超限的那一次就抛 `LIMIT_EXCEEDED`。
+     *
+     * 目录（含配置推导出的目录）返回 `TYPE_MISMATCH`，路径不存在返回 `NOT_FOUND`。
+     */
+    suspend fun openStream(
+        uri: VfsUri,
+        options: VfsStreamOptions = VfsStreamOptions(),
+    ): VfsStreamResult
+
     /** 创建或更新文件并持久化 Node；返回信息不额外调用 Storage stat，`storage` 可空。 */
     suspend fun write(
         uri: VfsUri,

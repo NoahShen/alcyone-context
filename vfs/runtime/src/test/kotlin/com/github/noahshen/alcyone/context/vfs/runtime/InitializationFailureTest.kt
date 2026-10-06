@@ -76,7 +76,7 @@ class InitializationFailureTest {
             assertTrue(assembly.state.isClosed, "状态库连接必须被关掉")
 
             // 用完还能再建一次：没有残留的锁、没有没关的连接。
-            AlcyoneVfs.create(config()).use { vfs ->
+            withVfs(config()) { vfs ->
                 assertEquals(
                     "/resources",
                     vfs
@@ -131,6 +131,19 @@ class InitializationFailureTest {
             assertTrue(assembly.notifier.isClosed)
             assertTrue(assembly.state.isClosed)
 
-            AlcyoneVfs.create(config()).use { }
+            withVfs(config()) { }
         }
+
+    /** create → 用 → close 的三步。`close()` 是挂起函数，所以用 `try/finally` 而不是 `use`。 */
+    private suspend fun <T> withVfs(
+        config: VfsRuntimeConfig,
+        block: suspend (AlcyoneVfs) -> T,
+    ): T {
+        val vfs = AlcyoneVfs.create(config)
+        return try {
+            block(vfs)
+        } finally {
+            vfs.close()
+        }
+    }
 }

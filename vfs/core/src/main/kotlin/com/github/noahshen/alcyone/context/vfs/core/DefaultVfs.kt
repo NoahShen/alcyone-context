@@ -16,6 +16,8 @@ import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsEventType
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsPath
+import com.github.noahshen.alcyone.context.vfs.VfsStreamOptions
+import com.github.noahshen.alcyone.context.vfs.VfsStreamResult
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.WriteMode
 import com.github.noahshen.alcyone.context.vfs.WriteOptions
@@ -38,6 +40,7 @@ import com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode
 import com.github.noahshen.alcyone.context.vfs.core.transaction.TransactionScope
 import kotlinx.coroutines.CancellationException
+import java.io.FilterInputStream
 import java.time.Instant
 
 /**
@@ -66,7 +69,7 @@ data class VfsLimits(
 
 /**
  * VFS 的基础文件操作（T15）：把已交付的路由、预检、Node Registry、事件提交和 Storage 拼成 `read` / `write` / `stat` /
- * `list` 和 `getNode`；T16 加上 `delete`；T17 加上 `getMetadata` / `setMetadata`。Core 只依赖 Port，具体 SQLite 与本地磁盘由调用方注入。
+ * `list` 和 `getNode`；T16 加上 `delete`；T17 加上 `getMetadata` / `setMetadata`；T18 加上 `openStream`（流式读）。Core 只依赖 Port，具体 SQLite 与本地磁盘由调用方注入。
  *
  * 例：挂载 `/resources` 指向本地磁盘，`write(alcyone://resources/notes/a.txt, "hi")` 会
  * 自动建出 `notes` 目录、写文件、在同一个事务里登记 Node 并追加 `FILE_CREATED` 事件。
@@ -123,6 +126,11 @@ class DefaultVfs(
     private val events: EventFactory = EventFactory(),
     /** 读写限额。 */
     private val limits: VfsLimits = VfsLimits(),
+    /**
+     * 流式读取的总量上限，`null` 表示不设总量上限（仍然分块读）。和 [limits] 分开：
+     * [ReadOptions] 管的是 ByteArray 整体读进来的字节数，这里管的是一条流累计读到的字节数。
+     */
+    private val streamTotalLimit: Long? = null,
     /** Node 的逻辑时间；测试可以换成固定值。 */
     private val clock: () -> Instant = Instant::now,
 ) : Vfs {
@@ -147,6 +155,61 @@ class DefaultVfs(
             val route = router.route(path) ?: throw mountNotFound(path)
             storageFor(route).read(route.relativePath, effectiveReadLimit(options)).bytes
         }
+
+    /**
+     * 流式读一个文件（T18 §2.4）。读大文件用：不用把整个文件变成 ByteArray，也就没有 16 MiB 那道坎。
+     *
+     * 语义和 [read] 一致：不登记 Node、不发事件、不碰状态库。**取锁只覆盖打开流这一下**，
+     * 调用方慢慢读的时候不占着状态库的队——所以这里没有 `boundary.withLock`。
+     *
+     * 目录（配置推导出的目录、盘上的真目录）报 `TYPE_MISMATCH`，路径不存在由后端报 `NOT_FOUND`。
+     */
+    override suspend fun openStream(
+        uri: VfsUri,
+        options: VfsStreamOptions,
+    ): VfsStreamResult = openStream(uri, options, onClose = {})
+
+    /**
+     * 和 [openStream] 同一个实现，多带一个「关掉时叫一下」的回调。
+     *
+     * @param onClose 这次读取被关掉时调一次（Runtime 用它把流从在途资源里摘掉；普通调用方不用传）。
+     *
+     * 例：`read` 因为 16 MiB 限额拒掉 20 MiB 的视频，`openStream` 可以一块一块读完。
+     */
+    suspend fun openStream(
+        uri: VfsUri,
+        options: VfsStreamOptions,
+        onClose: () -> Unit = {},
+    ): VfsStreamResult {
+        val path = uri.path
+        if (router.isConfiguredDirectory(path)) throw configuredDirectory(path, "openStream")
+        val route = router.route(path) ?: throw mountNotFound(path)
+        val opened = storageFor(route).readStream(route.relativePath, effectiveStreamLimit(options))
+        val stream =
+            try {
+                opened.openStream()
+            } catch (failure: Throwable) {
+                // 流已经建出来、还没交出去就失败了：当场放掉，别把文件句柄留在盘上。
+                runCatching { opened.close() }
+                throw failure
+            }
+        return VfsStreamResult(
+            uri = uri,
+            sizeBytes = opened.attributes.sizeBytes,
+            onClose = onClose,
+            // 关流时把后端那份也放掉：两者共用同一个文件句柄，关掉谁都行，只能生效一次。
+            stream =
+                object : FilterInputStream(stream) {
+                    override fun close() {
+                        try {
+                            super.close()
+                        } finally {
+                            opened.close()
+                        }
+                    }
+                },
+        )
+    }
 
     /**
      * `stat`：直接委托 T13 的 Node Registry，所以懒注册、includeStorage 两种语义、虚拟目录和挂载根类型检查
@@ -693,6 +756,13 @@ class DefaultVfs(
     /** 读取实际上限：配置上限与单次上限里较小的那个。`null` 用配置，`0` 就是只接受空文件。 */
     private fun effectiveReadLimit(options: ReadOptions): Long =
         minOf(limits.defaultReadMaxBytes, options.maxBytes ?: limits.defaultReadMaxBytes)
+
+    /**
+     * 流式读取的实际上限：配置总量上限与单次上限里较小的那个；两个都没给就是不限量。
+     *
+     * 和 [effectiveReadLimit] 分开是因为默认不同：`read` 默认 16 MiB，流式默认不设总量上限。
+     */
+    private fun effectiveStreamLimit(options: VfsStreamOptions): Long? = listOfNotNull(streamTotalLimit, options.maxTotalBytes).minOrNull()
 
     /** 取这块盘的实例。拼装漏了就报 `STATE_ERROR` 并点名 key，绝不装作「文件不存在」。 */
     private fun storageFor(route: RouteMatch): Storage =

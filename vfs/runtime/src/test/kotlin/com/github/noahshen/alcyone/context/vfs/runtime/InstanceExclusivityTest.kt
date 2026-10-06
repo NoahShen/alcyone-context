@@ -47,14 +47,14 @@ class InstanceExclusivityTest {
     fun `a second instance on the same database is refused and accepted again after close`() =
         runBlocking {
             prepare()
-            AlcyoneVfs.create(config()).use { first ->
+            withVfs(config()) { first ->
                 val failure = assertFailsWith<VfsException> { AlcyoneVfs.create(config()) }
 
                 assertEquals(VfsErrorCode.CONFLICT, failure.code, "同一状态库已经有实例在跑")
                 assertTrue(Files.exists(lockFile()), "锁文件留着是对的")
             }
 
-            AlcyoneVfs.create(config()).use { reopened ->
+            withVfs(config()) { reopened ->
                 val root = reopened.stat(VfsUri.parse("alcyone://resources"))
 
                 assertEquals("/resources", root.uri.path.toString(), "释放之后同一个库能再次打开并正常服务")
@@ -68,7 +68,7 @@ class InstanceExclusivityTest {
         runBlocking {
             prepare()
             val alias = Files.createSymbolicLink(tempDir.resolve("alias"), tempDir)
-            AlcyoneVfs.create(config()).use {
+            withVfs(config()) {
                 val failure =
                     assertFailsWith<VfsException> {
                         AlcyoneVfs.create(config(alias.resolve("state.db")))
@@ -84,10 +84,10 @@ class InstanceExclusivityTest {
     fun `a leftover lock file does not count as taken`() =
         runBlocking {
             prepare()
-            AlcyoneVfs.create(config()).use { }
+            withVfs(config()) { }
             assertTrue(Files.exists(lockFile()), "关闭后锁文件仍然留在盘上")
 
-            AlcyoneVfs.create(config()).use { }
+            withVfs(config()) { }
         }
 
     /**
@@ -102,7 +102,7 @@ class InstanceExclusivityTest {
         runBlocking {
             prepare()
 
-            AlcyoneVfs.create(config()).use {
+            withVfs(config()) {
                 val refused = runProbe(database, disk)
                 assertTrue(
                     refused.first.startsWith("REJECTED CONFLICT") && refused.first.contains("already in use"),
@@ -114,7 +114,7 @@ class InstanceExclusivityTest {
             assertEquals("LOCKED", granted.first, "父进程关闭之后子进程应当能拿到锁：${granted.second}")
 
             // 子进程是「只 create 不 close」退出的：进程一死，文件锁就没了。
-            AlcyoneVfs.create(config()).use {
+            withVfs(config()) {
                 assertEquals(
                     "/resources",
                     it
@@ -147,5 +147,18 @@ class InstanceExclusivityTest {
         val line = output.lineSequence().lastOrNull { it.startsWith("LOCKED") || it.startsWith("REJECTED") }
         requireNotNull(line) { "子进程没有打印结果：$output" }
         return line to output
+    }
+
+    /** create → 用 → close 的三步。`close()` 是挂起函数，所以用 `try/finally` 而不是 `use`。 */
+    private suspend fun <T> withVfs(
+        config: VfsRuntimeConfig,
+        block: suspend (AlcyoneVfs) -> T,
+    ): T {
+        val vfs = AlcyoneVfs.create(config)
+        return try {
+            block(vfs)
+        } finally {
+            vfs.close()
+        }
     }
 }

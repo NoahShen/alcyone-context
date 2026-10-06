@@ -151,6 +151,20 @@ class PublicContractTest {
         assertEquals(1L, ReadOptions().copy(maxBytes = 1).maxBytes)
     }
 
+    // T18 流式读取：与 ReadOptions 分开，默认不设总量上限，负数同样在构造时拒
+    @Test
+    fun `stream options default to no total limit and reject a negative one`() {
+        assertEquals(null, VfsStreamOptions().maxTotalBytes, "默认不设总量上限，不是 0 也不是无限标志")
+        assertEquals(0L, VfsStreamOptions(0).maxTotalBytes)
+        assertEquals(1024L, VfsStreamOptions(maxTotalBytes = 1024).maxTotalBytes)
+
+        val constructed = assertFailsWith<VfsException> { VfsStreamOptions(-1) }
+        assertEquals(VfsErrorCode.INVALID_ARGUMENT, constructed.code)
+        assertEquals(VfsEffect.NONE, constructed.effect)
+        val copied = assertFailsWith<VfsException> { VfsStreamOptions(8).copy(maxTotalBytes = -8) }
+        assertEquals(VfsErrorCode.INVALID_ARGUMENT, copied.code)
+    }
+
     @Test
     fun `metadata defaults are empty`() {
         val metadata = NodeMetadata()
@@ -165,7 +179,7 @@ class PublicContractTest {
         assertTrue(Vfs::class.java.isInterface)
         val methods = Vfs::class.java.declaredMethods.filterNot { it.isSynthetic } // 过滤默认参数桥接方法
         assertEquals(
-            setOf("read", "write", "stat", "getNode", "list", "move", "delete", "getMetadata", "setMetadata"),
+            setOf("read", "openStream", "write", "stat", "getNode", "list", "move", "delete", "getMetadata", "setMetadata"),
             methods.map { it.name }.toSet(),
         )
         for (method in methods) {
@@ -195,6 +209,8 @@ class PublicContractTest {
                 StorageStat::class.java,
                 NodeMetadata::class.java,
                 ReadOptions::class.java,
+                VfsStreamOptions::class.java,
+                VfsStreamResult::class.java,
                 WriteOptions::class.java,
                 WriteMode::class.java,
                 StatOptions::class.java,

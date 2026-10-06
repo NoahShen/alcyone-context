@@ -85,7 +85,7 @@ class MountConfigurationTest {
         runBlocking {
             prepare()
             val written =
-                AlcyoneVfs.create(original).use { vfs ->
+                withVfs(original) { vfs ->
                     val info = vfs.write(uri("/a.txt"), "hello".toByteArray())
                     vfs.setMetadata(info.id, NodeMetadata(setOf("ct"), "胸部 CT"))
                     info
@@ -94,7 +94,7 @@ class MountConfigurationTest {
             val stored = listOf(listOf("/resources/docs", "docs", "local-fs", disk.toRealPath().toString()))
             assertEquals(stored, mountRows(), "首启原子保存了包含物理身份的映射")
 
-            AlcyoneVfs.create(original).use { vfs ->
+            withVfs(original) { vfs ->
                 assertEquals("hello", vfs.read(uri("/a.txt")).toString(Charsets.UTF_8))
                 assertEquals(setOf("ct"), vfs.getMetadata(written.id).tags, "重开后 Node 与 Metadata 都还在")
                 assertEquals(stored, mountRows(), "相同配置重开不改写映射")
@@ -108,7 +108,7 @@ class MountConfigurationTest {
         runBlocking {
             prepare()
             val elsewhere = otherDisk("other")
-            AlcyoneVfs.create(original).use { vfs -> vfs.write(uri("/a.txt"), "hello".toByteArray()) }
+            withVfs(original) { vfs -> vfs.write(uri("/a.txt"), "hello".toByteArray()) }
 
             val failure =
                 assertFailsWith<VfsException> {
@@ -118,7 +118,7 @@ class MountConfigurationTest {
             assertEquals(VfsErrorCode.CONFLICT, failure.code)
             assertTrue(failure.message!!.contains("changed identity"), "冲突消息要点名是身份变了：${failure.message}")
 
-            AlcyoneVfs.create(original).use { vfs ->
+            withVfs(original) { vfs ->
                 assertEquals("hello", vfs.read(uri("/a.txt")).toString(Charsets.UTF_8), "冲突之后原配置仍然能启动")
             }
         }
@@ -130,7 +130,7 @@ class MountConfigurationTest {
         runBlocking {
             prepare()
             val elsewhere = otherDisk("other")
-            AlcyoneVfs.create(original).use { vfs -> vfs.write(uri("/a.txt"), "hello".toByteArray()) }
+            withVfs(original) { vfs -> vfs.write(uri("/a.txt"), "hello".toByteArray()) }
 
             val removed =
                 assertFailsWith<VfsException> { AlcyoneVfs.create(config(listOf(mount("/resources/notes", "notes", elsewhere)))) }
@@ -145,7 +145,7 @@ class MountConfigurationTest {
             val withoutNamespace = assertFailsWith<VfsException> { AlcyoneVfs.create(config(emptyList(), namespaces = setOf("memory"))) }
             assertEquals(VfsErrorCode.CONFLICT, withoutNamespace.code)
 
-            AlcyoneVfs.create(original).use { vfs ->
+            withVfs(original) { vfs ->
                 assertEquals("hello", vfs.read(uri("/a.txt")).toString(Charsets.UTF_8), "三次拒绝之后原配置仍然能启动")
             }
         }
@@ -160,7 +160,7 @@ class MountConfigurationTest {
         runBlocking {
             prepare()
             val photos = otherDisk("photos")
-            AlcyoneVfs.create(original).use { vfs -> vfs.write(uri("/a.txt"), "hello".toByteArray()) }
+            withVfs(original) { vfs -> vfs.write(uri("/a.txt"), "hello".toByteArray()) }
 
             val failure =
                 assertFailsWith<VfsException> {
@@ -173,7 +173,7 @@ class MountConfigurationTest {
             assertTrue(failure.message!!.contains("take over part of"), "消息要点名是遮蔽：${failure.message}")
             assertEquals(1, mountRows().size, "被拒时不写任何新映射")
 
-            AlcyoneVfs.create(original).use { vfs ->
+            withVfs(original) { vfs ->
                 assertEquals("hello", vfs.read(uri("/a.txt")).toString(Charsets.UTF_8), "被拒之后原配置仍然能启动")
             }
         }
@@ -185,18 +185,17 @@ class MountConfigurationTest {
         runBlocking {
             prepare()
             val memory = otherDisk("memory")
-            AlcyoneVfs.create(original).use { vfs -> vfs.write(uri("/a.txt"), "hello".toByteArray()) }
+            withVfs(original) { vfs -> vfs.write(uri("/a.txt"), "hello".toByteArray()) }
 
-            AlcyoneVfs
-                .create(
-                    config(
-                        listOf(mount("/resources/docs", "docs", disk), mount("/memory", "memory", memory)),
-                        namespaces = setOf("resources", "memory"),
-                    ),
-                ).use { vfs ->
-                    vfs.write(VfsUri.parse("alcyone://memory/note.md"), "note".toByteArray())
-                    assertEquals("note", vfs.read(VfsUri.parse("alcyone://memory/note.md")).toString(Charsets.UTF_8))
-                }
+            withVfs(
+                config(
+                    listOf(mount("/resources/docs", "docs", disk), mount("/memory", "memory", memory)),
+                    namespaces = setOf("resources", "memory"),
+                ),
+            ) { vfs ->
+                vfs.write(VfsUri.parse("alcyone://memory/note.md"), "note".toByteArray())
+                assertEquals("note", vfs.read(VfsUri.parse("alcyone://memory/note.md")).toString(Charsets.UTF_8))
+            }
 
             assertEquals(
                 listOf(
@@ -231,7 +230,7 @@ class MountConfigurationTest {
 
             // 处理办法照消息做：清掉没有身份的旧映射之后，同一个配置就能正常初始化。
             raw("DELETE FROM mount")
-            AlcyoneVfs.create(original).use { vfs ->
+            withVfs(original) { vfs ->
                 assertEquals(
                     listOf(listOf("/resources/docs", "docs", "local-fs", disk.toRealPath().toString())),
                     mountRows(),
@@ -268,6 +267,19 @@ class MountConfigurationTest {
     private fun raw(sql: String) {
         DriverManager.getConnection("jdbc:sqlite:$database").use { connection ->
             connection.createStatement().use { it.execute(sql) }
+        }
+    }
+
+    /** create → 用 → close 的三步。`close()` 是挂起函数，所以用 `try/finally` 而不是 `use`。 */
+    private suspend fun <T> withVfs(
+        config: VfsRuntimeConfig,
+        block: suspend (AlcyoneVfs) -> T,
+    ): T {
+        val vfs = AlcyoneVfs.create(config)
+        return try {
+            block(vfs)
+        } finally {
+            vfs.close()
         }
     }
 }

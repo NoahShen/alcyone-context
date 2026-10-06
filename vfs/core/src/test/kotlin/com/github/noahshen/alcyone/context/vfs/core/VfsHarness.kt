@@ -41,6 +41,7 @@ internal class VfsHarness(
     initialNodes: List<NodeRecord> = emptyList(),
     capabilityOverrides: Map<String, StorageCapabilities> = emptyMap(),
     limits: VfsLimits = VfsLimits(),
+    streamTotalLimit: Long? = null,
     storages: (String) -> Storage? = { key -> mounts.firstOrNull { it.key == key }?.storage },
     /** 通知器由测试统一登记并关闭（断言失败也不留分发协程）。 */
     notifier: AsyncEventNotifier,
@@ -139,6 +140,7 @@ internal class VfsHarness(
             pipeline = pipeline,
             events = EventFactory(clock),
             limits = limits,
+            streamTotalLimit = streamTotalLimit,
             clock = clock,
         )
 
