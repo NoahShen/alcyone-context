@@ -111,7 +111,13 @@ class VfsRuntimeConfigGuardTest {
     fun `a state database inside a mounted root is rejected`() {
         val root = disk("data")
 
-        val failure = assertFailsWith<VfsException> { config(listOf(mount("/resources", "local", root)), database = root.resolve("state.db")).resolve() }
+        val failure =
+            assertFailsWith<VfsException> {
+                config(
+                    listOf(mount("/resources", "local", root)),
+                    database = root.resolve("state.db"),
+                ).resolve()
+            }
 
         assertEquals(VfsErrorCode.INVALID_ARGUMENT, failure.code)
     }
