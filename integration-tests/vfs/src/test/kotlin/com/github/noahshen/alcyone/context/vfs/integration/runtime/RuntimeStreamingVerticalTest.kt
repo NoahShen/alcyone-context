@@ -192,9 +192,12 @@ class RuntimeStreamingVerticalTest {
 
             val vfs = AlcyoneVfs.create(config())
             val result: VfsStreamResult = vfs.openStream(uri("forgotten.bin"))
-            assertEquals("alcyone://resources/docs/forgotten.bin", result.uri.toString())
-
-            vfs.close()
+            try {
+                assertEquals("alcyone://resources/docs/forgotten.bin", result.uri.toString())
+            } finally {
+                // 第一次 Runtime 的断言失败时也要收尾：close() 幂等，后面的回收断言照旧。
+                vfs.close()
+            }
 
             assertTrue(result.isClosed, "Runtime 替调用方把流关了")
             val thrown = assertFailsWith<Exception> { result.stream.read() }

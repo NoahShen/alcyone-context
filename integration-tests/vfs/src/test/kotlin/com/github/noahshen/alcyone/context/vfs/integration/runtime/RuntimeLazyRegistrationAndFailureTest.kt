@@ -128,7 +128,8 @@ class RuntimeLazyRegistrationAndFailureTest {
                 vfs.setMetadata(info.id, NodeMetadata(setOf("ct"), "胸部 CT"))
                 val before = snapshot()
 
-                // 1) 缺失文件：read / delete / stat 都是 NOT_FOUND，且 effect 为 NONE。
+                // 1) 缺失文件：本轮实际调用的是 read 与 delete 两个入口，都报 NOT_FOUND。
+                //    只对 delete 断 effect：它确认「没删任何东西」；read 是纯查询，没有副作用可声明。
                 val missingRead = assertFailsWith<VfsException> { vfs.read(uri("/missing.txt")) }
                 assertEquals(VfsErrorCode.NOT_FOUND, missingRead.code)
                 val missingDelete = assertFailsWith<VfsException> { vfs.delete(uri("/missing.txt")) }
@@ -156,8 +157,10 @@ class RuntimeLazyRegistrationAndFailureTest {
                 assertTrue(Files.exists(disk.resolve("a.txt")), "move 被拒后源文件还在")
                 assertFalse(Files.exists(disk.resolve("b.txt")), "move 被拒后没有新文件")
 
-                // 失败前后事实一致：内容、有效 Node、Metadata、事件日志都没变。
+                // 失败前后事实一致：有效 Node / Metadata / 事件日志与磁盘文件集合都没变；
+                // 另外单独直接核对唯一个受保护文件的内容仍是原字节（快照的 disk 只记路径，不记字节）。
                 assertEquals(before, snapshot(), "所有反例都没有改变持久化事实")
+                assertEquals("hello", Files.readString(disk.resolve("a.txt")), "最终 a.txt 内容仍是写入时的字节")
             }
         }
 

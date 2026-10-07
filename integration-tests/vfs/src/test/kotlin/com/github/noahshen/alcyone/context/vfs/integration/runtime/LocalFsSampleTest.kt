@@ -57,7 +57,8 @@ class LocalFsSampleTest {
 
             val vfs = AlcyoneVfs.create(config)
             try {
-                // 3) 订阅已提交的变更。订阅先于操作，按目标 Node ID / 类型等待（不靠固定 sleep）。
+                // 3) 订阅已提交的变更。订阅先于操作，这里只演示了一个文件，所以按事件**类型**等，
+                //    不用固定 sleep 猜「到了没」。多文件场景应再加目标 Node ID 一起作判据。
                 val updated = CompletableDeferred<VfsEvent>()
                 vfs.subscribe { event ->
                     if (event.type == com.github.noahshen.alcyone.context.vfs.VfsEventType.METADATA_UPDATED) {
