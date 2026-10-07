@@ -110,11 +110,17 @@ object OperationGuard {
         return PreconditionResult(strategy, source?.route, target?.route)
     }
 
-    /** 移动的两种参数冲突：源和目标相同、目标落进源自己的子树（T02 §7.1、§8.2）。放第一步，早于结构和路由。 */
-    private fun rejectConflictingMoveArguments(intent: OperationIntent) {
-        if (intent.type != OperationType.MOVE) return
-        val source = intent.source!!
-        val target = intent.target!!
+    /**
+     * 移动的两条参数冲突：源和目标相同、目标落进源自己的子树。
+     *
+     * 公开可见是有意的：T20 的 `DefaultVfs.move` 要在**碰任何后端之前**先拒掉这两类纯参数错误（T02 §8.2
+     * 「校验优先拒绝纯参数错误和已知配置结构冲突，然后检查路由 / 存储状态」），而源的真实类型要等 `storage.stat`
+     * 之后才知道，没法先跑一遍完整的 [check]。这里只做参数冲突这一件事，不碰路由与能力。
+     */
+    internal fun rejectMoveArgumentConflicts(
+        source: VfsPath,
+        target: VfsPath,
+    ) {
         if (source == target) {
             throw VfsException(VfsErrorCode.INVALID_ARGUMENT, "Move source and target are the same path '$target'")
         }
@@ -123,6 +129,12 @@ object OperationGuard {
         if (segments.size > prefix.size && segments.subList(0, prefix.size) == prefix) {
             throw VfsException(VfsErrorCode.INVALID_ARGUMENT, "Move target '$target' is inside its own source subtree '$source'")
         }
+    }
+
+    /** 移动的两种参数冲突：源和目标相同、目标落进源自己的子树（T02 §7.1、§8.2）。放第一步，早于结构和路由。 */
+    private fun rejectConflictingMoveArguments(intent: OperationIntent) {
+        if (intent.type != OperationType.MOVE) return
+        rejectMoveArgumentConflicts(intent.source!!, intent.target!!)
     }
 
     /**

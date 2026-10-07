@@ -24,6 +24,7 @@ import com.github.noahshen.alcyone.context.vfs.WriteOptions
 import com.github.noahshen.alcyone.context.vfs.core.event.EventFactory
 import com.github.noahshen.alcyone.context.vfs.core.event.EventPipeline
 import com.github.noahshen.alcyone.context.vfs.core.operation.CapabilitySnapshot
+import com.github.noahshen.alcyone.context.vfs.core.operation.ExecutionStrategy
 import com.github.noahshen.alcyone.context.vfs.core.operation.OperationGuard
 import com.github.noahshen.alcyone.context.vfs.core.operation.OperationIntent
 import com.github.noahshen.alcyone.context.vfs.core.registry.NodeRegistry
@@ -100,7 +101,8 @@ data class VfsLimits(
  * 例：外部直接删掉了磁盘上的 `a.dcm`，它的 Node 还有效，标签和说明照样能读能改；
  * 经 VFS 删掉之后同一个旧 ID 就报 `NOT_FOUND`，不会退化成「返回空 Metadata」。
  *
- * **本轮没交付的方法**：[move] 明确抛 [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用，由 T20～T22 接续。
+ * **本轮没交付的方法**：**目录移动、同 Mount 复制回退、跨 Mount 移动**（T21 / T22 接续）明确抛
+ * [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用；同 Mount 普通文件的**原生移动**已在 T20 交付（见 [move]）。
  */
 class DefaultVfs(
     /** 挂载与配置目录（T09）。 */
@@ -528,11 +530,225 @@ class DefaultVfs(
         return info
     }
 
-    /** 移动：T20～T22 接续。现在明确拒绝，不静默成功也不留副作用。 */
+    /**
+     * 移动一个文件（T20：同一 Mount 内的原生移动 / 重命名）。
+     *
+     * 例：`move(alcyone://resources/docs/a.txt, alcyone://resources/docs/archive/b.txt)` 把文件从 `docs`
+     * 挪到 `docs/archive`（缺失的 `archive` 自动补出来），保留同一个 Node ID 与 Metadata，追加一条
+     * `FILE_MOVED`；旧路径随即 `NOT_FOUND`，在旧路径另建文件会拿到新 ID。
+     *
+     * 顺序契约（任何可确认的拒绝都发生在注册源、建目录、物理移动**之前**）：
+     *
+     * 1. 纯参数冲突：源和目标同路径、目标落进源子树 → `INVALID_ARGUMENT`（T02 §8.2「参数错误优先」）；
+     * 2. 结构保护：源或目标是受保护配置目录 → `UNSUPPORTED_OPERATION`；
+     * 3. 路由：源或目标没有挂载覆盖 → `MOUNT_NOT_FOUND`；
+     * 4. `storage.stat` 确认源**真的存在**并拿到**实际类型**（不存在 → `NOT_FOUND`）；
+     * 5. 按实际类型跑一遍 T10 预检（[OperationIntent.move]）拿到策略；目录、`COPY_FALLBACK_MOVE`、
+     *    `CROSS_MOUNT_COPY_MOVE` 一律 `UNSUPPORTED_OPERATION`（阶段拒绝，T21 / T22 接续），不把后端
+     *    支持的能力伪报为不支持；
+     * 6. 目标**已存在**（文件或目录都算）→ `ALREADY_EXISTS`，不覆盖、不创建父目录、不把目标目录
+     *    解释成「放进去」；
+     * 7. 已登记源复用原 ID；未登记源先建立**一次**身份再迁移这条记录（不在目标重新生成 ID）；
+     * 8. 只在目标所属 Mount 内补缺失父目录（父组件是文件 → `TYPE_MISMATCH`）；
+     * 9. `storage.move`（同 Mount 原生移动，不把内容读进 ByteArray）；
+     * 10. 一个事务里更新 Node 路径（同一个 ID、同一个登记时间，只推进 `updatedAt`）并追加一条 `FILE_MOVED`，
+     *    提交成功后才通知。
+     *
+     * 失败时的效果沿用 T15 / T16 的合并规则：补目录之后任何失败至少 `PARTIAL`，后端 `UNKNOWN` 不降级；
+     * 物理移动成功但状态 / 事件提交失败 → `STATE_ERROR` + `PARTIAL`，保留 cause，不回移文件、不发成功通知。
+     * [CancellationException] 原样传播。
+     */
     override suspend fun move(
         source: VfsUri,
         target: VfsUri,
-    ): NodeInfo = throw notDeliveredYet("move", "planned for T20~T22")
+    ): NodeInfo {
+        // 整条链只取这一次锁：预检、补目录、原生移动与状态提交都在里面（锁不可重入，内部一律用不加锁入口）。
+        return boundary.withLock { moveInsideBoundary(source, target) }
+    }
+
+    /** 移动的锁内部分：拒绝全部发生在副作用之前，物理移动与状态提交分开报告。 */
+    private suspend fun moveInsideBoundary(
+        source: VfsUri,
+        target: VfsUri,
+    ): NodeInfo {
+        val sourcePath = source.path
+        val targetPath = target.path
+        // 1. 纯参数冲突放到最前：源真实类型要等 stat，所以这里单独拒一次（T02 §8.2）。
+        OperationGuard.rejectMoveArgumentConflicts(sourcePath, targetPath)
+        // 2. 结构保护先于路由与任何后端访问：源 / 目标都是受保护配置目录时当场拒。
+        requireMovableStructure(source)
+        requireMovableStructure(target)
+        // 3. 路由：源和目标都必须有挂载覆盖，否则 MOUNT_NOT_FOUND。
+        val sourceRoute = router.route(sourcePath) ?: throw mountNotFound(sourcePath)
+        val targetRoute = router.route(targetPath) ?: throw mountNotFound(targetPath)
+        val storage = storageFor(sourceRoute)
+        // 4. 确认源真的存在并拿到实际类型；不存在时 Storage 直接报 NOT_FOUND，其他错误照抛。
+        val sourceAttributes = storage.stat(sourceRoute.relativePath)
+        val actualType = sourceAttributes.type
+        // 5. 按真实类型跑预检：目录、复制回退、跨 Mount 一律阶段拒绝（T21 / T22）。
+        val precondition =
+            OperationGuard.check(
+                OperationIntent.move(sourcePath, targetPath, actualType),
+                router,
+                capabilities,
+            )
+        if (actualType == NodeType.DIRECTORY) {
+            throw VfsException(
+                VfsErrorCode.UNSUPPORTED_OPERATION,
+                "Cannot move '$sourcePath': directory move is not implemented yet (planned for T22). " +
+                    "The call was rejected before any state or storage change.",
+                source,
+            )
+        }
+        if (precondition.strategy != ExecutionStrategy.NATIVE_MOVE) {
+            throw VfsException(
+                VfsErrorCode.UNSUPPORTED_OPERATION,
+                "Cannot move '$sourcePath' to '$targetPath': only same-mount native file move is implemented yet " +
+                    "(strategy ${precondition.strategy}); the copy fallback and cross-mount move arrive in T21. " +
+                    "The call was rejected before any state or storage change.",
+                source,
+            )
+        }
+        // 6. 目标必须全新：已有普通文件或普通目录都拒绝，不覆盖、不创建父目录、不当作「放进去」。
+        confirmMoveTargetAbsent(target, storage, targetRoute)
+
+        // 7. 身份：已登记源复用原 ID；未登记源先建立一次身份（懒注册）再迁移这条记录。
+        val nodeId = ensureSourceIdentity(sourcePath)
+
+        // 8. 只在目标 Mount 内补缺失父目录（复用 T15 的逐层创建，不批量登记、不发目录事件）。
+        val createdDirectories = createMissingParents(target, storage, targetRoute)
+        // 9. 物理原生移动；失败时把「已建出的父目录」合并进 effect，不把 UNKNOWN 降级成 NONE。
+        val moved =
+            try {
+                storage.move(sourceRoute.relativePath, targetRoute.relativePath)
+            } catch (failure: VfsException) {
+                throw failure.withKnownChanges(createdDirectories)
+            }
+        // 10. 状态 / 事件同事务提交；物理已经移动这件事不会因为提交失败而回退。
+        return try {
+            pipeline.commitInsideBoundary { scope -> commitMove(scope, nodeId, sourcePath, source, target, moved) }
+        } catch (cancellation: CancellationException) {
+            // 取消原样传播。文件已经到目标这件事不会因为取消而消失，也不声称状态已回滚。
+            throw cancellation
+        } catch (failure: Exception) {
+            // 只收普通异常：JVM 的 Error（OOM、StackOverflow）不是状态库拒绝了一条记录，原样抛出去。
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The file was moved on the backing storage but the node path and event could not be committed: " +
+                    "${failure.message ?: failure::class.java.simpleName}",
+                target,
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+    }
+
+    /**
+     * 移动的结构保护：源或目标是配置推导出的目录（逻辑根、命名空间根、挂载点、挂载祖先）就不许动
+     * （T02 §8.2）。排在路由之前，受保护路径一次后端都不碰。
+     */
+    private fun requireMovableStructure(uri: VfsUri) {
+        val path = uri.path
+        if (!router.isConfiguredDirectory(path)) return
+        val reason =
+            when {
+                path.isRoot -> "it is the logical root"
+                router.isMountPoint(path) -> "it is a mount root, and a mounted directory must not be moved"
+                router.hasDescendantMounts(path) -> "it contains another mount, and a move must not span mounts"
+                else -> "it is a configured directory (namespace root or a mount ancestor)"
+            }
+        throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "Cannot move '$path': $reason", uri)
+    }
+
+    /**
+     * 移动目标必须是全新位置：已有文件或目录都报 `ALREADY_EXISTS`（T02 §7.1「目标为文件或目录都不覆盖，
+     * 不将目标目录自动解释为放入其中」）。只在后端确认真实存在时拒绝；`NOT_FOUND`（含被父目录文件遮蔽）留给
+     * 后面的补父目录 / 移动去报更贴切的错误。
+     */
+    private suspend fun confirmMoveTargetAbsent(
+        target: VfsUri,
+        storage: Storage,
+        route: RouteMatch,
+    ) {
+        val existing =
+            try {
+                storage.stat(route.relativePath)
+            } catch (missing: VfsException) {
+                if (missing.code == VfsErrorCode.NOT_FOUND) null else throw missing
+            }
+        if (existing != null) {
+            throw VfsException(
+                VfsErrorCode.ALREADY_EXISTS,
+                "Cannot move to '${target.path}': the target already exists as a ${existing.type}",
+                target,
+            )
+        }
+    }
+
+    /**
+     * 拿到要迁移的 Node ID：已登记源直接复用（不重建、不改登记时间）；未登记源按 T13 的懒注册语义
+     * 建立**一次**身份，之后再迁移这条记录。
+     *
+     * 例：磁盘上已有、状态库里没有的 `a.txt` 移到 `b.txt`，这里先给它发一个新 ID，`getNode(新 ID)`
+     * 随即指向 `b.txt`；目标位置不会另外生成第二个 ID。
+     */
+    private suspend fun ensureSourceIdentity(sourcePath: VfsPath): NodeId {
+        // 直接读自动提交的仓库：这里就在边界里，别再套会自取锁的 Registry 公开方法。
+        nodes.findByPath(sourcePath)?.let { return it.id }
+        val now = clock()
+        val registered =
+            nodes.register(
+                NodeRecord(
+                    id = NodeId.parse(newUuidV7().toString()),
+                    path = sourcePath,
+                    type = NodeType.FILE,
+                    physical = true,
+                    registeredAt = now,
+                    updatedAt = now,
+                ),
+            )
+        return registered.id
+    }
+
+    /**
+     * 移动的最后一个事务：把 Node 记录迁到目标路径，追加**一条** `FILE_MOVED`（T03 §4）。
+     *
+     * 不新建身份、不动 Metadata：`updatePath` 只改逻辑路径与 `updatedAt`，ID、类型与 `registeredAt` 都不变。
+     * 事件用 [EventFactory.newMove]，`uri` 自动是目标位置且 `sourceUri` / `targetUri` 都填。
+     */
+    private suspend fun commitMove(
+        scope: TransactionScope,
+        nodeId: NodeId,
+        sourcePath: VfsPath,
+        source: VfsUri,
+        target: VfsUri,
+        moved: StorageAttributes,
+    ): NodeInfo {
+        val now = clock()
+        // 真实库里，未登记源的懒注册已经在这次事务之前自动提交，这里查得到；
+        // 只有「事务视图看不到那次自动提交」的替身才会落到 register 分支（真实路径不会），
+        // register 按路径幂等：已存在就当复用，绝不会在目标重新生成 ID。
+        val registered =
+            scope.nodes.findById(nodeId) ?: scope.nodes.register(
+                NodeRecord(
+                    id = nodeId,
+                    path = sourcePath,
+                    type = NodeType.FILE,
+                    physical = true,
+                    registeredAt = now,
+                    updatedAt = now,
+                ),
+            )
+        scope.nodes.updatePath(registered.id, target.path, now)
+        scope.events.append(events.newMove(VfsEventType.FILE_MOVED, registered.id, source, target))
+        return NodeInfo(
+            id = registered.id,
+            uri = target,
+            type = NodeType.FILE,
+            registeredAt = registered.registeredAt,
+            updatedAt = now,
+            storage = StorageStat(sizeBytes = moved.sizeBytes, modifiedAt = moved.modifiedAt),
+        )
+    }
 
     /**
      * 删掉一个文件或目录：结构保护 → 路由 → 向 Storage 确认真实类型 → Guard → 读逻辑记录 → 物理删除 → 状态与事件同事务提交。
@@ -809,15 +1025,6 @@ class DefaultVfs(
             VfsErrorCode.TYPE_MISMATCH,
             "Cannot $operation '$path': it is a configured directory (logical root, namespace root, mount root or mount ancestor)",
             VfsUri.of(path),
-        )
-
-    private fun notDeliveredYet(
-        operation: String,
-        plan: String,
-    ): VfsException =
-        VfsException(
-            VfsErrorCode.UNSUPPORTED_OPERATION,
-            "'$operation' is not implemented yet; $plan. The call was rejected before any state or storage change.",
         )
 }
 

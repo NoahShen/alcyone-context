@@ -5,6 +5,7 @@ import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.event.TrackedNotifiers
+import com.github.noahshen.alcyone.context.vfs.core.registry.makeDirectory
 import com.github.noahshen.alcyone.context.vfs.core.registry.withFile
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageFakeImpl
 import kotlinx.coroutines.runBlocking
@@ -34,22 +35,25 @@ class DefaultVfsStageBoundaryTest {
     }
 
     @Test
-    fun `A07 the operation still to be delivered is refused with no side effect`() =
+    fun `A07 the operations still to be delivered are refused with no side effect`() =
         runBlocking {
             val disk = StorageFakeImpl()
             disk.withFile("a.txt", "hello")
+            disk.makeDirectory("dir")
+            disk.withFile("dir/inner.txt", "inner")
             disk.calls.clear() // 下面的断言只看这几个方法自己造成的调用
             val harness = VfsHarness(listOf(VfsHarness.Mounted("/resources", disk)), notifier = notifiers.create())
-            val uri = VfsUri.parse("alcyone://resources/a.txt")
+            val dir = VfsUri.parse("alcyone://resources/dir")
+            val dir2 = VfsUri.parse("alcyone://resources/dir2")
 
-            val failure = assertFailsWith<VfsException>("move") { harness.vfs.move(uri, VfsUri.parse("alcyone://resources/b.txt")) }
-
-            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, failure.code, "没交付的方法明确拒绝，不静默成功")
-            assertEquals(VfsEffect.NONE, failure.effect, "拒绝时零副作用")
-            assertTrue(disk.calls.isEmpty(), "不许再动后端：${disk.calls}")
+            // 同 Mount 文件移动已在 T20 交付，这里改钉仍属阶段拒绝的两类：目录移动（T22）与复制回退（T21）。
+            val directory = assertFailsWith<VfsException>("move directory") { harness.vfs.move(dir, dir2) }
+            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, directory.code, "目录移动还没交付，明确拒绝，不静默成功")
+            assertEquals(VfsEffect.NONE, directory.effect, "拒绝时零副作用")
+            assertTrue(disk.calls.none { it.startsWith("move:") }, "不许再动后端：${disk.calls}")
             assertTrue(harness.committedNodes().isEmpty(), "不写状态")
             assertTrue(harness.committedEvents().isEmpty(), "不发事件")
-            assertEquals("hello", disk.readText("a.txt"), "文件还在")
+            assertEquals("inner", disk.readText("dir/inner.txt"), "目录还在")
         }
 
     @Test

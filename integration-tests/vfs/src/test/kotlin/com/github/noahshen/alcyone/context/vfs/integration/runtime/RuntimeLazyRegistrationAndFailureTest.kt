@@ -49,6 +49,9 @@ class RuntimeLazyRegistrationAndFailureTest {
     private fun prepare() {
         database = tempDir.resolve("state.db")
         disk = Files.createDirectory(tempDir.resolve("docs"))
+        // 预置一个目录（绕开 VFS 直接放）：本用例拿它当「仍未交付的目录移动」反例。
+        Files.createDirectory(disk.resolve("adir"))
+        Files.writeString(disk.resolve("adir/inside.txt"), "inside")
     }
 
     private fun config() =
@@ -151,11 +154,12 @@ class RuntimeLazyRegistrationAndFailureTest {
                 assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, deleteRoot.code, "挂载根不能删")
                 assertEquals(VfsEffect.NONE, deleteRoot.effect, "结构保护拒绝零副作用")
 
-                // 4) move 阶段没交付：明确 UNSUPPORTED_OPERATION，源和目标都不动。
-                val moved = assertFailsWith<VfsException> { vfs.move(uri("/a.txt"), uri("/b.txt")) }
-                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, moved.code, "move 属于 T20～T22")
-                assertTrue(Files.exists(disk.resolve("a.txt")), "move 被拒后源文件还在")
-                assertFalse(Files.exists(disk.resolve("b.txt")), "move 被拒后没有新文件")
+                // 4) 目录移动仍属阶段拒绝（T22）：明确 UNSUPPORTED_OPERATION，源和目标都不动。
+                //    同 Mount 文件移动已在 T20 交付，所以这里改用预置的目录做未交付反例。
+                val moved = assertFailsWith<VfsException> { vfs.move(uri("/adir"), uri("/adir2")) }
+                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, moved.code, "目录移动属于 T22")
+                assertTrue(Files.exists(disk.resolve("adir/inside.txt")), "move 被拒后源目录还在")
+                assertFalse(Files.exists(disk.resolve("adir2")), "move 被拒后没有新目录")
 
                 // 失败前后事实一致：有效 Node / Metadata / 事件日志与磁盘文件集合都没变；
                 // 另外单独直接核对唯一个受保护文件的内容仍是原字节（快照的 disk 只记路径，不记字节）。
