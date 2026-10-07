@@ -27,6 +27,7 @@ import kotlin.test.assertFailsWith
 
 /**
  * T20 S2：同 Mount 文件移动一条链的预检顺序、身份连续性、补父目录、阶段拒绝与失败 effect。
+ * T21：复制回退（同 Mount 无原生 move）与跨 Mount 复制移动。
  *
  * 这些用例证明「顺序和分支」：替身盘记下每次调用，所以「拒绝时一次都没动手」「物理移动前父目录已补」「原生移动不 read / write」
  * 都是可断言的事实。真实 SQLite 回滚、真实重开与真盘移动放 `DefaultVfsMoveRealStackTest`。
@@ -258,7 +259,7 @@ class DefaultVfsMoveTest {
             val directory = assertFailsWith<VfsException> { harness.vfs.move(uri("/dir"), uri("/z/dir2")) }
             assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, directory.code, "目录移动还没交付")
 
-            // 同 Mount 但后端不支持原生 move：复制回退属 T21，阶段拒绝，不能伪报后端支持的为不支持。
+            // 同 Mount 但后端不支持原生 move：复制回退（T21）现在已实现，应该成功。
             val noNativeDisk = StorageFakeImpl()
             val noNative =
                 harness(
@@ -266,19 +267,30 @@ class DefaultVfsMoveTest {
                     capabilityOverrides = mapOf("/resources" to StorageCapabilities(nativeFileMove = false)),
                 )
             noNativeDisk.withFile("a.txt", "hi")
-            val fallback = assertFailsWith<VfsException> { noNative.vfs.move(uri("/a.txt"), uri("/b.txt")) }
-            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, fallback.code, "无原生 move 的复制回退属 T21")
-            assertTrue(noNativeDisk.calls.none { it.startsWith("move:") }, "阶段拒绝不下探到物理移动：${noNativeDisk.calls}")
+            noNativeDisk.calls.clear()
+            val fallback = noNative.vfs.move(uri("/a.txt"), uri("/b.txt"))
+            // 先取快照：后面的断言自己也会 stat / read 盘。
+            val afterFallback = noNativeDisk.calls.toList()
 
-            assertTrue(other.calls.none { it.startsWith("move:") }, "所有阶段拒绝都没有副作用")
-            assertTrue(noNative.committedEvents().isEmpty())
+            assertEquals("hi", noNativeDisk.readText("b.txt"), "复制回退：内容复制到目标")
+            assertNull(noNativeDisk.typeOfOrNull("a.txt"), "复制回退：源被删除")
+            assertEquals(
+                listOf("stat:a.txt", "stat:b.txt", "read:a.txt", "write:b.txt", "stat:b.txt", "delete:a.txt"),
+                afterFallback,
+                "预检 stat 源与目标后进复制流程：读源 → 写目标（CREATE_NEW）→ stat 确认目标 → 删源；一次 native move 都没调",
+            )
+            assertEquals(listOf(VfsEventType.FILE_MOVED), noNative.committedEvents().map { it.type })
+            assertEquals(fallback.id, noNative.committedNodes().single().id)
+
+            assertTrue(other.calls.none { it.startsWith("move:") }, "结构保护之前不移动：${other.calls}")
+            assertTrue(noNative.committedEvents().isNotEmpty(), "复制回退发 FILE_MOVED")
         }
 
     @Test
-    fun `A03 a plain file across two mounts is refused by the orchestration before any side effect`() =
+    fun `A03 a plain file across two mounts uses copy-move and succeeds`() =
         runBlocking {
-            // 两块普通 Mount（都不是受保护配置目录，源也是普通文件）：Guard 会给出 CROSS_MOUNT_COPY_MOVE，
-            // 真正的阶段拒绝在 DefaultVfs 的策略分支——这条用例专门钉那根接线（复核 R2）。
+            // 两块普通 Mount（都不是受保护配置目录，源也是普通文件）：Guard 给出 CROSS_MOUNT_COPY_MOVE，
+            // T21 实现复制→确认→删源→提交，跨 Mount 也能成功移动。
             val parent = StorageFakeImpl()
             val child = StorageFakeImpl()
             val harness =
@@ -292,23 +304,33 @@ class DefaultVfsMoveTest {
             parent.calls.clear()
             child.calls.clear()
 
-            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/other/missing/b.txt")) }
+            val moved = harness.vfs.move(uri("/a.txt"), uri("/other/missing/b.txt"))
+            // 先取快照：后面的断言自己也会 stat / read 两块盘。
+            val onSource = parent.calls.toList()
+            val onTarget = child.calls.toList()
 
-            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, failure.code, "跨 Mount 复制移动属 T21，编排层阶段拒绝")
-            assertEquals(VfsEffect.NONE, failure.effect, "预检拒绝，零副作用")
-            assertTrue(harness.committedNodes().isEmpty(), "未登记源没有被注册")
-            assertNull(harness.nodes.findByPath(VfsPath.parse("/resources/a.txt")), "自动提交那份也没登记")
-            assertTrue(child.calls.none { it.startsWith("createDirectory") }, "目标 Mount 的父目录没被创建：${child.calls}")
-            assertTrue(
-                parent.calls.none { it.startsWith("move:") || it.startsWith("write:") || it.startsWith("delete:") },
-                "源盘没有移动 / 写入 / 删除：${parent.calls}",
+            assertEquals("hello", child.readText("missing/b.txt"), "跨 Mount：内容复制到目标")
+            assertNull(parent.typeOfOrNull("a.txt"), "跨 Mount：源被删除")
+            assertEquals(
+                listOf("stat:a.txt", "read:a.txt", "delete:a.txt"),
+                onSource,
+                "源盘只按自己的路由取 Storage 与相对路径：stat 源 → 读源 → 删源；从不 native move",
             )
-            assertTrue(
-                child.calls.none { it.startsWith("move:") || it.startsWith("write:") || it.startsWith("delete:") },
-                "目标盘没有移动 / 写入 / 删除：${child.calls}",
+            assertEquals(
+                listOf("stat:missing/b.txt", "stat:missing", "createDirectory:missing", "write:missing/b.txt", "stat:missing/b.txt"),
+                onTarget,
+                "目标盘按自己的路由确认目标全新、补父目录、CREATE_NEW 写入、再 stat 确认长度",
             )
-            assertTrue(harness.committedEvents().isEmpty(), "没有成功事件")
-            assertEquals("hello", parent.readText("a.txt"), "源内容保持")
+            assertEquals(listOf(VfsEventType.FILE_MOVED), harness.committedEvents().map { it.type })
+            assertEquals(moved.id, harness.committedNodes().single().id)
+            assertEquals(
+                "/resources/other/missing/b.txt",
+                harness
+                    .committedNodes()
+                    .single()
+                    .path
+                    .toString(),
+            )
         }
 
     @Test

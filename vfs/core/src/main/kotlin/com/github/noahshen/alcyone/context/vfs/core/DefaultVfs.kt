@@ -101,8 +101,9 @@ data class VfsLimits(
  * 例：外部直接删掉了磁盘上的 `a.dcm`，它的 Node 还有效，标签和说明照样能读能改；
  * 经 VFS 删掉之后同一个旧 ID 就报 `NOT_FOUND`，不会退化成「返回空 Metadata」。
  *
- * **本轮没交付的方法**：**目录移动、同 Mount 复制回退、跨 Mount 移动**（T21 / T22 接续）明确抛
- * [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用；同 Mount 普通文件的**原生移动**已在 T20 交付（见 [move]）。
+ * **本轮没交付的方法**：**目录移动**（T22 接续）明确抛 [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用。
+ * 普通文件移动的**三种策略**都已交付：同 Mount 原生移动（T20，见 [move]）、同 Mount 复制回退与
+ * 跨 Mount 复制移动（T21，见 [move] 与 [moveByCopy]）。
  */
 class DefaultVfs(
     /** 挂载与配置目录（T09）。 */
@@ -531,7 +532,7 @@ class DefaultVfs(
     }
 
     /**
-     * 移动一个文件（T20：同一 Mount 内的原生移动 / 重命名）。
+     * 移动一个文件（T20：同一 Mount 内的原生移动 / 重命名；T21：同 Mount 复制回退与跨 Mount 复制移动）。
      *
      * 例：`move(alcyone://resources/docs/a.txt, alcyone://resources/docs/archive/b.txt)` 把文件从 `docs`
      * 挪到 `docs/archive`（缺失的 `archive` 自动补出来），保留同一个 Node ID 与 Metadata，追加一条
@@ -544,9 +545,8 @@ class DefaultVfs(
      * 2. 结构保护：源或目标是受保护配置目录 → `UNSUPPORTED_OPERATION`；
      * 3. 路由：源或目标没有挂载覆盖 → `MOUNT_NOT_FOUND`；
      * 4. `storage.stat` 确认源**真的存在**并拿到**实际类型**（不存在 → `NOT_FOUND`）；
-     * 5. 按实际类型跑一遍 T10 预检（[OperationIntent.move]）拿到策略；目录、`COPY_FALLBACK_MOVE`、
-     *    `CROSS_MOUNT_COPY_MOVE` 一律 `UNSUPPORTED_OPERATION`（阶段拒绝，T21 / T22 接续），不把后端
-     *    支持的能力伪报为不支持；
+     * 5. 按实际类型跑一遍 T10 预检（[OperationIntent.move]）拿到策略；**目录**仍阶段拒绝（T22），
+     *    其余三种策略各走各的分支——不把后端支持的能力伪报为不支持；
      * 6. 目标**已存在**（文件或目录都算）→ `ALREADY_EXISTS`，不覆盖、不创建父目录、不把目标目录
      *    解释成「放进去」；
      * 7. 已登记源复用原 ID；未登记源先建立**一次**身份再迁移这条记录（不在目标重新生成 ID）；
@@ -582,11 +582,11 @@ class DefaultVfs(
         // 3. 路由：源和目标都必须有挂载覆盖，否则 MOUNT_NOT_FOUND。
         val sourceRoute = router.route(sourcePath) ?: throw mountNotFound(sourcePath)
         val targetRoute = router.route(targetPath) ?: throw mountNotFound(targetPath)
-        val storage = storageFor(sourceRoute)
         // 4. 确认源真的存在并拿到实际类型；不存在时 Storage 直接报 NOT_FOUND，其他错误照抛。
-        val sourceAttributes = storage.stat(sourceRoute.relativePath)
+        val sourceStorage = storageFor(sourceRoute)
+        val sourceAttributes = sourceStorage.stat(sourceRoute.relativePath)
         val actualType = sourceAttributes.type
-        // 5. 按真实类型跑预检：目录、复制回退、跨 Mount 一律阶段拒绝（T21 / T22）。
+        // 5. 按真实类型跑预检：目录仍阶段拒绝（T22）；其余三种策略由各自分支处理。
         val precondition =
             OperationGuard.check(
                 OperationIntent.move(sourcePath, targetPath, actualType),
@@ -601,31 +601,44 @@ class DefaultVfs(
                 source,
             )
         }
-        if (precondition.strategy != ExecutionStrategy.NATIVE_MOVE) {
-            throw VfsException(
-                VfsErrorCode.UNSUPPORTED_OPERATION,
-                "Cannot move '$sourcePath' to '$targetPath': only same-mount native file move is implemented yet " +
-                    "(strategy ${precondition.strategy}); the copy fallback and cross-mount move arrive in T21. " +
-                    "The call was rejected before any state or storage change.",
-                source,
-            )
+        return when (precondition.strategy) {
+            ExecutionStrategy.NATIVE_MOVE -> moveNative(source, target, sourceRoute, targetRoute, sourceStorage)
+            ExecutionStrategy.COPY_FALLBACK_MOVE ->
+                moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, sourceStorage)
+            ExecutionStrategy.CROSS_MOUNT_COPY_MOVE -> {
+                val targetStorage = storageFor(targetRoute)
+                moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, targetStorage)
+            }
+            else -> throw IllegalStateException("Unexpected move strategy: ${precondition.strategy}")
         }
-        // 6. 目标必须全新：已有普通文件或普通目录都拒绝，不覆盖、不创建父目录、不当作「放进去」。
+    }
+
+    /**
+     * 同 Mount 原生移动（T20）：预检 → 目标全新 → 身份 → 补父目录 → storage.move → 同事务提交。
+     */
+    private suspend fun moveNative(
+        source: VfsUri,
+        target: VfsUri,
+        sourceRoute: RouteMatch,
+        targetRoute: RouteMatch,
+        storage: Storage,
+    ): NodeInfo {
+        // 目标必须全新：已有普通文件或普通目录都拒绝，不覆盖、不创建父目录、不当作「放进去」。
         confirmMoveTargetAbsent(target, storage, targetRoute)
 
-        // 7. 身份：已登记源复用原 ID；未登记源按 NodeRepository 的注册语义建立一次身份（懒注册）再迁移这条记录。
-        val nodeId = ensureSourceIdentity(sourcePath)
+        // 身份：已登记源复用原 ID；未登记源按 NodeRepository 的注册语义建立一次身份（懒注册）再迁移这条记录。
+        val nodeId = ensureSourceIdentity(source.path)
 
-        // 8. 只在目标 Mount 内补缺失父目录（复用 T15 的逐层创建，不批量登记、不发目录事件）。
+        // 只在目标 Mount 内补缺失父目录（复用 T15 的逐层创建，不批量登记、不发目录事件）。
         val createdDirectories = createMissingParents(target, storage, targetRoute)
-        // 9. 物理原生移动；失败时把「已建出的父目录」合并进 effect，不把 UNKNOWN 降级成 NONE。
+        // 物理原生移动；失败时把「已建出的父目录」合并进 effect，不把 UNKNOWN 降级成 NONE。
         val moved =
             try {
                 storage.move(sourceRoute.relativePath, targetRoute.relativePath)
             } catch (failure: VfsException) {
                 throw failure.withKnownChanges(createdDirectories)
             }
-        // 10. 状态 / 事件同事务提交；物理已经移动这件事不会因为提交失败而回退。
+        // 状态 / 事件同事务提交；物理已经移动这件事不会因为提交失败而回退。
         return try {
             pipeline.commitInsideBoundary { scope -> commitMove(scope, nodeId, source, target, moved) }
         } catch (cancellation: CancellationException) {
@@ -636,6 +649,121 @@ class DefaultVfs(
             throw VfsException(
                 VfsErrorCode.STATE_ERROR,
                 "The file was moved on the backing storage but the node path and event could not be committed: " +
+                    "${failure.message ?: failure::class.java.simpleName}",
+                target,
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+    }
+
+    /**
+     * 复制回退 / 跨 Mount 文件移动（T21）：读源 → 写目标（CREATE_NEW）→ 确认目标 → 删源 → 同事务提交。
+     *
+     * 两个挂载点可能是同一块存储（复制回退），也可能是不同存储（跨 Mount）；源 / 目标各按各自路由取 Storage 与相对路径。
+     * 不调用公开 Vfs.read/write/delete，避免重复取锁、中间身份与中间事件。
+     * 读取上限不超过 Core 现有读写限额；后端更严格限制仍生效，超限报 LIMIT_EXCEEDED 并保留源。
+     * 读取成功并确认实际字节数后再补目标父目录、再写入。
+     * 写入成功后 stat 目标确认为文件，并把源 / 写入回执 / 目标长度与实际复制字节数核对；
+     * 任何确认失败或已知不一致都不继续删源；长度变化按 CONFLICT 报、后端失败保留原错误。
+     * 确认通过后才调用源 Storage.delete；删源失败不提交新映射。
+     * 删源成功但状态 / 事件提交失败报 STATE_ERROR + PARTIAL，保留 cause、不回移、不通知成功。
+     */
+    private suspend fun moveByCopy(
+        source: VfsUri,
+        target: VfsUri,
+        sourceRoute: RouteMatch,
+        targetRoute: RouteMatch,
+        sourceStorage: Storage,
+        targetStorage: Storage,
+    ): NodeInfo {
+        // 目标必须全新：已有普通文件或普通目录都拒绝，不覆盖、不创建父目录、不当作「放进去」。
+        // 跨 Mount 时用目标自己的后端确认——源盘上「没有同名文件」不代表目标盘上没有。
+        confirmMoveTargetAbsent(target, targetStorage, targetRoute)
+
+        // 身份：已登记源复用原 ID；未登记源按 NodeRepository 的注册语义建立一次身份（懒注册）再迁移这条记录。
+        val nodeId = ensureSourceIdentity(source.path)
+
+        // 1. 有界读取源文件：取 Core 现有读写限额里较小的那个（写侧也要过一遍内容），后端更严格的限制仍然生效。
+        //    读取失败（包括超限的 LIMIT_EXCEEDED）原样往上抛：源保留、目标盘连父目录都不会被补、无事件。
+        val copyLimit = minOf(limits.defaultReadMaxBytes, limits.defaultWriteMaxBytes)
+        val content = sourceStorage.read(sourceRoute.relativePath, copyLimit)
+        // 实际复制到多少字节——确认阶段要与写入回执、目标 stat 三方对齐。
+        val copiedBytes = content.bytes.size.toLong()
+
+        // 2. 补目标父目录（读取成功并确认实际字节数后）。
+        val createdDirectories = createMissingParents(target, targetStorage, targetRoute)
+
+        // 3. 写入目标：用 CREATE_NEW 防止预检后目标出现时被覆盖。
+        val written =
+            try {
+                targetStorage.write(targetRoute.relativePath, content.bytes, StorageWriteMode.CREATE_NEW)
+            } catch (failure: VfsException) {
+                // 写入失败：把已建父目录合并进 effect，源保留。CREATE_NEW 保证不会写出一份半成品。
+                throw failure.withKnownChanges(createdDirectories)
+            }
+
+        // 4. 确认目标：stat 目标确认为文件，核对长度。
+        val targetAttributes =
+            try {
+                targetStorage.stat(targetRoute.relativePath)
+            } catch (failure: VfsException) {
+                // 确认失败：源保留、目标可能已写入（后端行为），不自动删残留目标、不继续删源
+                throw VfsException(
+                    VfsErrorCode.CONFLICT,
+                    "Target confirmation failed after write for '${target.path}': ${failure.message}",
+                    target,
+                    effect = VfsEffect.PARTIAL,
+                ).apply { initCause(failure) }
+            }
+        if (targetAttributes.type != NodeType.FILE) {
+            // 目标不是文件（极罕见：并发外部把目标改成了目录），不删源、不提交
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "Target '${target.path}' is ${targetAttributes.type} after write, expected FILE",
+                target,
+                effect = VfsEffect.PARTIAL,
+            )
+        }
+        // 核对长度：写入回执、目标 stat、实际读取字节数三者一致。
+        val writtenBytes = written.sizeBytes
+        val targetBytes = targetAttributes.sizeBytes ?: 0L
+        if (copiedBytes != writtenBytes || copiedBytes != targetBytes) {
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "Length mismatch after copy for '${target.path}': read=$copiedBytes written=$writtenBytes targetStat=$targetBytes",
+                target,
+                effect = VfsEffect.PARTIAL,
+            )
+        }
+
+        // 5. 删除源：确认通过后才删源。确认不过的任何一条路径都在上面抛出去了，永远走不到这里。
+        try {
+            sourceStorage.delete(sourceRoute.relativePath, recursive = false)
+        } catch (failure: VfsException) {
+            // 删源失败：源与目标可能都在、逻辑路径仍指向源、不提交新映射。
+            // effect 从后端自己的（可能是 NONE）提到 PARTIAL：目标确实已经写出来了，这是已知变更。
+            throw VfsException(
+                VfsErrorCode.STORAGE_ERROR,
+                "Source delete failed after successful copy for '${source.path}': ${failure.message}",
+                source,
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+
+        // 6. 状态 / 事件同事务提交：更新 Node 路径、追加 FILE_MOVED。
+        // 物理已完成（目标有内容、源已删），提交失败报 STATE_ERROR + PARTIAL，不回移、不发成功通知。
+        return try {
+            pipeline.commitInsideBoundary { scope ->
+                commitMove(scope, nodeId, source, target, written)
+            }
+        } catch (cancellation: CancellationException) {
+            // 取消原样传播。物理已变更（目标有文件、源已删）这件事不会因为取消而消失。
+            throw cancellation
+        } catch (failure: Exception) {
+            // 只收普通异常：JVM 的 Error（OOM、StackOverflow）不是状态库拒绝了一条记录，原样抛出去。
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The file was copied and source deleted but the node path and event could not be committed: " +
                     "${failure.message ?: failure::class.java.simpleName}",
                 target,
                 effect = VfsEffect.PARTIAL,

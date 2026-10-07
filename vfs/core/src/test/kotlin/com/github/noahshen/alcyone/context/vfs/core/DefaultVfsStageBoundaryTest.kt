@@ -46,7 +46,7 @@ class DefaultVfsStageBoundaryTest {
             val dir = VfsUri.parse("alcyone://resources/dir")
             val dir2 = VfsUri.parse("alcyone://resources/dir2")
 
-            // 同 Mount 文件移动已在 T20 交付，这里改钉仍属阶段拒绝的两类：目录移动（T22）与复制回退（T21）。
+            // 阶段拒绝现在只剩**目录移动**（T22）：同 Mount 原生移动（T20）与复制回退 / 跨 Mount（T21）都已交付。
             val directory = assertFailsWith<VfsException>("move directory") { harness.vfs.move(dir, dir2) }
             assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, directory.code, "目录移动还没交付，明确拒绝，不静默成功")
             assertEquals(VfsEffect.NONE, directory.effect, "拒绝时零副作用")
