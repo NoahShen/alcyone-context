@@ -108,20 +108,19 @@ class AlcyoneVfs private constructor(
      *   close() 只 `await()` 它，绝不去 cancel 它——用 Job 的话，`cancel()` 会让它立刻变成已完成，
      *   等待就成了空等，数据库在清理还没跑完时就被关掉了。
      * - [work] 是「这次调用真正在干活的那个子协程」，close() 的取消请求发给它。
-     *   它晚一点才有值（要在 coroutineScope 里拿到自己的 Job），所以用 `CompletableDeferred` 兜一下：
-     *   关闭来得比赋值早时，[InFlightOp.cancelWork] 会记住这笔账，等 Job 一到位就补上取消。
+     *   它晚一点才有值（要在 coroutineScope 里拿到自己的 Job），所以配一个 `cancelPending`：
+     *   关闭来得比赋值早时，[InFlightOp.cancelWork] 把请求记在账上，等 Job 一到位就补上取消。
      *
-     * 登记 work 与检查 cancelPending 在同一个临界区完成，保证「先取消后登记」不丢请求。
+     * `work` 与 `cancelPending` 都在同一把 [lock] 下读写，保证「先取消后登记」不丢请求；
+     * 两者都是普通字段（不加 `@Volatile`），可见性由同一把锁保证。
      */
     internal class InFlightOp {
         private val lock = Any()
 
-        /** 这次调用自己的子协程；还在建时是 null，建好后立刻填上。 */
-        @Volatile
+        /** 这次调用自己的子协程；还在建时是 null，建好后立刻填上。与 [cancelPending] 同锁保护。 */
         private var work: Job? = null
 
         /** 关闭已经请求过取消、但 work 还没到位时记下来，等 work 填上时补一次。 */
-        @Volatile
         private var cancelPending: CancellationException? = null
 
         /** 彻底结束的信号（含失败清理）。只有调用自己的 finally 能完成它，外部 cancel 不了。 */

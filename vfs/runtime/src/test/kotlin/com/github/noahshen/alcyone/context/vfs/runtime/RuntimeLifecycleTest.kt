@@ -8,10 +8,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -172,32 +174,41 @@ class RuntimeLifecycleTest {
             }
             vfs.beforeWaitingForInFlight = { closeWaiting.complete(Unit) }
 
+            // 钩子先设好再启动 caller：UNDISPATCHED 会立刻跑 vfs.list，钩子晚设就错过 entered。
             // 调用方协程挂在一个专门创建、未主动完成的父 Job 下，用来验证取消不会顺着冒到父 Job。
             val parentJob = Job()
             val caller =
                 CoroutineScope(coroutineContext + parentJob).async(start = CoroutineStart.UNDISPATCHED) {
                     runCatching { vfs.list(VfsUri.parse("alcyone://resources")) }
                 }
-            withTimeout(30_000) { entered.await() }
-
-            val closing = async(kotlinx.coroutines.Dispatchers.Default) { vfs.close() }
-            withTimeout(30_000) { closeWaiting.await() } // 确定 close 已发取消、进入等收尾
-
+            var closing: Deferred<Unit>? = null
             try {
-                // 给 2 秒等待实际工作收到取消；如果 cancelWork 没起作用，这里超时抛错并进入 catch
-                withTimeout(2_000) { cancelled.await() }
-            } catch (t: Throwable) {
-                // 如果实际工作没被取消，主动取消它并释放，让测试失败并顺利退出，避免卡死
-                caller.cancel()
-                closing.cancel()
-                throw AssertionError("实际工作未收到取消！变异被咬住: $t")
-            }
-            // 直接检查这个专门创建、未主动完成的父 Job：仍 active 且未 cancelled。
-            // 不能写成「父 Job 已取消但子任务已结束也算过」——那种写法证明不了「不影响宿主父 Job」。
-            assertTrue(parentJob.isActive && !parentJob.isCancelled, "宿主的父 Job 不该被取消传播打挂：$parentJob")
+                withTimeout(30_000) { entered.await() }
 
-            withTimeout(10_000) { closing.await() }
-            withTimeout(10_000) { caller.join() }
+                closing = async(kotlinx.coroutines.Dispatchers.Default) { vfs.close() }
+                withTimeout(30_000) { closeWaiting.await() } // 确定 close 已发取消、进入等收尾
+
+                try {
+                    // 给 2 秒等待实际工作收到取消；如果 cancelWork 没起作用，这里超时抛错并进入 catch
+                    withTimeout(2_000) { cancelled.await() }
+                } catch (t: Throwable) {
+                    // 如果实际工作没被取消，主动取消它并释放，让测试失败并顺利退出，避免卡死
+                    caller.cancel()
+                    closing.cancel()
+                    throw AssertionError("实际工作未收到取消！变异被咬住: $t")
+                }
+                // 直接检查这个专门创建、未主动完成的父 Job：仍 active 且未 cancelled。
+                // 不能写成「父 Job 已取消但子任务已结束也算过」——那种写法证明不了「不影响宿主父 Job」。
+                assertTrue(parentJob.isActive && !parentJob.isCancelled, "宿主的父 Job 不该被取消传播打挂：$parentJob")
+
+                withTimeout(10_000) { closing.await() }
+                withTimeout(10_000) { caller.join() }
+            } finally {
+                // 断言就算失败也把这次调用、它的父 Job 与 close 停干净，不留悬挂协程。
+                closing?.cancelAndJoin()
+                caller.cancelAndJoin()
+                parentJob.cancel()
+            }
             Unit
         }
 
