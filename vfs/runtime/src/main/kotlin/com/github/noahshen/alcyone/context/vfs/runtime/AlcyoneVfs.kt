@@ -110,12 +110,18 @@ class AlcyoneVfs private constructor(
      * - [work] 是「这次调用真正在干活的那个子协程」，close() 的取消请求发给它。
      *   它晚一点才有值（要在 coroutineScope 里拿到自己的 Job），所以用 `CompletableDeferred` 兜一下：
      *   关闭来得比赋值早时，[InFlightOp.cancelWork] 会记住这笔账，等 Job 一到位就补上取消。
+     *
+     * 登记 work 与检查 cancelPending 在同一个临界区完成，保证「先取消后登记」不丢请求。
      */
-    private class InFlightOp {
+    internal class InFlightOp {
+        private val lock = Any()
+
         /** 这次调用自己的子协程；还在建时是 null，建好后立刻填上。 */
+        @Volatile
         private var work: Job? = null
 
         /** 关闭已经请求过取消、但 work 还没到位时记下来，等 work 填上时补一次。 */
+        @Volatile
         private var cancelPending: CancellationException? = null
 
         /** 彻底结束的信号（含失败清理）。只有调用自己的 finally 能完成它，外部 cancel 不了。 */
@@ -123,22 +129,27 @@ class AlcyoneVfs private constructor(
 
         /** 把这次调用的子协程挂上来；如果之前已经请求过取消，当场补发。 */
         fun attachWork(job: Job) {
-            work = job
-            cancelPending?.let { job.cancel(it) }
+            val pending =
+                synchronized(lock) {
+                    work = job
+                    cancelPending.also { cancelPending = null }
+                }
+            pending?.let { job.cancel(it) }
         }
 
         /** 请求取消这次工作。[job] 是这次调用自己的子协程，不是宿主的父 Job。 */
         fun cancelWork(reason: CancellationException) {
-            val target = work
-            if (target == null) {
-                cancelPending = reason
-                return
-            }
-            target.cancel(reason)
+            val target =
+                synchronized(lock) {
+                    val current = work
+                    if (current == null) cancelPending = reason
+                    current
+                }
+            target?.cancel(reason)
         }
     }
 
-/** 已经交到调用者手上的流。调用者忘了关的，close() 替它收。 */
+    /** 已经交到调用者手上的流。调用者忘了关的，close() 替它收。 */
     private val openStreams = ConcurrentHashMap.newKeySet<VfsStreamResult>()
 
     /** 同模块测试用的挂钩：公共操作真正开跑之前调一次（参数是操作名）。生产代码不设置。 */

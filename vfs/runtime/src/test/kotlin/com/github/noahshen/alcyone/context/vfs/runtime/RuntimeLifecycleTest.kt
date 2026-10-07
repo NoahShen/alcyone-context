@@ -159,7 +159,6 @@ class RuntimeLifecycleTest {
             val entered = CompletableDeferred<Unit>()
             val cancelled = CompletableDeferred<Unit>()
             val closeWaiting = CompletableDeferred<Unit>()
-            val parent = CompletableDeferred<Unit>()
 
             val vfs = AlcyoneVfs.create(config(closeGracePeriod = Duration.ZERO))
             vfs.beforeOperation = {
@@ -173,7 +172,7 @@ class RuntimeLifecycleTest {
             }
             vfs.beforeWaitingForInFlight = { closeWaiting.complete(Unit) }
 
-            // 调用方协程挂在一个父 Job 下，用来验证取消不会顺着冒到父 Job。
+            // 调用方协程挂在一个专门创建、未主动完成的父 Job 下，用来验证取消不会顺着冒到父 Job。
             val parentJob = Job()
             val caller =
                 CoroutineScope(coroutineContext + parentJob).async(start = CoroutineStart.UNDISPATCHED) {
@@ -193,11 +192,12 @@ class RuntimeLifecycleTest {
                 closing.cancel()
                 throw AssertionError("实际工作未收到取消！变异被咬住: $t")
             }
-            assertTrue(parentJob.isActive || parentJob.children.none { it.isActive }, "宿主的父 Job 不该被取消传播打挂：$parentJob")
+            // 直接检查这个专门创建、未主动完成的父 Job：仍 active 且未 cancelled。
+            // 不能写成「父 Job 已取消但子任务已结束也算过」——那种写法证明不了「不影响宿主父 Job」。
+            assertTrue(parentJob.isActive && !parentJob.isCancelled, "宿主的父 Job 不该被取消传播打挂：$parentJob")
 
             withTimeout(10_000) { closing.await() }
             withTimeout(10_000) { caller.join() }
-            parent.complete(Unit)
             Unit
         }
 
