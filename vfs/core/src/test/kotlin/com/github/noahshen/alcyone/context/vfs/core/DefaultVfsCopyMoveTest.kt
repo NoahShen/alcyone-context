@@ -423,17 +423,22 @@ class DefaultVfsCopyMoveTest {
             assertEquals(NodeType.DIRECTORY, target.typeOfOrNull("sub"), "补出的父目录留在目标盘上，不自动回删")
             assertNull(target.typeOfOrNull("sub/b.txt"), "目标文件没写成")
             assertEquals("hello", source.readText("a.txt"), "源保留")
-            assertTrue(target.calls.none { it.startsWith("delete:") }, "写失败绝不删源：${target.calls}")
+            // 源侧断言：写失败时源 Storage.delete 一次都没被调用（只查目标盘的 deleteCalls 不能证明这一点）。
+            assertTrue(source.calls.none { it.startsWith("delete:") }, "写失败绝不删源：${source.calls}")
             assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() })
             assertTrue(harness.committedEvents().isEmpty())
         }
 
-    /** A04：确认失败（写入之后的目标 stat 报错）→ CONFLICT，源保留、残留目标不自动删除、不提交。 */
+    /**
+     * A04 / R1：确认阶段的目标 `stat` 报非 `STORAGE_ERROR` 的后端错误时，**原样保留后端 code / effect**，
+     * 只把 `NONE` 提到 `PARTIAL`；不把任何确认异常一律改写成 `CONFLICT`。
+     */
     @Test
-    fun `A04 a target confirmation failure keeps the source and leaves the written target behind`() =
+    fun `A04 a target confirmation failure preserves the backend code and only upgrades NONE to PARTIAL`() =
         runBlocking {
             val source = StorageFakeImpl()
-            val target = ConfirmingStorage(StorageFakeImpl())
+            val backendFailure = VfsException(VfsErrorCode.STORAGE_ACCESS_DENIED, "permission revoked while confirming")
+            val target = ConfirmingStorage(StorageFakeImpl(), backendFailure)
             val harness = crossMountHarness(source, target)
             source.withFile("a.txt", "hello")
             val original = harness.seedNode("/resources/a.txt")
@@ -441,16 +446,42 @@ class DefaultVfsCopyMoveTest {
 
             val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt")) }
 
-            assertEquals(VfsErrorCode.CONFLICT, failure.code, "确认阶段失败按 CONFLICT 报告")
-            assertEquals(VfsEffect.PARTIAL, failure.effect, "目标已经写出来了，这是已知变更")
-            assertNotNull(failure.cause, "后端原始错误保留在 cause 上")
+            assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, failure.code, "后端 code 原样保留，不改写成 CONFLICT")
+            assertEquals(VfsEffect.PARTIAL, failure.effect, "后端声明 NONE，但目标确实已写，升到 PARTIAL")
+            assertSame(backendFailure, failure.cause, "后端原始异常保留在 cause 上")
             assertEquals("hello", source.readText("a.txt"), "确认不过就不删源")
-            assertEquals("hello", target.readText("b.txt"), "残留目标不自动删除，如实留在目标盘上")
-            assertEquals(0, target.deleteCalls, "确认失败绝不调用 delete")
-            assertEquals(1, target.statAfterWrite, "确认只发生一次：写入之后对目标本身的 stat")
+            assertTrue(source.calls.none { it.startsWith("delete:") }, "确认失败时源 delete 未被调用：${source.calls}")
+            assertEquals("hello", target.readText("b.txt"), "残留目标不自动删除")
+            assertEquals(0, target.deleteCalls, "确认失败不调用任何 delete")
+            assertEquals(1, target.statAfterWrite, "确认只发生一次")
             assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() }, "逻辑路径仍指向源")
             assertEquals(original.id, harness.committedNodes().single().id)
             assertTrue(harness.committedEvents().isEmpty(), "失败不发成功事件")
+        }
+
+    /**
+     * A04 / R1：确认阶段的目标 `stat` 报 `UNKNOWN` 时，`UNKNOWN` **不被降级**为 `PARTIAL` / `NONE`。
+     */
+    @Test
+    fun `A04 a target confirmation UNKNOWN is preserved and never downgraded`() =
+        runBlocking {
+            val source = StorageFakeImpl()
+            val backendFailure = VfsException(VfsErrorCode.STORAGE_ERROR, "connection lost while confirming", effect = VfsEffect.UNKNOWN)
+            val target = ConfirmingStorage(StorageFakeImpl(), backendFailure)
+            val harness = crossMountHarness(source, target)
+            source.withFile("a.txt", "hello")
+            harness.seedNode("/resources/a.txt")
+            source.calls.clear()
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt")) }
+
+            assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
+            assertEquals(VfsEffect.UNKNOWN, failure.effect, "后端说不清就是说不清，不改报 PARTIAL / NONE")
+            assertSame(backendFailure, failure.cause ?: failure, "后端原始异常原样抛出（cause 为空时就是它本身）")
+            assertEquals("hello", source.readText("a.txt"), "源保留")
+            assertTrue(source.calls.none { it.startsWith("delete:") }, "确认失败时源 delete 未被调用")
+            assertEquals("hello", target.readText("b.txt"), "残留目标不自动删除")
+            assertTrue(harness.committedEvents().isEmpty())
         }
 
     /** A04：确认时长度不一致（复制 5 字节、目标只有 3 字节）→ CONFLICT，源保留、残留目标留着。 */
@@ -476,6 +507,124 @@ class DefaultVfsCopyMoveTest {
             assertTrue(harness.committedEvents().isEmpty())
         }
 
+    /**
+     * A04 / R2：源预检 `stat` 说 5 字节，实际只读到 3 字节，而写入回执与目标 stat 也都是 3 字节。
+     * 只看写入 / 目标会误判通过并删源；现在源长度也参与比较 → `CONFLICT` + `PARTIAL`，源保留。
+     */
+    @Test
+    fun `A04 a source length that disagrees with the copied bytes is a known mismatch`() =
+        runBlocking {
+            val source = SourceReadTruncatingStorage(StorageFakeImpl(), reportedSize = 5, returnedBytes = 3)
+            val target = StorageFakeImpl()
+            val harness = crossMountHarness(source, target)
+            source.withFile("a.txt", "hello") // 真盘 5 字节，预检 stat 说 5，read 只交回 3
+            harness.seedNode("/resources/a.txt")
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt")) }
+
+            assertEquals(VfsErrorCode.CONFLICT, failure.code, "源已知长度与复制字节数不等，是已知矛盾")
+            assertEquals(VfsEffect.PARTIAL, failure.effect, "目标已经写了 3 字节，这是已知变更")
+            assertEquals("hello", source.readText("a.txt"), "源保留")
+            assertEquals(0, source.deleteCalls, "源长度对不上就绝不删源")
+            assertEquals(3L, diskSizeOrNull(target, "b.txt"), "目标写的是读到的 3 字节")
+            assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() })
+            assertTrue(harness.committedEvents().isEmpty())
+        }
+
+    /** A04 / R2：写入回执 `sizeBytes = null`（未知）不算冲突，不冒充 0；真盘长度一致时照常成功。 */
+    @Test
+    fun `A04 a null write receipt is unknown and does not block a consistent move`() =
+        runBlocking {
+            val source = StorageFakeImpl()
+            val target = NullReceiptStorage(StorageFakeImpl())
+            val harness = crossMountHarness(source, target)
+            source.withFile("a.txt", "hello")
+            val original = harness.seedNode("/resources/a.txt")
+
+            val info = harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt"))
+
+            assertEquals(original.id, info.id, "写入回执长度缺失不阻碍一致的移动")
+            assertEquals("hello", target.readText("b.txt"), "内容照常搬到目标")
+            assertNull(source.typeOfOrNull("a.txt"), "源已删")
+            assertEquals(listOf(VfsEventType.FILE_MOVED), harness.committedEvents().map { it.type })
+        }
+
+    /** A04 / R2：目标 `stat` 长度缺失（未知）不算冲突、也不被当成 0；其他已知长度一致时照常成功。 */
+    @Test
+    fun `A04 a null target stat length is unknown and does not block a consistent move`() =
+        runBlocking {
+            val source = StorageFakeImpl()
+            val target = NullTargetStatStorage(StorageFakeImpl())
+            val harness = crossMountHarness(source, target)
+            source.withFile("a.txt", "hello")
+            val original = harness.seedNode("/resources/a.txt")
+
+            val info = harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt"))
+
+            assertEquals(original.id, info.id, "目标长度缺失不阻碍一致的移动")
+            assertEquals("hello", target.readText("b.txt"))
+            assertNull(source.typeOfOrNull("a.txt"))
+            assertEquals(listOf(VfsEventType.FILE_MOVED), harness.committedEvents().map { it.type })
+        }
+
+    /** A04 / R2：空文件边界（0 字节）不因长度比对误判，可正常移动。 */
+    @Test
+    fun `A04 an empty file moves across mounts under the length check`() =
+        runBlocking {
+            val source = StorageFakeImpl()
+            val target = StorageFakeImpl()
+            val harness = crossMountHarness(source, target)
+            source.withFile("a.txt", "")
+            val original = harness.seedNode("/resources/a.txt")
+
+            val info = harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt"))
+
+            assertEquals(original.id, info.id)
+            assertEquals("", target.readText("b.txt"), "空文件目标也是空")
+            assertNull(source.typeOfOrNull("a.txt"))
+            assertEquals(listOf(VfsEventType.FILE_MOVED), harness.committedEvents().map { it.type })
+        }
+
+    /**
+     * A04 / R3：写入**部分完成后**抛带 `PARTIAL` 的异常——目标留下半成品，源保留，
+     * 源 `Storage.delete` 未被调用，原映射 / Metadata 保留，无成功事件，不自动清目标。
+     * CREATE_NEW 只表达「不覆盖已有目标」，不承诺写入原子性。
+     */
+    @Test
+    fun `A04 a write that leaves a partial target then throws keeps the source and never deletes it`() =
+        runBlocking {
+            val source = StorageFakeImpl()
+            val backendFailure =
+                VfsException(VfsErrorCode.STORAGE_ERROR, "connection dropped after a partial write", effect = VfsEffect.PARTIAL)
+            val target = PartialWriteStorage(StorageFakeImpl(), writtenBytes = 3, failure = backendFailure)
+            val harness = crossMountHarness(source, target)
+            source.withFile("a.txt", "hello")
+            val original = harness.seedNode("/resources/a.txt")
+            harness.seedMetadata(original.id, NodeMetadata(description = "keep"))
+            source.calls.clear()
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt")) }
+
+            assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
+            assertEquals(VfsEffect.PARTIAL, failure.effect, "后端自己声明的 PARTIAL 原样保留")
+            assertSame(backendFailure, failure.cause ?: failure, "后端原始异常原样抛出（cause 为空时就是它本身）")
+            assertEquals(3L, target.fileSizeOrNull("b.txt"), "目标留下半成品（3 字节），不自动清理")
+            assertEquals("hello", source.readText("a.txt"), "源内容完整保留")
+            assertTrue(source.calls.none { it.startsWith("delete:") }, "写入部分完成后抛错也绝不删源：${source.calls}")
+            assertEquals(0, target.deleteCalls, "不调用任何 delete 去清目标")
+            assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() }, "原映射保留")
+            assertEquals(original.id, harness.committedNodes().single().id)
+            assertEquals(NodeMetadata(description = "keep"), harness.uow.snapshot().second[original.id], "Metadata 保留")
+            assertTrue(harness.committedEvents().isEmpty(), "无成功事件")
+        }
+
+    /** 读回内存盘上真实文件长度；目标缺失返回 null。 */
+    private suspend fun diskSizeOrNull(
+        storage: StorageFakeImpl,
+        relativePath: String,
+    ): Long? =
+        storage.typeOfOrNull(relativePath)?.let { storage.read(StoragePath.parse(relativePath), Long.MAX_VALUE).attributes.sizeBytes }
+
     /** A05：删源失败 → 逻辑路径仍指向源、没有成功事件，两份文件都在盘上。 */
     @Test
     fun `A05 a source delete failure after a good copy keeps the logical mapping at the source`() =
@@ -499,6 +648,54 @@ class DefaultVfsCopyMoveTest {
             assertEquals(original.id, harness.committedNodes().single().id)
             assertEquals(NodeMetadata(description = "keep"), harness.uow.snapshot().second[original.id])
             assertTrue(harness.committedEvents().isEmpty(), "删源失败没有成功事件")
+        }
+
+    /**
+     * A05 / R1：删源抛**非 `STORAGE_ERROR`** 的后端错误时，保留后端 code，仅把 `NONE` 提到 `PARTIAL`；
+     * 不把任何删源异常一律改写成 `STORAGE_ERROR`。
+     */
+    @Test
+    fun `A05 a source delete failure preserves the backend code and only upgrades NONE to PARTIAL`() =
+        runBlocking {
+            val source = StorageFakeImpl()
+            val target = StorageFakeImpl()
+            val harness = crossMountHarness(source, target)
+            source.withFile("a.txt", "hello")
+            harness.seedNode("/resources/a.txt")
+            val backendFailure = VfsException(VfsErrorCode.STORAGE_ACCESS_DENIED, "source is protected against deletion")
+            source.failures.onDelete = backendFailure
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt")) }
+
+            assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, failure.code, "后端 code 原样保留，不改写成 STORAGE_ERROR")
+            assertEquals(VfsEffect.PARTIAL, failure.effect, "后端声明 NONE，但目标确实已写，升到 PARTIAL")
+            assertSame(backendFailure, failure.cause)
+            assertEquals("hello", source.readText("a.txt"), "源还在")
+            assertEquals("hello", target.readText("b.txt"), "目标已写")
+            assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() }, "逻辑路径仍指向源")
+            assertTrue(harness.committedEvents().isEmpty())
+        }
+
+    /** A05 / R1：删源报 `UNKNOWN` 时，`UNKNOWN` 不被降级为 `PARTIAL` / `NONE`。 */
+    @Test
+    fun `A05 a source delete UNKNOWN is preserved and never downgraded`() =
+        runBlocking {
+            val source = StorageFakeImpl()
+            val target = StorageFakeImpl()
+            val harness = crossMountHarness(source, target)
+            source.withFile("a.txt", "hello")
+            harness.seedNode("/resources/a.txt")
+            val backendFailure = VfsException(VfsErrorCode.STORAGE_ERROR, "connection lost mid delete", effect = VfsEffect.UNKNOWN)
+            source.failures.onDelete = backendFailure
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt")) }
+
+            assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
+            assertEquals(VfsEffect.UNKNOWN, failure.effect, "后端说不清就是说不清，不改报 PARTIAL / NONE")
+            assertSame(backendFailure, failure.cause ?: failure, "后端原始异常原样抛出（cause 为空时就是它本身）")
+            assertEquals("hello", source.readText("a.txt"), "源还在")
+            assertEquals("hello", target.readText("b.txt"), "目标已写")
+            assertTrue(harness.committedEvents().isEmpty())
         }
 
     /** A05：删源成功但状态 / 事件提交失败 → STATE_ERROR + PARTIAL，保留 cause、不回移、不通知成功。 */
@@ -701,11 +898,13 @@ class DefaultVfsCopyMoveTest {
     }
 
     /**
-     * 包一层存储：写入真正落盘之后，让**确认阶段**（写入之后对目标本身的 stat）报错。
+     * 包一层存储：写入真正落盘之后，让**确认阶段**（写入之后对目标本身的 stat）抛 [failure]。
      * 用来造「目标已写、确认失败」的受控反例——真实磁盘不会恰好在确认那一刻停住。
+     * 失败异常由调用方给，以便分别验证后端 `code` / `effect` 被原样保留（R1）。
      */
     private class ConfirmingStorage(
         private val delegate: StorageFakeImpl,
+        private val failure: VfsException,
     ) : Storage by delegate {
         private var written = false
         var deleteCalls: Int = 0
@@ -726,7 +925,7 @@ class DefaultVfsCopyMoveTest {
         override suspend fun stat(path: StoragePath): StorageAttributes {
             if (written && path.toRelativeString() == "b.txt") {
                 statAfterWrite++
-                throw VfsException(VfsErrorCode.STORAGE_ERROR, "target confirmation could not read the backend")
+                throw failure
             }
             return delegate.stat(path)
         }
@@ -738,6 +937,122 @@ class DefaultVfsCopyMoveTest {
             deleteCalls++
             delegate.delete(path, recursive)
         }
+
+        fun readText(path: String): String = delegate.readText(path)
+    }
+
+    /**
+     * 包一层存储：写入**部分内容到真盘后抛错**——模拟 CREATE_NEW 也不能保证的「写入部分完成后失败」（R3）。
+     * 抛出的异常带调用方给的 `code / effect`，断言目标残留、源 `delete` 未被调用。
+     */
+    private class PartialWriteStorage(
+        private val delegate: StorageFakeImpl,
+        private val writtenBytes: Int,
+        private val failure: VfsException,
+    ) : Storage by delegate {
+        var deleteCalls: Int = 0
+            private set
+
+        override suspend fun write(
+            path: StoragePath,
+            content: ByteArray,
+            mode: StorageWriteMode,
+        ): StorageAttributes {
+            // 先真的写下一部分（走真后端），再报错；目标因此留下半成品。
+            delegate.write(path, content.copyOf(minOf(writtenBytes, content.size)), mode)
+            throw failure
+        }
+
+        override suspend fun delete(
+            path: StoragePath,
+            recursive: Boolean,
+        ) {
+            deleteCalls++
+            delegate.delete(path, recursive)
+        }
+
+        suspend fun fileSizeOrNull(path: String): Long? =
+            delegate.typeOfOrNull(path)?.let { delegate.read(StoragePath.parse(path), Long.MAX_VALUE).attributes.sizeBytes }
+    }
+
+    /**
+     * 包一层存储：`stat` 报 [reportedSize]，但 `read` 只交回 [returnedBytes] 字节。
+     * 用来造「源预检说 5 字节、实际只读到 3 字节」的已知长度矛盾（R2）。
+     */
+    private class SourceReadTruncatingStorage(
+        private val delegate: StorageFakeImpl,
+        private val reportedSize: Long,
+        private val returnedBytes: Int,
+    ) : Storage by delegate {
+        var deleteCalls: Int = 0
+            private set
+
+        override suspend fun stat(path: StoragePath): StorageAttributes =
+            delegate.stat(path).let { if (it.type == NodeType.FILE) it.copy(sizeBytes = reportedSize) else it }
+
+        override suspend fun read(
+            path: StoragePath,
+            maxBytes: Long,
+        ): StorageContent {
+            val content = delegate.read(path, maxBytes)
+            return StorageContent(content.bytes.copyOf(returnedBytes), content.attributes.copy(sizeBytes = returnedBytes.toLong()))
+        }
+
+        override suspend fun delete(
+            path: StoragePath,
+            recursive: Boolean,
+        ) {
+            deleteCalls++
+            delegate.delete(path, recursive)
+        }
+
+        fun withFile(
+            path: String,
+            content: String,
+        ) {
+            delegate.withFile(path, content)
+        }
+
+        fun readText(path: String): String = delegate.readText(path)
+    }
+
+    /**
+     * 包一层存储：写入后 `write` 回执报 `sizeBytes = null`（未知），但真盘上的长度照旧。
+     * 用来证明「写入回执长度缺失」不等于冲突，不冒充 0（R2）。
+     */
+    private class NullReceiptStorage(
+        private val delegate: StorageFakeImpl,
+    ) : Storage by delegate {
+        override suspend fun write(
+            path: StoragePath,
+            content: ByteArray,
+            mode: StorageWriteMode,
+        ): StorageAttributes = delegate.write(path, content, mode).copy(sizeBytes = null)
+
+        fun readText(path: String): String = delegate.readText(path)
+    }
+
+    /**
+     * 包一层存储：写入后目标 `stat` 报 `sizeBytes = null`（未知），其他字段照旧。
+     * 用来证明「目标长度缺失」不等于冲突、也不被当成 0（R2）。预检那次 stat 不受影响。
+     */
+    private class NullTargetStatStorage(
+        private val delegate: StorageFakeImpl,
+    ) : Storage by delegate {
+        private var written = false
+
+        override suspend fun write(
+            path: StoragePath,
+            content: ByteArray,
+            mode: StorageWriteMode,
+        ): StorageAttributes {
+            val attributes = delegate.write(path, content, mode)
+            written = true
+            return attributes
+        }
+
+        override suspend fun stat(path: StoragePath): StorageAttributes =
+            delegate.stat(path).let { if (written && it.type == NodeType.FILE) it.copy(sizeBytes = null) else it }
 
         fun readText(path: String): String = delegate.readText(path)
     }

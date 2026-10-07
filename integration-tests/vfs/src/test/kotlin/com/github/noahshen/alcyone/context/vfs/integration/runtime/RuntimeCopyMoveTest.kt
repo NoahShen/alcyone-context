@@ -119,10 +119,15 @@ class RuntimeCopyMoveTest {
             }
         }
 
-    /** A01：跨 Mount 移动是「复制 + 删源」，两块盘背后都是 Local FS 也不改用 rename。 */
+    /**
+     * A01：跨 Mount 移动在第二块盘上真的留下内容、源盘消失、只补出目标父目录。
+     *
+     * 注意：本用例**不**声称「排除 rename」——两个本地目录未必是两个文件系统，存在、内容与目录列表
+     * 都不能区分 rename 与复制删除。策略证据用 `DefaultVfsCopyMoveTest` 里的 Core 后端调用记录（`nativeMoveCalls == 0`）。
+     */
     @Test
     @Timeout(60)
-    fun `A01 the cross mount move creates a real copy on the second disk instead of renaming`() =
+    fun `A01 the cross mount move leaves a real file on the second disk and removes it from the source`() =
         runBlocking {
             prepare()
             withVfs(config()) { vfs ->
@@ -130,7 +135,6 @@ class RuntimeCopyMoveTest {
 
                 vfs.move(sourceUri("/a.txt"), archiveUri("/nested/b.txt"))
 
-                // rename 的话两块盘上只会有一个 inode；复制删除则是第二块盘上多出一个独立文件。
                 assertTrue(Files.exists(archive.resolve("nested/b.txt")), "第二块盘上真的有这个文件")
                 assertEquals("copy me", Files.readString(archive.resolve("nested/b.txt")))
                 assertFalse(Files.exists(source.resolve("a.txt")), "第一块盘上原位置已经没有它了")

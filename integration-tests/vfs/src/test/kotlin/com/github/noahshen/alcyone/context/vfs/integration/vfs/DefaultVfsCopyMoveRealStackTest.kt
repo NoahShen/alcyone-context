@@ -155,7 +155,8 @@ class DefaultVfsCopyMoveRealStackTest {
     fun `A04 a real target write failure keeps the source and leaves the created parents on the second disk`() =
         runBlocking {
             Files.writeString(leftRoot.resolve("note.txt"), "hello")
-            withStack(wrapRight = { FailingWriteStorage(it) }) { stack ->
+            withStack(wrapLeft = { CountingDeleteStorage(it) }, wrapRight = { FailingWriteStorage(it) }) { stack ->
+                val left = stack.storages.getValue("left") as CountingDeleteStorage
                 val failure = assertFailsWith<VfsException> { stack.vfs.move(uri("/local/note.txt"), uri("/archive/sub/note.txt")) }
 
                 assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code, "保留后端原始错误码")
@@ -163,6 +164,7 @@ class DefaultVfsCopyMoveRealStackTest {
                 assertTrue(Files.isDirectory(rightRoot.resolve("sub")), "补出的父目录留在真盘上，不自动回删")
                 assertFalse(Files.exists(rightRoot.resolve("sub/note.txt")), "目标文件没写成")
                 assertTrue(Files.exists(leftRoot.resolve("note.txt")), "源文件在第一块盘上原封不动")
+                assertEquals(0, left.deleteCalls, "源侧 delete 一次都没被调用（只查目标盘不能证明这一点）")
                 assertEquals(0, eventCount(), "失败不发移动事件")
             }
         }
@@ -492,6 +494,25 @@ class DefaultVfsCopyMoveRealStackTest {
                 }
             }
         }
+}
+
+/**
+ * 包一层存储：只数 [Storage.delete] 被调用几次，其余全部转发。
+ * 用来把「源侧 delete 未被调用」断言落在源盘上，而不是只查目标盘。
+ */
+private class CountingDeleteStorage(
+    private val delegate: Storage,
+) : Storage by delegate {
+    var deleteCalls: Int = 0
+        private set
+
+    override suspend fun delete(
+        path: StoragePath,
+        recursive: Boolean,
+    ) {
+        deleteCalls++
+        delegate.delete(path, recursive)
+    }
 }
 
 /**

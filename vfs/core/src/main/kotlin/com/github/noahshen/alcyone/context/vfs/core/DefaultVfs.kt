@@ -538,8 +538,9 @@ class DefaultVfs(
      * 挪到 `docs/archive`（缺失的 `archive` 自动补出来），保留同一个 Node ID 与 Metadata，追加一条
      * `FILE_MOVED`；旧路径随即 `NOT_FOUND`，在旧路径另建文件会拿到新 ID。
      *
-     * 顺序契约：纯参数、已知结构 / 阶段等**预检**拒绝发生在注册源、建目录、物理移动**之前**；
-     * 第 7 步的源懒注册与第 8 步的补父目录是真实副作用，它们之后的失败按 T15 的 effect 合并规则如实报告（不声称全部零副作用）：
+     * 顺序契约：**纯参数、已知结构 / 阶段、只读、目标已存在等预检**拒绝发生在注册源、建目录、物理移动**之前**；
+     * 但预检之后的**源懒注册**与**逐层补父目录**本身就是真实副作用，它们之后的任何失败（含复制路径的读 / 写 / 确认 / 删源）
+     * 都按 T15 的 effect 合并规则如实报告，**不声称「拒绝一律零副作用」**：
      *
      * 1. 纯参数冲突：源和目标同路径、目标落进源子树 → `INVALID_ARGUMENT`（T02 §8.2「参数错误优先」）；
      * 2. 结构保护：源或目标是受保护配置目录 → `UNSUPPORTED_OPERATION`；
@@ -567,7 +568,10 @@ class DefaultVfs(
         return boundary.withLock { moveInsideBoundary(source, target) }
     }
 
-    /** 移动的锁内部分：预检拒绝先于副作用，物理移动与状态提交分开报告；懒注册 / 补目录之后的失败按 effect 合并如实上报。 */
+    /**
+     * 移动的锁内部分：纯参数 / 结构 / 路由 / 只读 / 目标已存在等**预检**拒绝先于注册源、补目录、物理复制或移动；
+     * 预检之后源懒注册与逐层建目录已是真实副作用，后续失败按 effect 合并如实上报（不声称「拒绝一律零副作用」）。
+     */
     private suspend fun moveInsideBoundary(
         source: VfsUri,
         target: VfsUri,
@@ -604,10 +608,10 @@ class DefaultVfs(
         return when (precondition.strategy) {
             ExecutionStrategy.NATIVE_MOVE -> moveNative(source, target, sourceRoute, targetRoute, sourceStorage)
             ExecutionStrategy.COPY_FALLBACK_MOVE ->
-                moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, sourceStorage)
+                moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, sourceStorage, sourceAttributes)
             ExecutionStrategy.CROSS_MOUNT_COPY_MOVE -> {
                 val targetStorage = storageFor(targetRoute)
-                moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, targetStorage)
+                moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, targetStorage, sourceAttributes)
             }
             else -> throw IllegalStateException("Unexpected move strategy: ${precondition.strategy}")
         }
@@ -663,8 +667,11 @@ class DefaultVfs(
      * 不调用公开 Vfs.read/write/delete，避免重复取锁、中间身份与中间事件。
      * 读取上限不超过 Core 现有读写限额；后端更严格限制仍生效，超限报 LIMIT_EXCEEDED 并保留源。
      * 读取成功并确认实际字节数后再补目标父目录、再写入。
-     * 写入成功后 stat 目标确认为文件，并把源 / 写入回执 / 目标长度与实际复制字节数核对；
-     * 任何确认失败或已知不一致都不继续删源；长度变化按 CONFLICT 报、后端失败保留原错误。
+     * 写入成功后 stat 目标确认为文件，把**所有可用长度**（源预检 stat、读取回执、写入回执、目标 stat）
+     * 与实际复制字节数核对；已知长度中任意一个不等就报 CONFLICT，不继续删源。
+     * 长度缺失（null）表示「未知」，不参与比较、不等于 0。
+     * 确认 / 删源遇到后端错误时**保留后端原始 code / effect（含 UNKNOWN）**，仅把 effect 由 NONE 提到 PARTIAL；
+     * 只有已观测到的类型 / 长度矛盾才用 CONFLICT。
      * 确认通过后才调用源 Storage.delete；删源失败不提交新映射。
      * 删源成功但状态 / 事件提交失败报 STATE_ERROR + PARTIAL，保留 cause、不回移、不通知成功。
      */
@@ -675,6 +682,7 @@ class DefaultVfs(
         targetRoute: RouteMatch,
         sourceStorage: Storage,
         targetStorage: Storage,
+        sourcePrecheck: StorageAttributes,
     ): NodeInfo {
         // 目标必须全新：已有普通文件或普通目录都拒绝，不覆盖、不创建父目录、不当作「放进去」。
         // 跨 Mount 时用目标自己的后端确认——源盘上「没有同名文件」不代表目标盘上没有。
@@ -687,33 +695,30 @@ class DefaultVfs(
         //    读取失败（包括超限的 LIMIT_EXCEEDED）原样往上抛：源保留、目标盘连父目录都不会被补、无事件。
         val copyLimit = minOf(limits.defaultReadMaxBytes, limits.defaultWriteMaxBytes)
         val content = sourceStorage.read(sourceRoute.relativePath, copyLimit)
-        // 实际复制到多少字节——确认阶段要与写入回执、目标 stat 三方对齐。
+        // 实际复制到多少字节——确认阶段要与所有可用长度（源预检 stat、读取回执、写入回执、目标 stat）对齐。
         val copiedBytes = content.bytes.size.toLong()
 
         // 2. 补目标父目录（读取成功并确认实际字节数后）。
         val createdDirectories = createMissingParents(target, targetStorage, targetRoute)
 
         // 3. 写入目标：用 CREATE_NEW 防止预检后目标出现时被覆盖。
+        //    CREATE_NEW 表达「不覆盖已有目标」，**不**承诺写入原子性；后端仍可能写入一部分后报错。
         val written =
             try {
                 targetStorage.write(targetRoute.relativePath, content.bytes, StorageWriteMode.CREATE_NEW)
             } catch (failure: VfsException) {
-                // 写入失败：把已建父目录合并进 effect，源保留。CREATE_NEW 保证不会写出一份半成品。
+                // 写入失败：把已建父目录合并进 effect，源保留。目标可能已留下部分内容，不自动清理。
                 throw failure.withKnownChanges(createdDirectories)
             }
 
-        // 4. 确认目标：stat 目标确认为文件，核对长度。
+        // 4. 确认目标：stat 目标确认为文件，核对所有可用长度。
         val targetAttributes =
             try {
                 targetStorage.stat(targetRoute.relativePath)
             } catch (failure: VfsException) {
-                // 确认失败：源保留、目标可能已写入（后端行为），不自动删残留目标、不继续删源
-                throw VfsException(
-                    VfsErrorCode.CONFLICT,
-                    "Target confirmation failed after write for '${target.path}': ${failure.message}",
-                    target,
-                    effect = VfsEffect.PARTIAL,
-                ).apply { initCause(failure) }
+                // 确认失败：源保留、目标可能已写入（后端行为），不自动删残留目标、不继续删源。
+                // 保留后端原始 code / effect（含 UNKNOWN），仅把 NONE 提到 PARTIAL（已有目标写入）。
+                throw failure.withKnownTargetWrite()
             }
         if (targetAttributes.type != NodeType.FILE) {
             // 目标不是文件（极罕见：并发外部把目标改成了目录），不删源、不提交
@@ -724,13 +729,21 @@ class DefaultVfs(
                 effect = VfsEffect.PARTIAL,
             )
         }
-        // 核对长度：写入回执、目标 stat、实际读取字节数三者一致。
-        val writtenBytes = written.sizeBytes
-        val targetBytes = targetAttributes.sizeBytes ?: 0L
-        if (copiedBytes != writtenBytes || copiedBytes != targetBytes) {
+        // 核对长度：只比较**可用**的长度（源预检 stat、读取回执、写入回执、目标 stat）。
+        // 任何一个为 null 则不参与比较；已知长度中任意一个与实际复制字节数不等 → CONFLICT + PARTIAL。
+        val knownLengths =
+            listOf(
+                "sourceStat" to sourcePrecheck.sizeBytes,
+                "readReceipt" to content.attributes.sizeBytes,
+                "writtenReceipt" to written.sizeBytes,
+                "targetStat" to targetAttributes.sizeBytes,
+            ).filter { it.second != null }
+        val mismatch = knownLengths.firstOrNull { it.second != copiedBytes }
+        if (mismatch != null) {
             throw VfsException(
                 VfsErrorCode.CONFLICT,
-                "Length mismatch after copy for '${target.path}': read=$copiedBytes written=$writtenBytes targetStat=$targetBytes",
+                "Length mismatch after copy for '${target.path}': copied=$copiedBytes but ${mismatch.first}=${mismatch.second} " +
+                    "(known: ${knownLengths.joinToString { "${it.first}=${it.second}" }})",
                 target,
                 effect = VfsEffect.PARTIAL,
             )
@@ -741,13 +754,8 @@ class DefaultVfs(
             sourceStorage.delete(sourceRoute.relativePath, recursive = false)
         } catch (failure: VfsException) {
             // 删源失败：源与目标可能都在、逻辑路径仍指向源、不提交新映射。
-            // effect 从后端自己的（可能是 NONE）提到 PARTIAL：目标确实已经写出来了，这是已知变更。
-            throw VfsException(
-                VfsErrorCode.STORAGE_ERROR,
-                "Source delete failed after successful copy for '${source.path}': ${failure.message}",
-                source,
-                effect = VfsEffect.PARTIAL,
-            ).apply { initCause(failure) }
+            // 保留后端原始 code / effect（含 UNKNOWN），仅把 NONE 提到 PARTIAL（目标已写入）。
+            throw failure.withKnownTargetWrite()
         }
 
         // 6. 状态 / 事件同事务提交：更新 Node 路径、追加 FILE_MOVED。
@@ -1192,4 +1200,26 @@ private fun VfsException.withKnownChanges(createdDirectories: Int): VfsException
         operationId,
         VfsEffect.PARTIAL,
     ).apply { initCause(this@withKnownChanges) }
+}
+
+/**
+ * 把「目标已经写入」这个已知事实合并进 effect：复制路径的确认与删源失败共用这一条规则。
+ *
+ * 与 [withKnownChanges] 的区别：
+ * - **不新增诊断句**。调用方拿到的 message / code / uri 与后端说的完全一致，cause 上挂原始异常；
+ * - **不改写 code**。只有已观测到的类型 / 长度矛盾才用 `CONFLICT`（见 [moveByCopy]），
+ *   后端自己抛的 `NOT_FOUND` / `STORAGE_ACCESS_DENIED` / `STORAGE_ERROR` / `STATE_ERROR` 等原样保留，
+ *   调用方可以继续按 code 分支；
+ * - **`UNKNOWN` 不降级**。后端说不清就是说不清，已经是 `PARTIAL` / `UNKNOWN` 的都不动，
+ *   只把仍然写着 `NONE` 的提到 `PARTIAL`（因为目标确实已经写出来了）。
+ */
+private fun VfsException.withKnownTargetWrite(): VfsException {
+    if (effect != VfsEffect.NONE) return this
+    return VfsException(
+        code,
+        message ?: code.name,
+        uri,
+        operationId,
+        VfsEffect.PARTIAL,
+    ).apply { initCause(this@withKnownTargetWrite) }
 }
