@@ -7,6 +7,7 @@ import com.github.noahshen.alcyone.context.vfs.VfsEffect
 import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsEventType
 import com.github.noahshen.alcyone.context.vfs.VfsException
+import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.event.TrackedNotifiers
 import com.github.noahshen.alcyone.context.vfs.core.registry.makeDirectory
@@ -17,6 +18,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -42,7 +44,14 @@ class DefaultVfsMoveTest {
         mounts: List<VfsHarness.Mounted> = listOf(VfsHarness.Mounted("/resources")),
         capabilityOverrides: Map<String, StorageCapabilities> = emptyMap(),
         clock: () -> Instant = { VfsHarness.FIXED_CLOCK },
-    ) = VfsHarness(mounts, capabilityOverrides = capabilityOverrides, notifier = notifiers.create(), clock = clock)
+    ) = VfsHarness(
+        mounts,
+        capabilityOverrides = capabilityOverrides,
+        notifier = notifiers.create(),
+        clock = clock,
+        // 移动编排的懒注册走自动提交，提交阶段又在事务视图里读同一条记录，所以这里让两份状态共享。
+        shareNodeState = true,
+    )
 
     private fun uri(path: String) = VfsUri.parse("alcyone://resources$path")
 
@@ -129,6 +138,42 @@ class DefaultVfsMoveTest {
             assertEquals(info.id, harness.committedNodes().single().id)
             assertEquals(listOf(VfsEventType.FILE_MOVED), harness.committedEvents().map { it.type })
             assertEquals(info.id, harness.committedEvents().single().nodeId)
+        }
+
+    @Test
+    fun `A02 a missing node in the committing view fails with STATE_ERROR + PARTIAL instead of recreating identity`() =
+        runBlocking {
+            // R1 受控反例：源已登记，但事务视图里查不到它（模拟「最后一步发现记录不见了」）。
+            // 生产代码必须抛状态异常（STATE_ERROR + PARTIAL），绝不静默重建身份。
+            val disk = StorageFakeImpl()
+            val harness = harness(listOf(VfsHarness.Mounted("/resources", disk)))
+            disk.withFile("a.txt", "hello")
+            val original = harness.seedNode("/resources/a.txt")
+            disk.calls.clear()
+
+            harness.uow.hideNodesInTransactionView = true
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/b.txt")) }
+
+            assertEquals(VfsErrorCode.STATE_ERROR, failure.code, "提交视图缺源记录 → 状态异常")
+            assertEquals(VfsEffect.PARTIAL, failure.effect, "物理移动已发生，这是已知变更")
+            assertNotNull(failure.cause, "原始失败保留在 cause 上")
+
+            // 没有在目标位置新建 Node，没有 FILE_MOVED 事件
+            assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() }, "没有在目标路径新建身份")
+            assertEquals(original.id, harness.committedNodes().single().id, "源记录 ID 未变")
+            assertEquals(
+                listOf("/resources/a.txt"),
+                harness.nodes.findByPaths(listOf(VfsPath.parse("/resources/a.txt"))).map {
+                    it.path.toString()
+                },
+                "自动提交那份仍能看到源记录",
+            )
+            assertTrue(harness.committedEvents().isEmpty(), "失败不发事件")
+
+            // 物理移动已发生（这是允许的：物理在前、提交在后）
+            assertNull(disk.typeOfOrNull("a.txt"), "物理源已消失")
+            assertEquals("hello", disk.readText("b.txt"), "目标内容保留")
         }
 
     @Test
@@ -227,6 +272,43 @@ class DefaultVfsMoveTest {
 
             assertTrue(other.calls.none { it.startsWith("move:") }, "所有阶段拒绝都没有副作用")
             assertTrue(noNative.committedEvents().isEmpty())
+        }
+
+    @Test
+    fun `A03 a plain file across two mounts is refused by the orchestration before any side effect`() =
+        runBlocking {
+            // 两块普通 Mount（都不是受保护配置目录，源也是普通文件）：Guard 会给出 CROSS_MOUNT_COPY_MOVE，
+            // 真正的阶段拒绝在 DefaultVfs 的策略分支——这条用例专门钉那根接线（复核 R2）。
+            val parent = StorageFakeImpl()
+            val child = StorageFakeImpl()
+            val harness =
+                harness(
+                    listOf(
+                        VfsHarness.Mounted("/resources", parent, key = "parent"),
+                        VfsHarness.Mounted("/resources/other", child, key = "other"),
+                    ),
+                )
+            parent.withFile("a.txt", "hello") // 未登记的普通文件
+            parent.calls.clear()
+            child.calls.clear()
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/other/missing/b.txt")) }
+
+            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, failure.code, "跨 Mount 复制移动属 T21，编排层阶段拒绝")
+            assertEquals(VfsEffect.NONE, failure.effect, "预检拒绝，零副作用")
+            assertTrue(harness.committedNodes().isEmpty(), "未登记源没有被注册")
+            assertNull(harness.nodes.findByPath(VfsPath.parse("/resources/a.txt")), "自动提交那份也没登记")
+            assertTrue(child.calls.none { it.startsWith("createDirectory") }, "目标 Mount 的父目录没被创建：${child.calls}")
+            assertTrue(
+                parent.calls.none { it.startsWith("move:") || it.startsWith("write:") || it.startsWith("delete:") },
+                "源盘没有移动 / 写入 / 删除：${parent.calls}",
+            )
+            assertTrue(
+                child.calls.none { it.startsWith("move:") || it.startsWith("write:") || it.startsWith("delete:") },
+                "目标盘没有移动 / 写入 / 删除：${child.calls}",
+            )
+            assertTrue(harness.committedEvents().isEmpty(), "没有成功事件")
+            assertEquals("hello", parent.readText("a.txt"), "源内容保持")
         }
 
     @Test

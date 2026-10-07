@@ -22,12 +22,19 @@ class FakeStateUnitOfWork(
     initialNodes: List<NodeRecord> = emptyList(),
     initialMetadata: Map<NodeId, NodeMetadata> = emptyMap(),
     initialEvents: List<EventRecord> = emptyList(),
+    /**
+     * 可选的共享 Node 存储。传入时本类的已提交状态就用这份 map（提交也原地写回），
+     * 于是外部的自动提交仓库与这里的事务视图看到同一份记录，模拟真实栈里同一个 SQLite 表。
+     * 不传就是本类自己的私有状态。
+     */
+    private val sharedNodeStore: MutableMap<VfsPath, NodeRecord>? = null,
 ) : UnitOfWork {
     /** 调用顺序记录，供测试断言编排次序。 */
     val calls: MutableList<String> = mutableListOf()
 
     // 已提交状态
-    private var committedNodes: MutableMap<VfsPath, NodeRecord> = indexByPath(initialNodes)
+    private val committedNodes: MutableMap<VfsPath, NodeRecord> =
+        (sharedNodeStore ?: mutableMapOf()).apply { putAll(indexByPath(initialNodes)) }
     private var committedMetadata: MutableMap<NodeId, NodeMetadata> = initialMetadata.toMutableMap()
     private var committedEvents: MutableList<EventRecord> = initialEvents.toMutableList()
 
@@ -45,6 +52,12 @@ class FakeStateUnitOfWork(
     /** 已提交状态只读快照。 */
     fun snapshot(): Triple<List<NodeRecord>, Map<NodeId, NodeMetadata>, List<EventRecord>> =
         Triple(committedNodes.values.toList(), committedMetadata.toMap(), committedEvents.toList())
+
+    /**
+     * 为 R1 受控反例：开启时，事务视图里的 `findById` / `findByPath` 返回 null（模拟「提交阶段看不到源记录」），
+     * 但 `committedNodes`（自动提交仓库）仍能看到——模拟「最后一步发现记录不见了」而非「记录真没了」。
+     */
+    var hideNodesInTransactionView: Boolean = false
 
     private fun indexByPath(records: List<NodeRecord>): MutableMap<VfsPath, NodeRecord> = records.associateBy { it.path }.toMutableMap()
 
@@ -74,7 +87,9 @@ class FakeStateUnitOfWork(
             calls += "commit-failed"
             throw it
         }
-        committedNodes = stagedNodes
+        // 原地写回：共享存储时 map 实例不能换，否则自动提交那份就看不到了。
+        committedNodes.clear()
+        committedNodes.putAll(stagedNodes)
         committedMetadata = stagedMetadata
         committedEvents = stagedEvents
         return result
@@ -87,12 +102,14 @@ class FakeStateUnitOfWork(
         override suspend fun findByPath(path: VfsPath): NodeRecord? {
             ensureOpen()
             calls += "nodes.findByPath:$path"
+            if (hideNodesInTransactionView) return null
             return staged[path]
         }
 
         override suspend fun findById(id: NodeId): NodeRecord? {
             ensureOpen()
             calls += "nodes.findById:$id"
+            if (hideNodesInTransactionView) return null
             return staged.values.firstOrNull { it.id == id }
         }
 

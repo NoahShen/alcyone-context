@@ -537,7 +537,8 @@ class DefaultVfs(
      * 挪到 `docs/archive`（缺失的 `archive` 自动补出来），保留同一个 Node ID 与 Metadata，追加一条
      * `FILE_MOVED`；旧路径随即 `NOT_FOUND`，在旧路径另建文件会拿到新 ID。
      *
-     * 顺序契约（任何可确认的拒绝都发生在注册源、建目录、物理移动**之前**）：
+     * 顺序契约：纯参数、已知结构 / 阶段等**预检**拒绝发生在注册源、建目录、物理移动**之前**；
+     * 第 7 步的源懒注册与第 8 步的补父目录是真实副作用，它们之后的失败按 T15 的 effect 合并规则如实报告（不声称全部零副作用）：
      *
      * 1. 纯参数冲突：源和目标同路径、目标落进源子树 → `INVALID_ARGUMENT`（T02 §8.2「参数错误优先」）；
      * 2. 结构保护：源或目标是受保护配置目录 → `UNSUPPORTED_OPERATION`；
@@ -566,7 +567,7 @@ class DefaultVfs(
         return boundary.withLock { moveInsideBoundary(source, target) }
     }
 
-    /** 移动的锁内部分：拒绝全部发生在副作用之前，物理移动与状态提交分开报告。 */
+    /** 移动的锁内部分：预检拒绝先于副作用，物理移动与状态提交分开报告；懒注册 / 补目录之后的失败按 effect 合并如实上报。 */
     private suspend fun moveInsideBoundary(
         source: VfsUri,
         target: VfsUri,
@@ -612,7 +613,7 @@ class DefaultVfs(
         // 6. 目标必须全新：已有普通文件或普通目录都拒绝，不覆盖、不创建父目录、不当作「放进去」。
         confirmMoveTargetAbsent(target, storage, targetRoute)
 
-        // 7. 身份：已登记源复用原 ID；未登记源先建立一次身份（懒注册）再迁移这条记录。
+        // 7. 身份：已登记源复用原 ID；未登记源按 NodeRepository 的注册语义建立一次身份（懒注册）再迁移这条记录。
         val nodeId = ensureSourceIdentity(sourcePath)
 
         // 8. 只在目标 Mount 内补缺失父目录（复用 T15 的逐层创建，不批量登记、不发目录事件）。
@@ -626,7 +627,7 @@ class DefaultVfs(
             }
         // 10. 状态 / 事件同事务提交；物理已经移动这件事不会因为提交失败而回退。
         return try {
-            pipeline.commitInsideBoundary { scope -> commitMove(scope, nodeId, sourcePath, source, target, moved) }
+            pipeline.commitInsideBoundary { scope -> commitMove(scope, nodeId, source, target, moved) }
         } catch (cancellation: CancellationException) {
             // 取消原样传播。文件已经到目标这件事不会因为取消而消失，也不声称状态已回滚。
             throw cancellation
@@ -685,14 +686,14 @@ class DefaultVfs(
     }
 
     /**
-     * 拿到要迁移的 Node ID：已登记源直接复用（不重建、不改登记时间）；未登记源按 T13 的懒注册语义
-     * 建立**一次**身份，之后再迁移这条记录。
+     * 拿到要迁移的 Node ID：已登记源直接复用（不重建、不改登记时间）；未登记源直接复用 [NodeRepository] 的
+     * 注册语义建立**一次**身份（不是调用 [NodeRegistry]，本方法已经在边界里），之后再迁移这条记录。
      *
      * 例：磁盘上已有、状态库里没有的 `a.txt` 移到 `b.txt`，这里先给它发一个新 ID，`getNode(新 ID)`
      * 随即指向 `b.txt`；目标位置不会另外生成第二个 ID。
      */
     private suspend fun ensureSourceIdentity(sourcePath: VfsPath): NodeId {
-        // 直接读自动提交的仓库：这里就在边界里，别再套会自取锁的 Registry 公开方法。
+        // 直接读写自动提交的仓库：这里就在边界里，不再套会自取锁的 Registry 公开方法。
         nodes.findByPath(sourcePath)?.let { return it.id }
         val now = clock()
         val registered =
@@ -714,29 +715,22 @@ class DefaultVfs(
      *
      * 不新建身份、不动 Metadata：`updatePath` 只改逻辑路径与 `updatedAt`，ID、类型与 `registeredAt` 都不变。
      * 事件用 [EventFactory.newMove]，`uri` 自动是目标位置且 `sourceUri` / `targetUri` 都填。
+     *
+     * 源记录在这个事务视图里**必须已经存在**（真实栈里懒注册已在同一状态库自动提交）。找不到就报状态异常，
+     * 绝不在这里重新登记一条记录——那会重建 `registeredAt` 并掩盖接线 / 状态不一致（复核 R1）。
      */
     private suspend fun commitMove(
         scope: TransactionScope,
         nodeId: NodeId,
-        sourcePath: VfsPath,
         source: VfsUri,
         target: VfsUri,
         moved: StorageAttributes,
     ): NodeInfo {
         val now = clock()
-        // 真实库里，未登记源的懒注册已经在这次事务之前自动提交，这里查得到；
-        // 只有「事务视图看不到那次自动提交」的替身才会落到 register 分支（真实路径不会），
-        // register 按路径幂等：已存在就当复用，绝不会在目标重新生成 ID。
         val registered =
-            scope.nodes.findById(nodeId) ?: scope.nodes.register(
-                NodeRecord(
-                    id = nodeId,
-                    path = sourcePath,
-                    type = NodeType.FILE,
-                    physical = true,
-                    registeredAt = now,
-                    updatedAt = now,
-                ),
+            scope.nodes.findById(nodeId) ?: throw IllegalStateException(
+                "The moved node '$nodeId' is missing from the committing transaction view; " +
+                    "refusing to recreate its identity at the source path",
             )
         scope.nodes.updatePath(registered.id, target.path, now)
         scope.events.append(events.newMove(VfsEventType.FILE_MOVED, registered.id, source, target))

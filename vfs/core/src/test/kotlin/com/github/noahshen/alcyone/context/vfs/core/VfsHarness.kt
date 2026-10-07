@@ -46,6 +46,12 @@ internal class VfsHarness(
     /** 通知器由测试统一登记并关闭（断言失败也不留分发协程）。 */
     notifier: AsyncEventNotifier,
     val clock: () -> Instant = { FIXED_CLOCK },
+    /**
+     * 让自动提交的 [nodes] 与事务视图 [uow] 共用同一份 Node 存储，模拟真实栈里「同一个 SQLite 表」。
+     * 默认关闭，保持既有用例「两份内存」的假设；T20 的移动编排需要它：懒注册走自动提交，
+     * 提交阶段又在事务视图里读同一条记录。
+     */
+    shareNodeState: Boolean = false,
 ) {
     /** 一个挂载点：逻辑路径 + 背后的内存盘。 */
     class Mounted(
@@ -89,8 +95,11 @@ internal class VfsHarness(
         uow.inTransaction { scope -> scope.nodes.markDeleted(listOf(id), FIXED_CLOCK) }
     }
 
+    /** 只有 [shareNodeState] 打开时才非空；[nodes] 与 [uow] 共用它。 */
+    private val sharedNodeStore: MutableMap<VfsPath, NodeRecord>? = if (shareNodeState) mutableMapOf() else null
+
     val nodes: NodeRepository =
-        InMemoryNodeRepository().also { repo ->
+        (sharedNodeStore?.let { InMemoryNodeRepository(it) } ?: InMemoryNodeRepository()).also { repo ->
             runBlocking { initialNodes.forEach { repo.register(it) } }
         }
 
@@ -99,7 +108,7 @@ internal class VfsHarness(
 
     val boundary = StateBoundary()
 
-    val uow = FakeStateUnitOfWork(initialNodes = initialNodes)
+    val uow = FakeStateUnitOfWork(initialNodes = initialNodes, sharedNodeStore = sharedNodeStore)
 
     /**
      * 自动提交的 Metadata 视图：读的是 [uow] 已提交的那份（测试里 Metadata 只经 `setMetadata` 进事务）。

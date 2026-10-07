@@ -5,14 +5,16 @@ import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.VfsPath
 import java.time.Instant
 
-class InMemoryNodeRepository : NodeRepository {
-    // 仅保留当前有效节点：path -> NodeRecord, id -> NodeRecord
-    private val byPath = mutableMapOf<VfsPath, NodeRecord>()
-    private val byId = mutableMapOf<NodeId, NodeRecord>()
-
+class InMemoryNodeRepository(
+    /**
+     * 支撑 map；可由外部传入以便与别的视图共用同一份状态（T20 的移动测试用它模拟真实栈「同一个 SQLite 表」）。
+     * ID 查询直接从这份 map 派生，避免共享时出现第二份索引不同步。
+     */
+    private val byPath: MutableMap<VfsPath, NodeRecord> = mutableMapOf(),
+) : NodeRepository {
     override suspend fun findByPath(path: VfsPath): NodeRecord? = byPath[path]
 
-    override suspend fun findById(id: NodeId): NodeRecord? = byId[id]
+    override suspend fun findById(id: NodeId): NodeRecord? = byPath.values.firstOrNull { it.id == id }
 
     override suspend fun register(record: NodeRecord): NodeRecord {
         val existing = byPath[record.path]
@@ -20,7 +22,6 @@ class InMemoryNodeRepository : NodeRepository {
             return existing
         }
         byPath[record.path] = record
-        byId[record.id] = record
         return record
     }
 
@@ -29,21 +30,19 @@ class InMemoryNodeRepository : NodeRepository {
         newPath: VfsPath,
         updatedAt: Instant,
     ) {
-        val existing = byId[id] ?: return
+        val existing = findById(id) ?: return
         byPath.remove(existing.path)
         val updated = existing.copy(path = newPath, updatedAt = updatedAt)
         byPath[newPath] = updated
-        byId[id] = updated
     }
 
     override suspend fun touch(
         id: NodeId,
         updatedAt: Instant,
     ) {
-        val existing = byId[id] ?: return
+        val existing = findById(id) ?: return
         val updated = existing.copy(updatedAt = updatedAt)
         byPath[existing.path] = updated
-        byId[id] = updated
     }
 
     override suspend fun markDeleted(
@@ -51,10 +50,7 @@ class InMemoryNodeRepository : NodeRepository {
         deletedAt: Instant,
     ) {
         for (id in ids) {
-            val existing = byId.remove(id)
-            if (existing != null) {
-                byPath.remove(existing.path)
-            }
+            findById(id)?.let { byPath.remove(it.path) }
         }
     }
 

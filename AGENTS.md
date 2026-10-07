@@ -1,5 +1,13 @@
 # AGENTS.md
 
+## 本次修改（2026-10-07，T20 修复 R1～R3）
+
+- 修 R1：去掉 `commitMove` 为测试替身补注册的生产兜底（缺源记录改抛状态异常 → `STATE_ERROR` + `PARTIAL`），`VfsHarness` 新增 `shareNodeState` 让自动提交与事务视图共享同一份 Node 状态，并补真栈受控反例证明不重建身份；R2：补普通文件跨 Mount 的编排拒绝用例；R3：两个 A07 挂起用例改 `try/finally` 先放门再取消 / 等待协程。顺带 S1～S3（收窄预检表述、A06 直接订阅核对无通知、订正 `NodeRepository` / `internal` 措辞）。测试 639 → **642**，源码 `@Test` 与实跑 XML 差额为零；`./scripts/check` 全绿。T20 保持 **IN_REVIEW**，不开始 T21。涉及当前进度与第 24 条。
+
+## 本次修改（2026-10-07，T20 独立复核）
+
+- `a41df37` 独立 639 例通过；R1 生产替身兜底、R2 跨 Mount 编排补证、R3 挂起测试清理待修，见 T20 架构与技术复核。涉及当前进度；T20 IN_REVIEW，不开始 T21。
+
 ## 本次修改（2026-10-07，T20 开发完成）
 
 - T20 同 Mount 文件移动开发完成：Core 编排层实现 `DefaultVfs.move` 的同 Mount **原生文件移动**——预检 → 懒注册 → 补父目录 → `Storage.move` → 同一事务更新路径 + 一条 `FILE_MOVED`；阶段拒绝目录 / 复制回退 / 跨 Mount。新增 22 例（core 243 → 255、integration 63 → 73），总数 617 → **639**，源码 `@Test` 与实跑 XML 差额为零；`./scripts/check` 全绿。交付三份文档；任务转 **IN_REVIEW**，复制回退交 T21、目录交 T22；不开始 T21。涉及当前状态与第 24 条。
@@ -368,7 +376,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 23. [T19 Local FS 纵向集成与调用样例](docs/tasks/m3-t19/T19_LocalFS纵向集成与调用样例开发及验收.md)：**DONE**，675f91e 独立 617 例通过，R1 / R2 关闭、S1～S4 已处理；M3 DONE，见 [复核第 6 节](docs/tasks/m3-t19/T19_架构与技术复核.md)。不开始 T20。
 
-24. [T20 同 Mount 文件移动开发及验收](docs/tasks/m4-t20/T20_同Mount文件移动开发及验收.md)：**IN_REVIEW**，实现同 Mount 原生文件移动与失败报告（A01～A08），617 → 639 例；复制回退 / 跨 Mount 留 T21，目录留 T22。
+24. [T20 同 Mount 文件移动开发及验收](docs/tasks/m4-t20/T20_同Mount文件移动开发及验收.md)：**IN_REVIEW**，复核 R1～R3 已修、642 例通过；实现同 Mount 原生文件移动与失败报告（A01～A08），复制回退 / 跨 Mount 留 T21，目录留 T22。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
