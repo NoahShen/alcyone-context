@@ -704,17 +704,20 @@ class DefaultVfs(
         }
     }
 
-    /** 源树里的一条：挂载内相对路径 + 类型 + 可用属性。枚举一次就固定下来，删源前再回读一次比对。 */
+    /**
+     * 源树里的一条：挂载内相对路径 + 类型 + 可用属性。属性在枚举时就固定下来，删源前再回读一次比对。
+     */
     private data class TreeEntry(
         val relative: StoragePath,
         val type: NodeType,
-        val attributes: StorageAttributes?,
+        val attributes: StorageAttributes,
     )
 
     /**
      * 把源树逐条枚举出来（DFS，父目录先于子项），**不复用任何 Vfs 公开操作**。
      *
-     * 目录条目自身也进列表：这样空目录不会丢。枚举失败按调用方的阶段合并 effect。
+     * 目录条目自身也进列表：这样空目录不会丢。条目属性缺失时用一次 `stat` 补齐并**真正保留**，
+     * 后续逐文件确认与删源前复查都拿它当已知长度，不再重复查一轮后端。
      */
     private suspend fun enumerateTree(
         storage: Storage,
@@ -725,9 +728,9 @@ class DefaultVfs(
         suspend fun walk(directory: StoragePath) {
             for (entry in storage.list(directory)) {
                 val child = directory.resolve(entry.name)
-                val type = entry.attributes?.type ?: storage.stat(child).type
-                collected += TreeEntry(child, type, entry.attributes)
-                if (type == NodeType.DIRECTORY) walk(child)
+                val attributes = entry.attributes ?: storage.stat(child)
+                collected += TreeEntry(child, attributes.type, attributes)
+                if (attributes.type == NodeType.DIRECTORY) walk(child)
             }
         }
         walk(root)
@@ -768,18 +771,29 @@ class DefaultVfs(
 
         // 4. 逐条复制（父目录先于子项，所以子项写入时父目录已经存在）。
         //    entry.relative 是「挂载内相对路径」；相对**源根**的后缀才是要接到目标根上的那一段。
+        //    每个成功复制的文件记下实际字节数，供最终整树核对复用。
         val sourceRootSegments = sourceRoute.relativePath.segments
+        val copiedBytesBySuffix = mutableMapOf<List<String>, Long>()
         for (entry in sourceEntries) {
             currentCoroutineContext().ensureActive()
             val suffix = entry.relative.segments.drop(sourceRootSegments.size)
-            val sourceChild = entry.relative
             val targetChild = targetRoute.relativePath.resolveAll(suffix)
             try {
                 if (entry.type == NodeType.DIRECTORY) {
                     targetStorage.createDirectory(targetChild)
                     createdDirectories += 1
                 } else {
-                    copyOneFile(sourceStorage, targetStorage, source, target, sourceChild, targetChild, createdDirectories)
+                    copiedBytesBySuffix[suffix] =
+                        copyOneFile(
+                            sourceStorage,
+                            targetStorage,
+                            source,
+                            target,
+                            entry.relative,
+                            targetChild,
+                            entry.attributes,
+                            createdDirectories,
+                        )
                 }
             } catch (failure: VfsException) {
                 // 已经建出目录 / 写过目标 → 至少 PARTIAL；此前复制成功的条目是真实副作用。
@@ -787,11 +801,18 @@ class DefaultVfs(
             }
         }
 
-        // 5. 整树确认：目标条目集合与类型必须与源一致。长度一致不等于哈希一致，这里只比集合与类型。
-        //    两侧都换算成「相对各自根的段列表」再比，源根与目标根不同不影响比较。
-        val targetEntries = enumerateTree(targetStorage, targetRoute.relativePath)
-        val sourceShape = sourceEntries.map { it.relative.segments.drop(sourceRootSegments.size) to it.type }.toSet()
-        val targetShape = targetEntries.map { it.relative.segments.drop(targetRoute.relativePath.segments.size) to it.type }.toSet()
+        // 5. 整树确认：重新枚举目标树，核对条目集合 + 类型与每个文件的**可用长度**。
+        //    长度一致不等于哈希一致；null 仍只表示未知，不冒充 0。
+        //    此时目标已经写完，目标 list / stat 的后端失败也要合并已知目标变化（保留 code / cause / UNKNOWN）。
+        val targetEntries =
+            try {
+                enumerateTree(targetStorage, targetRoute.relativePath)
+            } catch (failure: VfsException) {
+                throw failure.withKnownChanges(createdDirectories)
+            }
+        val sourceShape = sourceEntries.associate { it.relative.segments.drop(sourceRootSegments.size) to it.type }
+        val targetRootSegments = targetRoute.relativePath.segments
+        val targetShape = targetEntries.associate { it.relative.segments.drop(targetRootSegments.size) to it.type }
         if (sourceShape != targetShape) {
             throw VfsException(
                 VfsErrorCode.CONFLICT,
@@ -801,15 +822,60 @@ class DefaultVfs(
                 effect = VfsEffect.PARTIAL,
             )
         }
+        for (entry in targetEntries) {
+            if (entry.type != NodeType.FILE) continue
+            val suffix = entry.relative.segments.drop(targetRootSegments.size)
+            val copied = copiedBytesBySuffix[suffix] ?: continue
+            val known = entry.attributes.sizeBytes ?: continue
+            if (known != copied) {
+                throw VfsException(
+                    VfsErrorCode.CONFLICT,
+                    "Target length mismatch after copying '$target': copied=$copied but targetStat=$known",
+                    target,
+                    effect = VfsEffect.PARTIAL,
+                )
+            }
+        }
 
-        // 6. 全部复制并确认之后才删源。一次递归删除交给 Storage；失败保留后端 code / effect（含 UNKNOWN）。
+        // 6. 删源前复查源树：条目集合 / 类型 / 可用长度都要与初快照一致；已知矛盾禁止进入删除。
+        //    这是检测保障，不是目录原子快照：不锁外部进程，也不消除最终检查之后的竞争窗口。
+        val sourceNow =
+            try {
+                enumerateTree(sourceStorage, sourceRoute.relativePath)
+            } catch (failure: VfsException) {
+                throw failure.withKnownChanges(createdDirectories)
+            }
+        val sourceNowShape = sourceNow.associate { it.relative.segments.drop(sourceRootSegments.size) to it.type }
+        if (sourceNowShape != sourceShape) {
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "The source directory tree changed while it was being copied: '$source' no longer matches the initial listing",
+                source,
+                effect = VfsEffect.PARTIAL,
+            )
+        }
+        for (entry in sourceNow) {
+            val before = sourceEntries.firstOrNull { it.relative == entry.relative } ?: continue
+            val beforeSize = before.attributes.sizeBytes ?: continue
+            val nowSize = entry.attributes.sizeBytes ?: continue
+            if (beforeSize != nowSize) {
+                throw VfsException(
+                    VfsErrorCode.CONFLICT,
+                    "Source '${entry.relative}' changed length while it was being copied: before=$beforeSize now=$nowSize",
+                    source,
+                    effect = VfsEffect.PARTIAL,
+                )
+            }
+        }
+
+        // 7. 全部复制并确认之后才删源。一次递归删除交给 Storage；失败保留后端 code / effect（含 UNKNOWN）。
         try {
             sourceStorage.delete(sourceRoute.relativePath, recursive = true)
         } catch (failure: VfsException) {
             throw failure.withKnownTargetWrite()
         }
 
-        // 7. 同一事务迁移根与全部已登记后代的路径，追加一条根级 DIRECTORY_MOVED。
+        // 8. 同一事务迁移根与全部已登记后代的路径，追加一条根级 DIRECTORY_MOVED。
         val rootAttributes = StorageAttributes(NodeType.DIRECTORY, null, null)
         return try {
             pipeline.commitInsideBoundary { scope ->
@@ -832,6 +898,7 @@ class DefaultVfs(
      * 整树复制里的单个文件：有界读 → 源侧长度提前检查 → `CREATE_NEW` 写 → 目标确认 → 可用长度核对。
      *
      * 与 [moveByCopy] 同一条规则，只是这里不负责删源与提交——那是整树级别的决定。
+     * 源侧已知长度用枚举时拿到的 [sourceStat]，不再多查一次后端；返回实际复制的字节数供整树核对复用。
      */
     private suspend fun copyOneFile(
         sourceStorage: Storage,
@@ -840,17 +907,17 @@ class DefaultVfs(
         target: VfsUri,
         sourceChild: StoragePath,
         targetChild: StoragePath,
+        sourceStat: StorageAttributes,
         createdDirectories: Int,
-    ) {
+    ): Long {
         val copyLimit = minOf(limits.defaultReadMaxBytes, limits.defaultWriteMaxBytes)
-        val sourceAttributes = sourceStorage.stat(sourceChild)
         val content = sourceStorage.read(sourceChild, copyLimit)
         val copiedBytes = content.bytes.size.toLong()
 
         // 源侧提前检查：读了才知道实际字节数，此时目标还没被写。
         val sourceLengths =
             listOf(
-                "sourceStat" to sourceAttributes.sizeBytes,
+                "sourceStat" to sourceStat.sizeBytes,
                 "readReceipt" to content.attributes.sizeBytes,
             ).filter { it.second != null }
         sourceLengths.firstOrNull { it.second != copiedBytes }?.let { mismatch ->
@@ -885,7 +952,7 @@ class DefaultVfs(
         }
         val knownLengths =
             listOf(
-                "sourceStat" to sourceAttributes.sizeBytes,
+                "sourceStat" to sourceStat.sizeBytes,
                 "readReceipt" to content.attributes.sizeBytes,
                 "writtenReceipt" to written.sizeBytes,
                 "targetStat" to targetAttributes.sizeBytes,
@@ -900,6 +967,7 @@ class DefaultVfs(
                 effect = VfsEffect.PARTIAL,
             )
         }
+        return copiedBytes
     }
 
     /**

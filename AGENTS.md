@@ -1,5 +1,13 @@
 # AGENTS.md
 
+## 本次修改（2026-10-09，T22 R1～R4 修复）
+
+- 按 T22 复核 §2 修 R1～R4：整树确认 / 源复查阶段的后端失败合并已知目标变化（保留 code / cause / UNKNOWN，NONE 升 PARTIAL）；最终目标确认补可用长度核对、删源前复查源树集合 / 类型 / 可用长度；补真 SQLite 全路径回滚、部分删源、目录复制持锁串行与取消后可用、重开身份 / registeredAt + 真实 event 表字段等证据；Core / Runtime 的「含子 Mount」改用非挂载根的普通祖先；T02 §7.2 补目录事件入口。测试 696 → **702**，T22 保持 IN_REVIEW。M4 仍需 T23，不随 T22 自动收口；不开始 T23。
+
+## 本次修改（2026-10-09，02ec54c 独立复核）
+
+- T22 `02ec54c` 独立 696 例通过，R1 最终枚举 effect、R2 整树确认、R3 关键补证、R4 文档待修。涉及第 26 条与当前进度，见 T22 架构与技术复核；保持 IN_REVIEW，不开始 T23。
+
 ## 本次修改（2026-10-08，T22 开发完成）
 
 - Core 编排实现普通目录同 / 跨 Mount 移动：`enumerateTree` 整树遍历 → 逐条复制 / 建目录（含空目录）→ 整树确认 → 删源 → 同一事务迁移根与全部已登记后代路径 + 一条根级 `DIRECTORY_MOVED`；`ensureSourceIdentity` 参数化类型，新增 `moveDirectoryNative` / `moveDirectoryByCopy` / `copyOneFile` / `commitDirectoryMove`。测试 681 → **696**（core 282→294、integration 88→91，源码与 XML 差额为零）；3 条定向变异全咬住。回写 T01 §8 目录事件粒度与 T18～T21 阶段口径。T22 转 **IN_REVIEW**，等复核方验收后收口 M4；不开始 T23。涉及第 26 条与当前进度。
@@ -424,7 +432,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 25. [T21 复制回退与跨 Mount 文件移动开发及验收](docs/tasks/m4-t21/T21_复制回退与跨Mount文件移动开发及验收.md)：**DONE**，`81251ce` 独立 681 例通过，R1～R4 全部关闭；实现复制回退与跨 Mount 文件移动，详见同目录复核第 7 节；目录移动留 T22，本轮不开始。
 
-26. [T22 目录移动与子 Node 路径更新开发及验收](docs/tasks/m4-t22/T22_目录移动与子Node路径更新开发及验收.md)：**IN_REVIEW**，696 例通过；支持同 / 跨 Mount 普通目录，保留空目录和已登记子 Node 身份，整树确认后删源，只发一条根级 `DIRECTORY_MOVED`。见同目录 [交付文档](docs/tasks/m4-t22/T22_交付文档.md)；不开始 T23。
+26. [T22 目录移动与子 Node 路径更新开发及验收](docs/tasks/m4-t22/T22_目录移动与子Node路径更新开发及验收.md)：**IN_REVIEW**，`02ec54c` 复核 R1～R4 已修复，702 例通过；支持同 / 跨 Mount 普通目录，保留空目录和已登记子 Node 身份，整树确认与源复查后删源，只发一条根级 `DIRECTORY_MOVED`。见同目录 [交付文档](docs/tasks/m4-t22/T22_交付文档.md) 与 [复核记录](docs/tasks/m4-t22/T22_架构与技术复核.md)；M4 仍需 T23，不开始 T23。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
