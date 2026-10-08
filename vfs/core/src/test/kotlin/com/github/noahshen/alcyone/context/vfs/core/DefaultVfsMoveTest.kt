@@ -255,9 +255,9 @@ class DefaultVfsMoveTest {
             assertTrue(other.calls.none { it.startsWith("move:") }, "结构保护之前不移动：${other.calls}")
             assertTrue(harness.committedEvents().isEmpty())
 
-            // 目录移动：阶段拒绝（T22 接续）。
-            val directory = assertFailsWith<VfsException> { harness.vfs.move(uri("/dir"), uri("/z/dir2")) }
-            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, directory.code, "目录移动还没交付")
+            // 目录移动已在 T22 交付：这里只确认它不再是阶段拒绝，具体闭环在 DefaultVfsDirectoryMoveTest。
+            val directory = harness.vfs.move(uri("/dir"), uri("/z/dir2"))
+            assertEquals("/resources/z/dir2", directory.uri.path.toString(), "目录移动现在走真实流程")
 
             // 同 Mount 但后端不支持原生 move：复制回退（T21）现在已实现，应该成功。
             val noNativeDisk = StorageFakeImpl()

@@ -258,10 +258,6 @@ class RuntimeCopyMoveTest {
                 val missing = assertFailsWith<VfsException> { vfs.move(sourceUri("/gone.txt"), archiveUri("/new.txt")) }
                 assertEquals(VfsErrorCode.NOT_FOUND, missing.code)
 
-                // 目录移动：阶段拒绝（T22），跨 Mount 的目录也一样。
-                val directory = assertFailsWith<VfsException> { vfs.move(archiveUri("/dir"), sourceUri("/dir2")) }
-                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, directory.code)
-
                 // 受保护挂载根：结构保护。
                 val protected = assertFailsWith<VfsException> { vfs.move(sourceUri("/a.txt"), archiveUri("/")) }
                 assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, protected.code)

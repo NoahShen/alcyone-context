@@ -210,10 +210,6 @@ class RuntimeMoveTest {
                 val intoDir = assertFailsWith<VfsException> { vfs.move(uri("/a.txt"), uri("/dir")) }
                 assertEquals(VfsErrorCode.ALREADY_EXISTS, intoDir.code, "目标目录不被当作移入其中")
 
-                // 目录移动：阶段拒绝（T22）。
-                val directory = assertFailsWith<VfsException> { vfs.move(uri("/dir"), uri("/dir2")) }
-                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, directory.code)
-
                 // 受保护挂载根：结构保护（目标是配置目录）。
                 val protected = assertFailsWith<VfsException> { vfs.move(uri("/a.txt"), uri("/")) }
                 assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, protected.code)

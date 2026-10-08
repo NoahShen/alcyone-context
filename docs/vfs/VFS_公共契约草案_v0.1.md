@@ -14,6 +14,10 @@
 
 - 第 5 节把流式读取从「签名待定」收敛为已落地的具体签名：`openStream(uri, options) → VfsStreamResult`、`VfsStreamOptions.maxTotalBytes`；第 9 节把生命周期从建议收敛为 T18 实现口径（closing / 等待期 / 超时取消 / 幂等并发 close / `suspend close()`）。涉及第 5、9 节；其他接口与字段未变。
 
+## 本次修改（2026-10-08，T22 实现回写目录移动事件粒度）
+
+- 第 8 节补一句目录移动事件的最小口径：一次成功目录移动只发**一条**根级 `DIRECTORY_MOVED`，`nodeId` 为源根身份、`uri` 为目标根、`sourceUri` / `targetUri` 为源 / 目标根，表示**整棵子树**的路径已迁移；不为子项逐个发事件。Consumer 按完整路径段边界处理子树路径变化。事件字段本身未变。
+
 ## 本次修改（2026-10-04，T17 实现回写 Metadata 事件与更新时间）
 
 - 第 6.2 节补上 T17 落实的两个选择：**每次 `setMetadata` 都发一条 `METADATA_UPDATED`（含传相同值、含重复清空）**，以及**同一事务内 touch Node 的逻辑更新时间**；用一个「替换清空」例子解释。涉及第 6.2 节；接口签名与字段未变。
@@ -359,6 +363,8 @@ Kotlin Coroutine 的 `CancellationException` 原样传播，不包装为普通�
 本轮建议的事件公共字段：事件 UUIDv7 ID、事件类型、可空 Node ID、发生时间、逻辑 URI 和关联 operation ID。移动事件额外包含源 / 目标 URI；消费进度及处理状态属于 Event Log / Consumer 状态，不让订阅者直接修改原事件。
 
 事件类型覆盖 FILE_CREATED、FILE_WRITTEN、FILE_MOVED、DIRECTORY_MOVED、FILE_DELETED、DIRECTORY_DELETED、METADATA_UPDATED；按已确认的 T03，首版不公开 NODE_REGISTERED。Payload 不包含文件内容、凭据。
+
+目录移动事件只发根级：一次成功目录移动产生**一条** `DIRECTORY_MOVED`，`nodeId` 为源根身份（未登记则为空），`uri` 为目标根，`sourceUri` / `targetUri` 为源 / 目标根，表示该根之下**按完整路径段边界**的整棵子树的逻辑路径已迁移。不为已登记子 Node 逐个造 `FILE_MOVED`，也不为复制过程中产生的目标文件发 `FILE_CREATED`；Consumer 按完整段边界处理子树路径变化，需要逐文件信号时自行展开。口径与示例见 [T22 §2.4](../tasks/m4-t22/T22_目录移动与子Node路径更新开发及验收.md)。
 
 删除事件只发目标级：一次成功删除产生**一条** `FILE_DELETED` 或 `DIRECTORY_DELETED`，URI 为请求目标，Node ID 为目标已有身份（未登记则为空）。目录事件表示该 URI 之下**按完整路径段边界**的整棵子树失效，不为每个后代另造事件；Consumer 需要逐文件信号时应在删除前自行展开。口径与示例见 [T16 §2.4](../tasks/m3-t16/T16_删除操作开发及验收.md)。
 

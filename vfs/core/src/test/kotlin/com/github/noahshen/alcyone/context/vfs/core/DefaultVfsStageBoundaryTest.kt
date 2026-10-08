@@ -42,14 +42,27 @@ class DefaultVfsStageBoundaryTest {
             disk.makeDirectory("dir")
             disk.withFile("dir/inner.txt", "inner")
             disk.calls.clear() // 下面的断言只看这几个方法自己造成的调用
-            val harness = VfsHarness(listOf(VfsHarness.Mounted("/resources", disk)), notifier = notifiers.create())
+            val other = StorageFakeImpl()
+            val harness =
+                VfsHarness(
+                    listOf(
+                        VfsHarness.Mounted("/resources", disk, key = "resources"),
+                        VfsHarness.Mounted("/scratch", other, key = "scratch"),
+                    ),
+                    namespaces = setOf("resources", "scratch"),
+                    notifier = notifiers.create(),
+                )
             val dir = VfsUri.parse("alcyone://resources/dir")
             val dir2 = VfsUri.parse("alcyone://resources/dir2")
 
-            // 阶段拒绝现在只剩**目录移动**（T22）：同 Mount 原生移动（T20）与复制回退 / 跨 Mount（T21）都已交付。
-            val directory = assertFailsWith<VfsException>("move directory") { harness.vfs.move(dir, dir2) }
-            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, directory.code, "目录移动还没交付，明确拒绝，不静默成功")
-            assertEquals(VfsEffect.NONE, directory.effect, "拒绝时零副作用")
+            // T20 / T21 / T22 全部交付后，move 不再有「阶段拒绝」；这里改钉**结构保护**：
+            // 受保护配置目录（挂载根 / 命名空间根 / 逻辑根 / 承载子挂载的祖先）仍然拒绝，且零副作用。
+            // 目标放在另一个命名空间的挂载下，避开「目标落进源子树」这条纯参数冲突，才能测到结构保护。
+            val root = VfsUri.parse("alcyone://resources")
+            val outside = VfsUri.parse("alcyone://scratch/moved")
+            val protectedSource = assertFailsWith<VfsException>("move mount root") { harness.vfs.move(root, outside) }
+            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, protectedSource.code, "挂载根不许移动")
+            assertEquals(VfsEffect.NONE, protectedSource.effect, "拒绝时零副作用")
             assertTrue(disk.calls.none { it.startsWith("move:") }, "不许再动后端：${disk.calls}")
             assertTrue(harness.committedNodes().isEmpty(), "不写状态")
             assertTrue(harness.committedEvents().isEmpty(), "不发事件")

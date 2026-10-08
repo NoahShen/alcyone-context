@@ -41,6 +41,8 @@ import com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode
 import com.github.noahshen.alcyone.context.vfs.core.transaction.TransactionScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.io.FilterInputStream
 import java.time.Instant
 
@@ -101,9 +103,9 @@ data class VfsLimits(
  * 例：外部直接删掉了磁盘上的 `a.dcm`，它的 Node 还有效，标签和说明照样能读能改；
  * 经 VFS 删掉之后同一个旧 ID 就报 `NOT_FOUND`，不会退化成「返回空 Metadata」。
  *
- * **本轮没交付的方法**：**目录移动**（T22 接续）明确抛 [VfsErrorCode.UNSUPPORTED_OPERATION] 且零副作用。
- * 普通文件移动的**三种策略**都已交付：同 Mount 原生移动（T20，见 [move]）、同 Mount 复制回退与
- * 跨 Mount 复制移动（T21，见 [move] 与 [moveByCopy]）。
+ * **已交付的方法**：基础文件操作、删除、Metadata、流式读取，以及 `move` 的全部形态——普通文件的
+ * 同 Mount 原生移动（T20）、复制回退与跨 Mount 复制移动（T21），还有**目录移动**（T22：同 Mount 原生、
+ * 同 Mount 复制回退与跨 Mount 整树复制，见 [move]、[moveDirectoryNative] 与 [moveDirectoryByCopy]）。
  */
 class DefaultVfs(
     /** 挂载与配置目录（T09）。 */
@@ -546,7 +548,7 @@ class DefaultVfs(
      * 2. 结构保护：源或目标是受保护配置目录 → `UNSUPPORTED_OPERATION`；
      * 3. 路由：源或目标没有挂载覆盖 → `MOUNT_NOT_FOUND`；
      * 4. `storage.stat` 确认源**真的存在**并拿到**实际类型**（不存在 → `NOT_FOUND`）；
-     * 5. 按实际类型跑一遍 T10 预检（[OperationIntent.move]）拿到策略；**目录**仍阶段拒绝（T22），
+     * 5. 按实际类型跑一遍 T10 预检（[OperationIntent.move]）拿到策略，目录与文件各走各的分支；
      *    其余三种策略各走各的分支——不把后端支持的能力伪报为不支持；
      * 6. 目标**已存在**（文件或目录都算）→ `ALREADY_EXISTS`，不覆盖、不创建父目录、不把目标目录
      *    解释成「放进去」；
@@ -590,28 +592,34 @@ class DefaultVfs(
         val sourceStorage = storageFor(sourceRoute)
         val sourceAttributes = sourceStorage.stat(sourceRoute.relativePath)
         val actualType = sourceAttributes.type
-        // 5. 按真实类型跑预检：目录仍阶段拒绝（T22）；其余三种策略由各自分支处理。
+        // 5. 按真实类型跑预检拿策略；目录与文件各走各的分支——不把后端支持的能力伪报为不支持。
         val precondition =
             OperationGuard.check(
                 OperationIntent.move(sourcePath, targetPath, actualType),
                 router,
                 capabilities,
             )
-        if (actualType == NodeType.DIRECTORY) {
-            throw VfsException(
-                VfsErrorCode.UNSUPPORTED_OPERATION,
-                "Cannot move '$sourcePath': directory move is not implemented yet (planned for T22). " +
-                    "The call was rejected before any state or storage change.",
-                source,
-            )
-        }
+        val directory = actualType == NodeType.DIRECTORY
         return when (precondition.strategy) {
-            ExecutionStrategy.NATIVE_MOVE -> moveNative(source, target, sourceRoute, targetRoute, sourceStorage)
+            ExecutionStrategy.NATIVE_MOVE ->
+                if (directory) {
+                    moveDirectoryNative(source, target, sourceRoute, targetRoute, sourceStorage)
+                } else {
+                    moveNative(source, target, sourceRoute, targetRoute, sourceStorage)
+                }
             ExecutionStrategy.COPY_FALLBACK_MOVE ->
-                moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, sourceStorage, sourceAttributes)
+                if (directory) {
+                    moveDirectoryByCopy(source, target, sourceRoute, targetRoute, sourceStorage, sourceStorage)
+                } else {
+                    moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, sourceStorage, sourceAttributes)
+                }
             ExecutionStrategy.CROSS_MOUNT_COPY_MOVE -> {
                 val targetStorage = storageFor(targetRoute)
-                moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, targetStorage, sourceAttributes)
+                if (directory) {
+                    moveDirectoryByCopy(source, target, sourceRoute, targetRoute, sourceStorage, targetStorage)
+                } else {
+                    moveByCopy(source, target, sourceRoute, targetRoute, sourceStorage, targetStorage, sourceAttributes)
+                }
             }
             else -> throw IllegalStateException("Unexpected move strategy: ${precondition.strategy}")
         }
@@ -631,7 +639,7 @@ class DefaultVfs(
         confirmMoveTargetAbsent(target, storage, targetRoute)
 
         // 身份：已登记源复用原 ID；未登记源按 NodeRepository 的注册语义建立一次身份（懒注册）再迁移这条记录。
-        val nodeId = ensureSourceIdentity(source.path)
+        val nodeId = ensureSourceIdentity(source.path, NodeType.FILE)
 
         // 只在目标 Mount 内补缺失父目录（复用 T15 的逐层创建，不批量登记、不发目录事件）。
         val createdDirectories = createMissingParents(target, storage, targetRoute)
@@ -658,6 +666,275 @@ class DefaultVfs(
                 effect = VfsEffect.PARTIAL,
             ).apply { initCause(failure) }
         }
+    }
+
+    /**
+     * 同 Mount 原生目录移动（T22）：预检 → 目标全新 → 目录根身份 → 补父目录 → `storage.move` → 同事务提交。
+     *
+     * Local FS 的 `nativeDirectoryMove` 恒为 false，真栈走不到这里；能力声明支持原生目录移动的后端用受控 Storage 验证。
+     */
+    private suspend fun moveDirectoryNative(
+        source: VfsUri,
+        target: VfsUri,
+        sourceRoute: RouteMatch,
+        targetRoute: RouteMatch,
+        storage: Storage,
+    ): NodeInfo {
+        confirmMoveTargetAbsent(target, storage, targetRoute)
+        val nodeId = ensureSourceIdentity(source.path, NodeType.DIRECTORY)
+        val createdDirectories = createMissingParents(target, storage, targetRoute)
+        val moved =
+            try {
+                storage.move(sourceRoute.relativePath, targetRoute.relativePath)
+            } catch (failure: VfsException) {
+                throw failure.withKnownChanges(createdDirectories)
+            }
+        return try {
+            pipeline.commitInsideBoundary { scope -> commitDirectoryMove(scope, nodeId, source, target, moved) }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The directory was moved on the backing storage but the node paths and event could not be committed: " +
+                    "${failure.message ?: failure::class.java.simpleName}",
+                target,
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+    }
+
+    /** 源树里的一条：挂载内相对路径 + 类型 + 可用属性。枚举一次就固定下来，删源前再回读一次比对。 */
+    private data class TreeEntry(
+        val relative: StoragePath,
+        val type: NodeType,
+        val attributes: StorageAttributes?,
+    )
+
+    /**
+     * 把源树逐条枚举出来（DFS，父目录先于子项），**不复用任何 Vfs 公开操作**。
+     *
+     * 目录条目自身也进列表：这样空目录不会丢。枚举失败按调用方的阶段合并 effect。
+     */
+    private suspend fun enumerateTree(
+        storage: Storage,
+        root: StoragePath,
+    ): List<TreeEntry> {
+        val collected = mutableListOf<TreeEntry>()
+
+        suspend fun walk(directory: StoragePath) {
+            for (entry in storage.list(directory)) {
+                val child = directory.resolve(entry.name)
+                val type = entry.attributes?.type ?: storage.stat(child).type
+                collected += TreeEntry(child, type, entry.attributes)
+                if (type == NodeType.DIRECTORY) walk(child)
+            }
+        }
+        walk(root)
+        return collected
+    }
+
+    /**
+     * 目录的复制移动（T22）：枚举 → 逐条复制 / 建目录 → 整树确认 → 删源 → 同事务提交根与子树。
+     *
+     * 关键顺序：**全部条目复制并确认之后**才开始删源，不会「复制完第一个文件就删源」。
+     * 逐文件复用 T21 的有界读取、源侧提前检查、`CREATE_NEW` 与目标确认；长度缺失表示未知，不冒充 0。
+     */
+    private suspend fun moveDirectoryByCopy(
+        source: VfsUri,
+        target: VfsUri,
+        sourceRoute: RouteMatch,
+        targetRoute: RouteMatch,
+        sourceStorage: Storage,
+        targetStorage: Storage,
+    ): NodeInfo {
+        // 目标必须全新：已有文件或目录都拒绝，不覆盖、不合并目录树、不当作「移进去」。
+        confirmMoveTargetAbsent(target, targetStorage, targetRoute)
+
+        // 1. 先枚举源树。枚举失败时目标一个字节都还没碰，effect 保持 NONE。
+        val sourceEntries = enumerateTree(sourceStorage, sourceRoute.relativePath)
+
+        // 2. 目录根身份：未登记就建一次 DIRECTORY 身份（不是 FILE），已登记直接复用。
+        val nodeId = ensureSourceIdentity(source.path, NodeType.DIRECTORY)
+
+        // 3. 目标根与目标父目录。已建层数记进 effect：后面失败至少要报 PARTIAL。
+        var createdDirectories = createMissingParents(target, targetStorage, targetRoute)
+        try {
+            targetStorage.createDirectory(targetRoute.relativePath)
+            createdDirectories += 1
+        } catch (failure: VfsException) {
+            throw failure.withKnownChanges(createdDirectories)
+        }
+
+        // 4. 逐条复制（父目录先于子项，所以子项写入时父目录已经存在）。
+        //    entry.relative 是「挂载内相对路径」；相对**源根**的后缀才是要接到目标根上的那一段。
+        val sourceRootSegments = sourceRoute.relativePath.segments
+        for (entry in sourceEntries) {
+            currentCoroutineContext().ensureActive()
+            val suffix = entry.relative.segments.drop(sourceRootSegments.size)
+            val sourceChild = entry.relative
+            val targetChild = targetRoute.relativePath.resolveAll(suffix)
+            try {
+                if (entry.type == NodeType.DIRECTORY) {
+                    targetStorage.createDirectory(targetChild)
+                    createdDirectories += 1
+                } else {
+                    copyOneFile(sourceStorage, targetStorage, source, target, sourceChild, targetChild, createdDirectories)
+                }
+            } catch (failure: VfsException) {
+                // 已经建出目录 / 写过目标 → 至少 PARTIAL；此前复制成功的条目是真实副作用。
+                throw failure.withKnownChanges(createdDirectories)
+            }
+        }
+
+        // 5. 整树确认：目标条目集合与类型必须与源一致。长度一致不等于哈希一致，这里只比集合与类型。
+        //    两侧都换算成「相对各自根的段列表」再比，源根与目标根不同不影响比较。
+        val targetEntries = enumerateTree(targetStorage, targetRoute.relativePath)
+        val sourceShape = sourceEntries.map { it.relative.segments.drop(sourceRootSegments.size) to it.type }.toSet()
+        val targetShape = targetEntries.map { it.relative.segments.drop(targetRoute.relativePath.segments.size) to it.type }.toSet()
+        if (sourceShape != targetShape) {
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "The copied directory tree does not match the source: source has ${sourceShape.size} entries, " +
+                    "target has ${targetShape.size}",
+                target,
+                effect = VfsEffect.PARTIAL,
+            )
+        }
+
+        // 6. 全部复制并确认之后才删源。一次递归删除交给 Storage；失败保留后端 code / effect（含 UNKNOWN）。
+        try {
+            sourceStorage.delete(sourceRoute.relativePath, recursive = true)
+        } catch (failure: VfsException) {
+            throw failure.withKnownTargetWrite()
+        }
+
+        // 7. 同一事务迁移根与全部已登记后代的路径，追加一条根级 DIRECTORY_MOVED。
+        val rootAttributes = StorageAttributes(NodeType.DIRECTORY, null, null)
+        return try {
+            pipeline.commitInsideBoundary { scope ->
+                commitDirectoryMove(scope, nodeId, source, target, rootAttributes)
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The directory was copied and the source deleted but the node paths and event could not be committed: " +
+                    "${failure.message ?: failure::class.java.simpleName}",
+                target,
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+    }
+
+    /**
+     * 整树复制里的单个文件：有界读 → 源侧长度提前检查 → `CREATE_NEW` 写 → 目标确认 → 可用长度核对。
+     *
+     * 与 [moveByCopy] 同一条规则，只是这里不负责删源与提交——那是整树级别的决定。
+     */
+    private suspend fun copyOneFile(
+        sourceStorage: Storage,
+        targetStorage: Storage,
+        source: VfsUri,
+        target: VfsUri,
+        sourceChild: StoragePath,
+        targetChild: StoragePath,
+        createdDirectories: Int,
+    ) {
+        val copyLimit = minOf(limits.defaultReadMaxBytes, limits.defaultWriteMaxBytes)
+        val sourceAttributes = sourceStorage.stat(sourceChild)
+        val content = sourceStorage.read(sourceChild, copyLimit)
+        val copiedBytes = content.bytes.size.toLong()
+
+        // 源侧提前检查：读了才知道实际字节数，此时目标还没被写。
+        val sourceLengths =
+            listOf(
+                "sourceStat" to sourceAttributes.sizeBytes,
+                "readReceipt" to content.attributes.sizeBytes,
+            ).filter { it.second != null }
+        sourceLengths.firstOrNull { it.second != copiedBytes }?.let { mismatch ->
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "Source length mismatch after reading '$sourceChild': copied=$copiedBytes but " +
+                    "${mismatch.first}=${mismatch.second} (known: ${sourceLengths.joinToString { "${it.first}=${it.second}" }})",
+                source,
+                effect = if (createdDirectories == 0) VfsEffect.NONE else VfsEffect.PARTIAL,
+            )
+        }
+
+        val written =
+            try {
+                targetStorage.write(targetChild, content.bytes, StorageWriteMode.CREATE_NEW)
+            } catch (failure: VfsException) {
+                throw failure.withKnownChanges(createdDirectories)
+            }
+        val targetAttributes =
+            try {
+                targetStorage.stat(targetChild)
+            } catch (failure: VfsException) {
+                throw failure.withKnownTargetWrite()
+            }
+        if (targetAttributes.type != NodeType.FILE) {
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "Target '$targetChild' is ${targetAttributes.type} after write, expected FILE",
+                target,
+                effect = VfsEffect.PARTIAL,
+            )
+        }
+        val knownLengths =
+            listOf(
+                "sourceStat" to sourceAttributes.sizeBytes,
+                "readReceipt" to content.attributes.sizeBytes,
+                "writtenReceipt" to written.sizeBytes,
+                "targetStat" to targetAttributes.sizeBytes,
+            ).filter { it.second != null }
+        val mismatch = knownLengths.firstOrNull { it.second != copiedBytes }
+        if (mismatch != null) {
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "Length mismatch after copying '$targetChild': copied=$copiedBytes but ${mismatch.first}=${mismatch.second} " +
+                    "(known: ${knownLengths.joinToString { "${it.first}=${it.second}" }})",
+                target,
+                effect = VfsEffect.PARTIAL,
+            )
+        }
+    }
+
+    /**
+     * 目录移动的最终事务：把根与**全部有效已登记后代**迁到目标前缀下，追加**一条**根级 `DIRECTORY_MOVED`。
+     *
+     * 只迁移状态库里已存在的记录，不批量登记未注册后代；ID、类型与 `registeredAt` 都不动。
+     * `findSubtree` 按完整段边界选取（`a/...` 不会误伤 `a-old/...` 或 `A/...`），且必须在 `updatePath` 之前查。
+     */
+    private suspend fun commitDirectoryMove(
+        scope: TransactionScope,
+        rootId: NodeId,
+        source: VfsUri,
+        target: VfsUri,
+        attributes: StorageAttributes,
+    ): NodeInfo {
+        val now = clock()
+        val root =
+            scope.nodes.findById(rootId) ?: throw IllegalStateException(
+                "The moved directory '$rootId' is missing from the committing transaction view",
+            )
+        val sourceSegments = source.path.segments
+        val targetSegments = target.path.segments
+        for (node in scope.nodes.findSubtree(source.path)) {
+            val suffix = node.path.segments.drop(sourceSegments.size)
+            scope.nodes.updatePath(node.id, VfsPath.of(targetSegments + suffix), now)
+        }
+        scope.events.append(events.newMove(VfsEventType.DIRECTORY_MOVED, root.id, source, target))
+        return NodeInfo(
+            id = root.id,
+            uri = target,
+            type = NodeType.DIRECTORY,
+            registeredAt = root.registeredAt,
+            updatedAt = now,
+            storage = StorageStat(sizeBytes = attributes.sizeBytes, modifiedAt = attributes.modifiedAt),
+        )
     }
 
     /**
@@ -689,7 +966,7 @@ class DefaultVfs(
         confirmMoveTargetAbsent(target, targetStorage, targetRoute)
 
         // 身份：已登记源复用原 ID；未登记源按 NodeRepository 的注册语义建立一次身份（懒注册）再迁移这条记录。
-        val nodeId = ensureSourceIdentity(source.path)
+        val nodeId = ensureSourceIdentity(source.path, NodeType.FILE)
 
         // 1. 有界读取源文件：取 Core 现有读写限额里较小的那个（写侧也要过一遍内容），后端更严格的限制仍然生效。
         //    读取失败（包括超限的 LIMIT_EXCEEDED）原样往上抛：源保留、目标盘连父目录都不会被补、无事件。
@@ -846,7 +1123,10 @@ class DefaultVfs(
      * 例：磁盘上已有、状态库里没有的 `a.txt` 移到 `b.txt`，这里先给它发一个新 ID，`getNode(新 ID)`
      * 随即指向 `b.txt`；目标位置不会另外生成第二个 ID。
      */
-    private suspend fun ensureSourceIdentity(sourcePath: VfsPath): NodeId {
+    private suspend fun ensureSourceIdentity(
+        sourcePath: VfsPath,
+        type: NodeType,
+    ): NodeId {
         // 直接读写自动提交的仓库：这里就在边界里，不再套会自取锁的 Registry 公开方法。
         nodes.findByPath(sourcePath)?.let { return it.id }
         val now = clock()
@@ -855,7 +1135,7 @@ class DefaultVfs(
                 NodeRecord(
                     id = NodeId.parse(newUuidV7().toString()),
                     path = sourcePath,
-                    type = NodeType.FILE,
+                    type = type,
                     physical = true,
                     registeredAt = now,
                     updatedAt = now,

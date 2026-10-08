@@ -15,7 +15,6 @@ import com.github.noahshen.alcyone.context.vfs.runtime.MountConfig
 import com.github.noahshen.alcyone.context.vfs.runtime.VfsRuntimeConfig
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -154,12 +153,14 @@ class RuntimeLazyRegistrationAndFailureTest {
                 assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, deleteRoot.code, "挂载根不能删")
                 assertEquals(VfsEffect.NONE, deleteRoot.effect, "结构保护拒绝零副作用")
 
-                // 4) 目录移动仍属阶段拒绝（T22）：明确 UNSUPPORTED_OPERATION，源和目标都不动。
-                //    同 Mount 文件移动已在 T20 交付，所以这里改用预置的目录做未交付反例。
-                val moved = assertFailsWith<VfsException> { vfs.move(uri("/adir"), uri("/adir2")) }
-                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, moved.code, "目录移动属于 T22")
-                assertTrue(Files.exists(disk.resolve("adir/inside.txt")), "move 被拒后源目录还在")
-                assertFalse(Files.exists(disk.resolve("adir2")), "move 被拒后没有新目录")
+                // 4) 目录移动已在 T22 交付，不再是阶段拒绝；这里改用**纯参数冲突**做移动反例：
+                //    目标落进源自己的子树，属于预检第一步就拒掉的输入错误，零副作用。
+                val selfContained =
+                    assertFailsWith<VfsException> {
+                        vfs.move(VfsUri.parse("alcyone://resources/docs"), VfsUri.parse("alcyone://resources/docs/moved"))
+                    }
+                assertEquals(VfsErrorCode.INVALID_ARGUMENT, selfContained.code, "目标不能落进源子树")
+                assertTrue(Files.exists(disk.resolve("adir/inside.txt")), "源目录仍在")
 
                 // 失败前后事实一致：有效 Node / Metadata / 事件日志与磁盘文件集合都没变；
                 // 另外单独直接核对唯一个受保护文件的内容仍是原字节（快照的 disk 只记路径，不记字节）。
