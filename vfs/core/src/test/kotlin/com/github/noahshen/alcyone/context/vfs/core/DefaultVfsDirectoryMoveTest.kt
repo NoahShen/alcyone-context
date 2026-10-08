@@ -698,6 +698,89 @@ class DefaultVfsDirectoryMoveTest {
             assertEquals("B", disk.readText("archive/work2/b.txt"))
             assertEquals(listOf(VfsEventType.DIRECTORY_MOVED), harness.committedEvents().map { it.type })
         }
+
+    /**
+     * R2：初次枚举的源长度是 `null`（属性整体存在、只是长度未知），删源前复查读到 5 字节——
+     * 必须与**实际复制的 3 字节**对上，不能因为「初始未知」就跳过。
+     */
+    @Test
+    @Timeout(60)
+    fun `R2 a source that becomes a different known length than the copied bytes is caught`() =
+        runBlocking {
+            val inner = StorageFakeImpl()
+            inner.makeDirectory("work")
+            inner.withFile("work/a.txt", "abc") // 3 字节
+            var sourceListings = 0
+            val source =
+                object : Storage by inner {
+                    override suspend fun list(path: StoragePath): List<StorageEntry> {
+                        val entries = inner.list(path)
+                        if (path.segments == listOf("work")) {
+                            sourceListings++
+                            // 第一次（初快照）长度未知；删源前那次报 5 字节。
+                            return entries.map { entry ->
+                                if (entry.type == NodeType.FILE) {
+                                    entry.copy(attributes = entry.attributes?.copy(sizeBytes = if (sourceListings == 1) null else 5L))
+                                } else {
+                                    entry
+                                }
+                            }
+                        }
+                        return entries
+                    }
+                }
+            val harness = copyHarness(source)
+            inner.calls.clear()
+
+            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/work"), uri("/archive/work")) }
+
+            assertEquals(VfsErrorCode.CONFLICT, failure.code, "当前源长度 5 与已复制 3 字节矛盾")
+            assertEquals(VfsEffect.PARTIAL, failure.effect)
+            assertTrue(inner.calls.none { it.startsWith("delete:") }, "矛盾时不许删源：${inner.calls}")
+            assertEquals("abc", inner.readText("work/a.txt"), "源内容仍在")
+            assertTrue(harness.committedEvents().isEmpty())
+            assertTrue(
+                harness.committedNodes().all { it.path.toString().startsWith("/resources/work") },
+                "逻辑路径仍指向源：${harness.committedNodes().map { it.path }}",
+            )
+        }
+
+    /** R2 对照：当前源长度仍未知、或与复制字节一致时，移动照常完成。 */
+    @Test
+    @Timeout(60)
+    fun `R2 a still unknown or matching source length does not block the move`() =
+        runBlocking {
+            val disk = StorageFakeImpl()
+            disk.makeDirectory("work")
+            disk.withFile("work/a.txt", "abc")
+            var listed = 0
+            val source =
+                object : Storage by disk {
+                    override suspend fun list(path: StoragePath): List<StorageEntry> {
+                        val entries = disk.list(path)
+                        listed++
+                        if (listed == 1) {
+                            return entries.map {
+                                if (it.type ==
+                                    NodeType.FILE
+                                ) {
+                                    it.copy(attributes = it.attributes?.copy(sizeBytes = null))
+                                } else {
+                                    it
+                                }
+                            }
+                        }
+                        return entries
+                    }
+                }
+            val harness = copyHarness(source)
+
+            harness.vfs.move(uri("/work"), uri("/archive/work"))
+
+            assertEquals("abc", disk.readText("archive/work/a.txt"), "内容搬到目标")
+            assertNull(disk.typeOfOrNull("work"), "源树已删")
+            assertEquals(listOf(VfsEventType.DIRECTORY_MOVED), harness.committedEvents().map { it.type })
+        }
 }
 
 /** 数住原生目录 move 的次数，其余转发给内存盘。 */

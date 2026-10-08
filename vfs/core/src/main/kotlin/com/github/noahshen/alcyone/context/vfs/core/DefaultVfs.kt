@@ -854,17 +854,35 @@ class DefaultVfs(
                 effect = VfsEffect.PARTIAL,
             )
         }
+        // 按相对后缀建索引，避免逐条 firstOrNull 的平方级查找。
+        val sourceBeforeBySuffix = sourceEntries.associateBy { it.relative.segments.drop(sourceRootSegments.size) }
         for (entry in sourceNow) {
-            val before = sourceEntries.firstOrNull { it.relative == entry.relative } ?: continue
-            val beforeSize = before.attributes.sizeBytes ?: continue
-            val nowSize = entry.attributes.sizeBytes ?: continue
-            if (beforeSize != nowSize) {
-                throw VfsException(
-                    VfsErrorCode.CONFLICT,
-                    "Source '${entry.relative}' changed length while it was being copied: before=$beforeSize now=$nowSize",
-                    source,
-                    effect = VfsEffect.PARTIAL,
-                )
+            val suffix = entry.relative.segments.drop(sourceRootSegments.size)
+            val before = sourceBeforeBySuffix[suffix] ?: continue
+            val nowSize = entry.attributes.sizeBytes
+            // 目录不套用文件的字节数规则。
+            if (entry.type == NodeType.FILE) {
+                // 关键：拿**当前可用源长度**与这个文件**实际复制了多少字节**比，不以「初始长度是否存在」为前提。
+                // 初次枚举长度是 null、之后变成已知 5 字节时，仍然要与已复制的 3 字节对上。
+                val copied = copiedBytesBySuffix[suffix]
+                if (copied != null && nowSize != null && nowSize != copied) {
+                    throw VfsException(
+                        VfsErrorCode.CONFLICT,
+                        "Source '${entry.relative}' no longer matches the copied bytes: copied=$copied now=$nowSize",
+                        source,
+                        effect = VfsEffect.PARTIAL,
+                    )
+                }
+                // 初始长度也参与一致性检查（能提供时就比），但它不能替代上面按复制结果的核对。
+                val beforeSize = before.attributes.sizeBytes
+                if (beforeSize != null && nowSize != null && beforeSize != nowSize) {
+                    throw VfsException(
+                        VfsErrorCode.CONFLICT,
+                        "Source '${entry.relative}' changed length while it was being copied: before=$beforeSize now=$nowSize",
+                        source,
+                        effect = VfsEffect.PARTIAL,
+                    )
+                }
             }
         }
 
