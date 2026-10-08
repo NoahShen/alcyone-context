@@ -698,6 +698,24 @@ class DefaultVfs(
         // 实际复制到多少字节——确认阶段要与所有可用长度（源预检 stat、读取回执、写入回执、目标 stat）对齐。
         val copiedBytes = content.bytes.size.toLong()
 
+        // 1'. 第一阶段长度确认：只比较**源侧**可用长度（源预检 stat、读取回执）与实际复制字节数。
+        //     读完就查，此时还没补目录、没写目标，所以已知源侧矛盾时目标一个字节都不动（effect NONE）。
+        //     null 表示未知，不参与比较、也不等于 0。
+        val sourceLengths =
+            listOf(
+                "sourceStat" to sourcePrecheck.sizeBytes,
+                "readReceipt" to content.attributes.sizeBytes,
+            ).filter { it.second != null }
+        sourceLengths.firstOrNull { it.second != copiedBytes }?.let { mismatch ->
+            throw VfsException(
+                VfsErrorCode.CONFLICT,
+                "Source length mismatch after reading '${source.path}': copied=$copiedBytes but " +
+                    "${mismatch.first}=${mismatch.second} (known: ${sourceLengths.joinToString { "${it.first}=${it.second}" }})",
+                source,
+                effect = VfsEffect.NONE,
+            )
+        }
+
         // 2. 补目标父目录（读取成功并确认实际字节数后）。
         val createdDirectories = createMissingParents(target, targetStorage, targetRoute)
 

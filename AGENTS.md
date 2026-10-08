@@ -1,8 +1,16 @@
 # AGENTS.md
 
+## 本次修改（2026-10-07，T21 R2 检查时机修复）
+
+- 修 R2 残留：长度确认拆为**两阶段**——读完源、尚未补目录 / 写目标先比**源侧**可用长度（源预检 `stat`、读回执），已知矛盾当场 `CONFLICT` + `NONE`；目标侧（写回执、目标 `stat`）写入后再比，保留 `PARTIAL`。补「源侧长度矛盾早于任何目标副作用」与「未知源侧长度不阻碍」两例。测试 680 → **681**，源码 `@Test` 与 XML 差额为零，`./scripts/check` 全绿。T21 保持 **IN_REVIEW**，等复核方收口；不开始 T22。涉及第 25 条与当前进度。
+
+## 本次修改（2026-10-07，4703578 修复收口复核）
+
+- `4703578` 独立 680 例通过；R1 / R3 关闭，R2 源长度检查需提前、R4 变异记录需统一。涉及第 25 条与当前进度，见 T21 复核第 6 节；IN_REVIEW，不开始 T22。
+
 ## 本次修改（2026-10-07，T21 修复 R1～R4 与 S1）
 
-- 修 R1：确认 `stat` / 删源失败不再把后端异常改写成 `CONFLICT` / `STORAGE_ERROR`，保留后端 `code / effect`（含 `UNKNOWN`），仅把 `NONE` 提到 `PARTIAL`（新增私有 `withKnownTargetWrite()`）。R2：长度确认纳入源预检 `stat` 与读取回执，只比较可用长度、`null` 不当 0。R3：补「写入部分完成后抛错」受控反例，修正 CREATE_NEW 注释与源 / 目标 delete 断言归属。R4：订正计数（总数 642→680，core 273→281 +8，新增 DefaultVfsCopyMoveTest 24）、撤回无依据的收口口径与过强表述（Runtime rename / inode、A04 层级、A02 订阅时机）。S1：收窄预检注释。`./scripts/check` 全绿，源码 `@Test` 与 XML 差额为零，4 组定向变异全咬住。T21 保持 **IN_REVIEW**，等复核方再次收口；不开始 T22。涉及第 25 条与当前进度。
+- 修 R1：确认 `stat` / 删源失败不再把后端异常改写成 `CONFLICT` / `STORAGE_ERROR`，保留后端 `code / effect`（含 `UNKNOWN`），仅把 `NONE` 提到 `PARTIAL`（新增私有 `withKnownTargetWrite()`）。R2：长度确认纳入源预检 `stat` 与读取回执，只比较可用长度、`null` 不当 0。R3：补「写入部分完成后抛错」受控反例，修正 CREATE_NEW 注释与源 / 目标 delete 断言归属。R4：订正计数（总数 642→680，core 273→281 +8，新增 DefaultVfsCopyMoveTest 24）、撤回无依据的收口口径与过强表述（Runtime rename / inode、A04 层级、A02 订阅时机）。S1：收窄预检注释。`./scripts/check` 全绿，源码 `@Test` 与 XML 差额为零。变异记录已按执行人分列：开发方自测 5 条、Lead 复核 3 条，分别归属不合并。T21 保持 **IN_REVIEW**，等复核方再次收口；不开始 T22。涉及第 25 条与当前进度。
 
 ## 本次修改（2026-10-07，T21 独立复核未收口）
 
@@ -402,7 +410,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 24. [T20 同 Mount 文件移动开发及验收](docs/tasks/m4-t20/T20_同Mount文件移动开发及验收.md)：**DONE**，`b991f55` 独立复核 R1～R3 关闭、642 例通过；实现同 Mount 原生文件移动与失败报告（A01～A08），复制回退 / 跨 Mount 留 T21，目录留 T22。
 
-25. [T21 复制回退与跨 Mount 文件移动开发及验收](docs/tasks/m4-t21/T21_复制回退与跨Mount文件移动开发及验收.md)：**IN_REVIEW**，`346b89e` / `1612ba1` 独立 672 例通过，R1～R4 待修，见同目录架构与技术复核；不开始 T22。
+25. [T21 复制回退与跨 Mount 文件移动开发及验收](docs/tasks/m4-t21/T21_复制回退与跨Mount文件移动开发及验收.md)：**IN_REVIEW**，681 例通过；R1～R4 已修（R2 检查时机已提前），S1～S3 已落实；实现复制回退与跨 Mount 文件移动（A01～A08），目录留 T22。见同目录 [复核记录](docs/tasks/m4-t21/T21_架构与技术复核.md#6-4703578-修复收口复核)。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 

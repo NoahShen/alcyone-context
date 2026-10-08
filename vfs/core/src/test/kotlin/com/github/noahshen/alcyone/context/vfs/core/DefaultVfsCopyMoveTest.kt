@@ -142,8 +142,8 @@ class DefaultVfsCopyMoveTest {
             assertEquals(original.id, info.id, "同 Mount 回退保留同一个 Node ID")
             assertEquals(uri("/archive/b.txt"), info.uri)
             assertEquals(NodeType.FILE, info.type)
-            assertEquals(5L, info.storage?.sizeBytes, "返回的 storage 属性来自确认阶段那次目标 stat，不为拼返回值再查一次")
-            assertEquals(5L, disk.statSizeOrNull("archive/b.txt"), "确认用的就是目标 stat 拿到的长度")
+            assertEquals(5L, info.storage?.sizeBytes, "返回的 storage 属性来自写入回执 `written`（不是确认阶段那次目标 stat），不为拼返回值再查一次")
+            assertEquals(5L, disk.statSizeOrNull("archive/b.txt"), "目标盘上文件确实是 5 字节（与回执一致）")
 
             val record = harness.committedNodes().single()
             assertEquals("/resources/archive/b.txt", record.path.toString(), "状态库里路径迁到目标")
@@ -508,27 +508,74 @@ class DefaultVfsCopyMoveTest {
         }
 
     /**
-     * A04 / R2：源预检 `stat` 说 5 字节，实际只读到 3 字节，而写入回执与目标 stat 也都是 3 字节。
-     * 只看写入 / 目标会误判通过并删源；现在源长度也参与比较 → `CONFLICT` + `PARTIAL`，源保留。
+     * A04 / R2（第一阶段）：读完源、尚未建目录 / 写目标时，源侧可用长度（源预检 `stat`、读取回执）
+     * 与实际复制字节数不符 → 立刻 `CONFLICT` + `NONE`。
+     *
+     * 目标放在**缺失父目录**下，所以「有没有建目录 / 写目标」能被盘上事实与调用记录同时看到。
+     * 源 stat 与 read 回执两个来源各证明一次（循环用例）。
      */
     @Test
-    fun `A04 a source length that disagrees with the copied bytes is a known mismatch`() =
+    fun `A04 a source side length mismatch is detected before any target side effect`() =
         runBlocking {
-            val source = SourceReadTruncatingStorage(StorageFakeImpl(), reportedSize = 5, returnedBytes = 3)
-            val target = StorageFakeImpl()
-            val harness = crossMountHarness(source, target)
-            source.withFile("a.txt", "hello") // 真盘 5 字节，预检 stat 说 5，read 只交回 3
-            harness.seedNode("/resources/a.txt")
+            // 每一组：来源说明 + 源盘（已造矛盾） + 真盘上的源内容。
+            val cases =
+                listOf(
+                    // 源预检 stat 报 5，实际只读到 3（读回执随实际字节数）。
+                    "source stat" to SourceLengthStorage(StorageFakeImpl(), transformStat = { 5L }, actualBytes = 3),
+                    // 源预检 stat 随真盘（3），读回执报 5。
+                    "read receipt" to SourceLengthStorage(StorageFakeImpl(), transformReceipt = { 5L }),
+                )
+            for ((label, source) in cases) {
+                val content = if (label == "source stat") "hello" else "abc"
+                val target = RecordingStorage(StorageFakeImpl())
+                val harness = crossMountHarness(source, target)
+                source.withFile("a.txt", content)
+                harness.seedNode("/resources/a.txt")
+                source.calls.clear()
+                target.calls.clear()
 
-            val failure = assertFailsWith<VfsException> { harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt")) }
+                val failure =
+                    assertFailsWith<VfsException>(label) {
+                        harness.vfs.move(uri("/a.txt"), uri("/archive/deep/b.txt"))
+                    }
 
-            assertEquals(VfsErrorCode.CONFLICT, failure.code, "源已知长度与复制字节数不等，是已知矛盾")
-            assertEquals(VfsEffect.PARTIAL, failure.effect, "目标已经写了 3 字节，这是已知变更")
-            assertEquals("hello", source.readText("a.txt"), "源保留")
-            assertEquals(0, source.deleteCalls, "源长度对不上就绝不删源")
-            assertEquals(3L, diskSizeOrNull(target, "b.txt"), "目标写的是读到的 3 字节")
-            assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() })
-            assertTrue(harness.committedEvents().isEmpty())
+                assertEquals(VfsErrorCode.CONFLICT, failure.code, "$label：已知源侧长度矛盾")
+                assertEquals(VfsEffect.NONE, failure.effect, "$label：还没建目录 / 没写目标，effect 必须是 NONE")
+                assertEquals(content, source.readText("a.txt"), "$label：源内容原封不动")
+                assertTrue(source.calls.none { it.startsWith("delete:") }, "$label：源 delete 未被调用：${source.calls}")
+                assertEquals(listOf("stat:deep/b.txt"), target.calls.toList(), "$label：目标盘只做了预检那次 stat，没建目录也没写")
+                assertNull(target.typeOfOrNull("deep"), "$label：缺失父目录没被建出来")
+                assertNull(target.typeOfOrNull("deep/b.txt"), "$label：目标文件没写出来")
+                assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() }, "$label：逻辑路径仍指向源")
+                assertTrue(harness.committedEvents().isEmpty(), "$label：没有成功事件")
+            }
+        }
+
+    /**
+     * A04 / R2（第一阶段对照）：源预检 `stat` 或读回执缺其一（`null` = 未知）时**不**报 `CONFLICT`，
+     * 正常走完复制。避免提前检查把「未知」误判为矛盾。
+     */
+    @Test
+    fun `A04 an unknown source side length does not block a consistent move`() =
+        runBlocking {
+            val cases =
+                listOf(
+                    "null source stat" to SourceLengthStorage(StorageFakeImpl(), transformStat = { null }),
+                    "null read receipt" to SourceLengthStorage(StorageFakeImpl(), transformReceipt = { null }),
+                )
+            for ((label, source) in cases) {
+                val target = StorageFakeImpl()
+                val harness = crossMountHarness(source, target)
+                source.withFile("a.txt", "hello")
+                val original = harness.seedNode("/resources/a.txt")
+
+                val info = harness.vfs.move(uri("/a.txt"), uri("/archive/b.txt"))
+
+                assertEquals(original.id, info.id, "$label：未知源侧长度不阻碍一致的移动")
+                assertEquals("hello", target.readText("b.txt"), "$label：内容照常搬到目标")
+                assertNull(source.typeOfOrNull("a.txt"), "$label：源已删")
+                assertEquals(listOf(VfsEventType.FILE_MOVED), harness.committedEvents().map { it.type }, "$label：一条 FILE_MOVED")
+            }
         }
 
     /** A04 / R2：写入回执 `sizeBytes = null`（未知）不算冲突，不冒充 0；真盘长度一致时照常成功。 */
@@ -617,13 +664,6 @@ class DefaultVfsCopyMoveTest {
             assertEquals(NodeMetadata(description = "keep"), harness.uow.snapshot().second[original.id], "Metadata 保留")
             assertTrue(harness.committedEvents().isEmpty(), "无成功事件")
         }
-
-    /** 读回内存盘上真实文件长度；目标缺失返回 null。 */
-    private suspend fun diskSizeOrNull(
-        storage: StorageFakeImpl,
-        relativePath: String,
-    ): Long? =
-        storage.typeOfOrNull(relativePath)?.let { storage.read(StoragePath.parse(relativePath), Long.MAX_VALUE).attributes.sizeBytes }
 
     /** A05：删源失败 → 逻辑路径仍指向源、没有成功事件，两份文件都在盘上。 */
     @Test
@@ -976,26 +1016,34 @@ class DefaultVfsCopyMoveTest {
     }
 
     /**
-     * 包一层存储：`stat` 报 [reportedSize]，但 `read` 只交回 [returnedBytes] 字节。
-     * 用来造「源预检说 5 字节、实际只读到 3 字节」的已知长度矛盾（R2）。
+     * 包一层存储：分别改写**源预检 `stat`** 与**读回执**报出的长度，并可选截短实际交回的字节数。
+     *
+     * 用来把「源侧两个长度来源」（stat / read 回执）分别造出矛盾（R2 第一阶段），
+     * 也能让其中一个报 `null`（未知）验证不误判。
+     *
+     * @param transformStat 接收真盘 stat 的长度（目录为 null），返回要报的长度；`null` = 未知。
+     * @param transformReceipt 接收实际交回内容的字节数，返回读回执要报的长度；`null` = 未知。
+     * @param actualBytes 非 null 时只交回这么多字节（读回执长度仍由 [transformReceipt] 决定）。
      */
-    private class SourceReadTruncatingStorage(
+    private class SourceLengthStorage(
         private val delegate: StorageFakeImpl,
-        private val reportedSize: Long,
-        private val returnedBytes: Int,
+        private val transformStat: (Long?) -> Long? = { it },
+        private val transformReceipt: (Long) -> Long? = { it },
+        private val actualBytes: Int? = null,
     ) : Storage by delegate {
         var deleteCalls: Int = 0
             private set
 
         override suspend fun stat(path: StoragePath): StorageAttributes =
-            delegate.stat(path).let { if (it.type == NodeType.FILE) it.copy(sizeBytes = reportedSize) else it }
+            delegate.stat(path).let { if (it.type == NodeType.FILE) it.copy(sizeBytes = transformStat(it.sizeBytes)) else it }
 
         override suspend fun read(
             path: StoragePath,
             maxBytes: Long,
         ): StorageContent {
             val content = delegate.read(path, maxBytes)
-            return StorageContent(content.bytes.copyOf(returnedBytes), content.attributes.copy(sizeBytes = returnedBytes.toLong()))
+            val bytes = if (actualBytes != null) content.bytes.copyOf(actualBytes) else content.bytes
+            return StorageContent(bytes, content.attributes.copy(sizeBytes = transformReceipt(bytes.size.toLong())))
         }
 
         override suspend fun delete(
@@ -1006,6 +1054,9 @@ class DefaultVfsCopyMoveTest {
             delegate.delete(path, recursive)
         }
 
+        /** 转发给内存盘的调用记录，用来断言「没读 / 没写 / 没删」。 */
+        val calls: MutableList<String> get() = delegate.calls
+
         fun withFile(
             path: String,
             content: String,
@@ -1014,6 +1065,8 @@ class DefaultVfsCopyMoveTest {
         }
 
         fun readText(path: String): String = delegate.readText(path)
+
+        fun typeOfOrNull(path: String): NodeType? = delegate.typeOfOrNull(path)
     }
 
     /**
