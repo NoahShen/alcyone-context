@@ -53,7 +53,8 @@ import kotlin.test.assertFailsWith
  *
  * 历史上 `FakeStateUnitOfWork.failOnStateWrite` 只在内存替身的事务测试里用过，没有一条用例证明
  * 「写 / 删 / 文件移动 / 目录移动」走到真正的提交事务时，某一次状态写入失败会被 [DefaultVfs]
- * 报成 `STATE_ERROR` + 正确 effect、并把同批的 Node / Metadata / 事件一起丢掉、且不发成功通知。
+ * 报成 `STATE_ERROR` + 正确 effect、并把本事务已做的修改全部回滚（旧记录 / Metadata 保留、
+ * 失败操作的成功事件未提交）、且不发成功通知。
  *
  * 这里装上**真的 SQLite + 真的本地磁盘**：物理副作用是真盘，状态 / 事件是真的 `SqliteUnitOfWork` 事务，
  * 只有「状态写入这一次本身失败」由包装层注入（真磁盘不会自己造出「事务写到一半被状态库拒绝」）。

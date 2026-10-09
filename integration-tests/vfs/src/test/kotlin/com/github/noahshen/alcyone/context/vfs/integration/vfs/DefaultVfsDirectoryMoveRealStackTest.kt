@@ -36,10 +36,12 @@ import com.github.noahshen.alcyone.context.vfs.storage.opendal.LocalFsStorage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -170,37 +172,48 @@ class DefaultVfsDirectoryMoveRealStackTest {
                             escaped.complete(failure)
                         }
                     }
-                pausing.awaitUpdatePath() // 物理已搬完、第一次 updatePath 已写进库，事务还没 COMMIT
-                job.cancel(cancelled)
+                // 从这里开始用 try/finally 托管：不管 awaitUpdatePath 超时还是线程被中断，
+                // 都会先把在途子协程取消并等它（含事务回滚）真正结束，再退出 withStack 关资源。
+                try {
+                    pausing.awaitUpdatePath() // 物理已搬完、第一次 updatePath 已写进库，事务还没 COMMIT
+                    job.cancel(cancelled)
 
-                withTimeout(30_000) { job.join() }
-                val escapedFailure = withTimeout(30_000) { escaped.await() }
-                assertNotNull(escapedFailure, "移动链应该把取消抛出来，而不是安静地结束")
-                assertFalse(escapedFailure is VfsException, "取消没有被包装成 VfsException：$escapedFailure")
-                assertTrue(escapedFailure is CancellationException, "CancellationException 原样传播：$escapedFailure")
-                assertSame(cancelled, escapedFailure?.cause ?: escapedFailure, "取消原因一致")
+                    withTimeout(30_000) { job.join() }
+                    val escapedFailure = withTimeout(30_000) { escaped.await() }
+                    assertNotNull(escapedFailure, "移动链应该把取消抛出来，而不是安静地结束")
+                    assertFalse(escapedFailure is VfsException, "取消没有被包装成 VfsException：$escapedFailure")
+                    assertTrue(escapedFailure is CancellationException, "CancellationException 原样传播：$escapedFailure")
+                    assertSame(cancelled, escapedFailure?.cause ?: escapedFailure, "取消原因一致")
 
-                // 实际事实：物理搬完这件事不会因为取消而消失；逻辑路径随事务回滚。
-                assertFalse(Files.exists(leftRoot.resolve("work")), "物理删除已完成，不声称「取消 = 没搬过」")
-                assertEquals("A", Files.readString(rightRoot.resolve("work/a.txt")), "目标内容保留")
-                assertEquals("B", Files.readString(rightRoot.resolve("work/b.txt")))
-                assertEquals(root, stack.nodes.findByPath(VfsPath.parse("/resources/local/work"))?.id, "根路径回滚到源")
-                assertEquals(child, stack.nodes.findByPath(VfsPath.parse("/resources/local/work/a.txt"))?.id, "后代路径也回滚")
-                assertNull(stack.nodes.findByPath(VfsPath.parse("/resources/archive/work")), "目标路径没有记录")
-                assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(root), "Metadata 未改")
-                assertEquals(0, eventCount(), "取消不追加目录事件")
-                assertEquals(1, pausing.pausedUpdates(), "只有第一次 updatePath 挂起过")
+                    // 实际事实：物理搬完这件事不会因为取消而消失；逻辑路径随事务回滚。
+                    assertFalse(Files.exists(leftRoot.resolve("work")), "物理删除已完成，不声称「取消 = 没搬过」")
+                    assertEquals("A", Files.readString(rightRoot.resolve("work/a.txt")), "目标内容保留")
+                    assertEquals("B", Files.readString(rightRoot.resolve("work/b.txt")))
+                    assertEquals(root, stack.nodes.findByPath(VfsPath.parse("/resources/local/work"))?.id, "根路径回滚到源")
+                    assertEquals(child, stack.nodes.findByPath(VfsPath.parse("/resources/local/work/a.txt"))?.id, "后代路径也回滚")
+                    assertNull(stack.nodes.findByPath(VfsPath.parse("/resources/archive/work")), "目标路径没有记录")
+                    assertEquals(NodeMetadata(description = "keep"), stack.metadata.get(root), "Metadata 未改")
+                    assertEquals(0, eventCount(), "取消不追加目录事件")
+                    assertEquals(1, pausing.pausedUpdates(), "只有第一次 updatePath 挂起过")
 
-                // 锁已放行：紧接着的写能拿到同一把边界并完成——能跑完就是锁没被留下的证据。
-                val after = stack.vfs.write(uri("/local/after.txt"), "after".toByteArray())
-                assertEquals("after", Files.readString(leftRoot.resolve("after.txt")))
-                assertEquals(listOf("FILE_CREATED"), eventTypes(), "被取消的那次没有留下目录事件")
+                    // 锁已放行：紧接着的写能拿到同一把边界并完成——能跑完就是锁没被留下的证据。
+                    val after = stack.vfs.write(uri("/local/after.txt"), "after".toByteArray())
+                    assertEquals("after", Files.readString(leftRoot.resolve("after.txt")))
+                    assertEquals(listOf("FILE_CREATED"), eventTypes(), "被取消的那次没有留下目录事件")
 
-                // 末尾哨兵按 ID 等：被取消的那次一条通知都没有。
-                val marker = EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/tail.txt"))
-                stack.notifier.publish(listOf(marker.toVfsEvent()))
-                recorder.await(marker.id)
-                assertEquals(listOf(after.id, null), recorder.received.map { it.nodeId }, "被取消的那次没有通知")
+                    // 末尾哨兵按 ID 等：被取消的那次一条通知都没有。
+                    val marker = EventFactory().newRecord(VfsEventType.FILE_CREATED, null, uri("/tail.txt"))
+                    stack.notifier.publish(listOf(marker.toVfsEvent()))
+                    recorder.await(marker.id)
+                    assertEquals(listOf(after.id, null), recorder.received.map { it.nodeId }, "被取消的那次没有通知")
+                } finally {
+                    // 兜底：正常路径已 join 过，这里是异常路径的保障。取消与等待都必须躲开外层的取消，
+                    // 否则「结束在途工作」会自己先被取消掉；完成这一步之后 withStack 的 finally 才关资源。
+                    withContext(NonCancellable) {
+                        if (job.isActive) job.cancel(cancelled)
+                        job.join()
+                    }
+                }
             }
         }
 
