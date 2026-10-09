@@ -38,7 +38,8 @@ class VfsRuntimeConfigTest {
         val root = disk("docs")
         val resolved = config(mounts = listOf(MountConfig(VfsPath.parse("/resources/docs"), "docs", root))).resolve()
 
-        assertEquals(root.toRealPath(), resolved.roots.getValue("docs"), "物理根应当是消解过符号链接的真实目录")
+        val docs = resolved.backends.getValue("docs") as MountBackend.LocalFs
+        assertEquals(root.toRealPath(), docs.root, "物理根应当是消解过符号链接的真实目录")
         assertEquals("local-fs", resolved.mounts.single().backendType, "Local FS 的后端类型固定")
         assertTrue(resolved.databasePath.isAbsolute, "状态库路径收敛成绝对路径")
         assertEquals(resolved.databasePath.fileName.toString() + ".lock", resolved.lockPath.fileName.toString())
@@ -57,7 +58,7 @@ class VfsRuntimeConfigTest {
                     ),
             ).resolve()
 
-        assertEquals(1, resolved.roots.size, "同一个 key 只开一个存储实例")
+        assertEquals(1, resolved.backends.size, "同一个 key 只开一个存储实例")
         assertEquals(2, resolved.mounts.size, "两个逻辑挂载点都在")
     }
 

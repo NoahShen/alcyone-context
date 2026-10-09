@@ -24,6 +24,8 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
  * 停机超时策略由 T18 / T27 承接，本轮不做。
  */
 internal class NativeLifetime(
+    /** 错误消息里的后端名；本地盘与 WebDAV 共用这把锁，消息不能互相说错。 */
+    private val label: String = "local storage",
     private val release: () -> Unit,
 ) {
     private val lock = ReentrantReadWriteLock()
@@ -33,7 +35,7 @@ internal class NativeLifetime(
     fun <T> call(block: () -> T): T {
         lock.readLock().lock()
         try {
-            if (closed.get()) throw VfsException(VfsErrorCode.CLOSED, "local storage is closed")
+            if (closed.get()) throw VfsException(VfsErrorCode.CLOSED, "$label is closed")
             return block()
         } finally {
             lock.readLock().unlock()

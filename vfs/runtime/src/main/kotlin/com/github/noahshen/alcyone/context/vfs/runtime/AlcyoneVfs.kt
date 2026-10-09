@@ -29,6 +29,8 @@ import com.github.noahshen.alcyone.context.vfs.persistence.sqldelight.SqliteNode
 import com.github.noahshen.alcyone.context.vfs.persistence.sqldelight.SqliteUnitOfWork
 import com.github.noahshen.alcyone.context.vfs.persistence.sqldelight.VfsStateDatabase
 import com.github.noahshen.alcyone.context.vfs.storage.opendal.LocalFsStorage
+import com.github.noahshen.alcyone.context.vfs.storage.opendal.StorageAdapter
+import com.github.noahshen.alcyone.context.vfs.storage.opendal.WebDavStorage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -385,7 +387,7 @@ class AlcyoneVfs private constructor(
     internal class Assembly(
         val state: VfsStateDatabase,
         val notifier: AsyncEventNotifier,
-        val storages: List<LocalFsStorage>,
+        val storages: List<Storage>,
     )
 
     companion object {
@@ -432,10 +434,9 @@ class AlcyoneVfs private constructor(
 
                 val notifier = AsyncEventNotifier(resolved.eventBufferCapacity).also { acquired += it }
                 val storages = openStorages(resolved, acquired)
-                probe.beforeReturn(Assembly(state, notifier, storages))
+                probe.beforeReturn(Assembly(state, notifier, storages.values.toList()))
 
-                val byKey = storages.associateBy { storage -> storage.root.toString() }
-                val lookups = resolved.roots.mapValues { (_, root) -> byKey.getValue(root.toString()) }
+                val lookups: Map<String, Storage> = storages
                 val storagesByKey: (String) -> Storage? = { key -> lookups[key] }
                 return AlcyoneVfs(
                     delegate =
@@ -453,8 +454,8 @@ class AlcyoneVfs private constructor(
                             events = EventFactory(),
                         ),
                     notifier = notifier,
-                    // 释放顺序：注入的 → 通知器 → 各块盘 → 状态库 → 独占锁（锁最后放）。
-                    resources = extraResources + notifier + storages + listOf(state, lock),
+                    // 释放顺序：注入的 → 通知器 → 各块盘（本地与 WebDAV 一视同仁） → 状态库 → 独占锁（锁最后放）。
+                    resources = extraResources + notifier + storages.values.toList() + listOf(state, lock),
                     closeGracePeriod = resolved.closeGracePeriod,
                     streamTotalLimit = resolved.streamTotalLimit,
                 )
@@ -464,13 +465,27 @@ class AlcyoneVfs private constructor(
             }
         }
 
-        /** 一块一块打开 Adapter；每成功一块就登记一块，失败时已开的都被释放。 */
+        /**
+         * 一块一块打开 Adapter；每成功一块就登记一块，失败时已开的都被释放。
+         *
+         * 后端类型在这里分叉：Local FS 开本地盘，WebDAV 开远端适配器。
+         * 两种 Adapter 都实现 Storage 并且都是 AutoCloseable，Core / API 一个都看不到。
+         */
         private suspend fun openStorages(
             resolved: ResolvedConfig,
             acquired: MutableList<AutoCloseable>,
-        ): List<LocalFsStorage> =
-            resolved.roots.map { (_, root) ->
-                LocalFsStorage.create(root).also { acquired += it }
+        ): Map<String, StorageAdapter> =
+            resolved.backends.mapValues { (_, backend) ->
+                when (backend) {
+                    is MountBackend.LocalFs -> LocalFsStorage.create(backend.root)
+                    is MountBackend.WebDav ->
+                        WebDavStorage.create(
+                            endpoint = backend.endpoint,
+                            root = backend.root,
+                            username = backend.username,
+                            password = backend.password,
+                        )
+                }.also { acquired += it }
             }
 
         /**

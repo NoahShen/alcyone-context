@@ -1,0 +1,128 @@
+#!/bin/bash
+# T24 正式 WebDAV 测试入口：起一个一次性的本机 WebDAV 服务，跑真实网络用例，结束后不留进程、不留数据。
+#
+# 复用 T04 已验证的 WsgiDAV + Cheroot 组合，版本钉死在 tools/testing/webdav/requirements.txt。
+# 安装进项目忽略目录 .local/webdav/venv，不改系统 Python、不依赖个人账号。
+#
+# 用法：./scripts/webdav-check
+# 服务起不来就直接失败——这里不接受「跳过 = 通过」。
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+LOCAL="$ROOT/.local"
+VENV="$LOCAL/webdav/venv"
+REQS="$ROOT/tools/testing/webdav/requirements.txt"
+REQS_HASH="$LOCAL/webdav/requirements.sha256"
+
+fail() { echo "ERROR: $*" >&2; exit 1; }
+
+if command -v sha256sum >/dev/null 2>&1; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
+
+# Python 由网络证书情况决定：有些发行版自带的 python3 缺 CA，pip 装不动。挑一个能连上 PyPI 的。
+py_can_fetch() {
+    "$1" - <<'EOF' >/dev/null 2>&1
+import urllib.request
+urllib.request.urlopen("https://pypi.org/simple/", timeout=10)
+EOF
+}
+PY=""
+for candidate in "${WEBDAV_PYTHON:-}" python3 /usr/bin/python3; do
+    [ -n "$candidate" ] || continue
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if py_can_fetch "$candidate"; then PY="$candidate"; break; fi
+done
+[ -n "$PY" ] || fail "no Python interpreter can reach pypi.org; run with WEBDAV_PYTHON=<path to a working python3>"
+
+# 钉死的依赖没变就不重建 venv；变了就重建，保证可复现。
+want_hash="$("${SHA[@]}" "$REQS" | awk '{print $1}')"
+have_hash="$(cat "$REQS_HASH" 2>/dev/null || true)"
+if [ ! -x "$VENV/bin/wsgidav" ] || [ "$want_hash" != "$have_hash" ]; then
+    echo "Preparing the WebDAV fixture environment with $PY ..."
+    rm -rf "$VENV"
+    mkdir -p "$LOCAL/webdav"
+    "$PY" -m venv "$VENV" || fail "cannot create a project-local venv"
+    "$VENV/bin/pip" install --disable-pip-version-check --quiet -r "$REQS" \
+        || fail "cannot install the pinned WebDAV fixture dependencies"
+    printf '%s' "$want_hash" > "$REQS_HASH"
+fi
+
+# 一次性数据目录：服务的共享根和配置都在这里，结束就删。
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/t24-webdav-XXXXXX")"
+DAV_ROOT="$WORK/root"
+mkdir -p "$DAV_ROOT"
+LOG="$WORK/server.log"
+CONFIG="$WORK/wsgidav.json"
+SERVER_PID=""
+
+cleanup() {
+    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        # 先给它一个结束的机会；到点还没退再强杀，避免留下监听进程。
+        for _ in $(seq 1 50); do
+            kill -0 "$SERVER_PID" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill -9 "$SERVER_PID" 2>/dev/null || true
+    fi
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+# 测试凭据（不是个人账号）：随便连上来看到的也登不进去，认证失败才是要验证的行为。
+DAV_USER="vfstest"
+DAV_PASSWORD="t24-fixture-password"
+
+# 空闲端口：先绑 0 拿一个，立刻放手交给服务去听（本机一次性测试服务，竞争窗口可以接受）。
+PORT="$("$PY" - <<'EOF'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+EOF
+)"
+[ -n "$PORT" ] || fail "cannot allocate a loopback port"
+
+# 只监听 127.0.0.1；simple_dc + basic 认证，匿名一律 401。
+cat > "$CONFIG" <<JSON
+{
+  "host": "127.0.0.1",
+  "port": $PORT,
+  "server": "cheroot",
+  "verbose": 3,
+  "provider_mapping": {"": "$DAV_ROOT"},
+  "http_authenticator": {
+    "domain_controller": "wsgidav.dc.simple_dc.SimpleDomainController",
+    "accept_basic": true,
+    "accept_digest": false,
+    "default_to_digest": false
+  },
+  "simple_dc": {"user_mapping": {"*": {"$DAV_USER": {"password": "$DAV_PASSWORD", "roles": ["editor"]}}}}
+}
+JSON
+
+echo "Starting the WebDAV fixture on 127.0.0.1:$PORT (root: $DAV_ROOT) ..."
+"$VENV/bin/wsgidav" --config="$CONFIG" > "$LOG" 2>&1 &
+SERVER_PID=$!
+
+# 就绪探测：最多等 30 秒；进程提前退出就把日志亮出来。
+ready=""
+for _ in $(seq 1 150); do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        cat "$LOG" >&2
+        fail "the WebDAV fixture exited during startup"
+    fi
+    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+        exec 3>&- 3<&-
+        ready="yes"
+        break
+    fi
+    sleep 0.2
+done
+[ -n "$ready" ] || { cat "$LOG" >&2; fail "the WebDAV fixture did not become ready within 30s"; }
+
+cd "$ROOT"
+T24_WEBDAV_ENDPOINT="http://127.0.0.1:$PORT" \
+T24_WEBDAV_USER="$DAV_USER" \
+T24_WEBDAV_PASSWORD="$DAV_PASSWORD" \
+    ./scripts/dev gradle :integration-tests:vfs:webdavTest --rerun-tasks --console=plain
+echo "T24 WebDAV fixture finished; server and temporary root were cleaned up."

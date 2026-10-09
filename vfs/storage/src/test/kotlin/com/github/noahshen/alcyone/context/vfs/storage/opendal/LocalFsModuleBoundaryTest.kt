@@ -44,14 +44,20 @@ class LocalFsModuleBoundaryTest {
     @Test
     fun `no public member exposes an OpenDAL or JNI type`() {
         val leaking =
-            listOf(LocalFsStorage::class.java, LocalFsOptions::class.java, LocalFsRoots::class.java)
-                .flatMap { type ->
-                    type.methods
-                        .filter {
-                            java.lang.reflect.Modifier
-                                .isPublic(it.modifiers)
-                        }.flatMap { method -> listOf(method.returnType) + method.parameterTypes }
-                }.filter { it.name.startsWith("org.apache.opendal") || it.name.contains("Panama") || it.name.contains("jni") }
+            listOf(
+                LocalFsStorage::class.java,
+                LocalFsOptions::class.java,
+                LocalFsRoots::class.java,
+                WebDavStorage::class.java,
+                WebDavRoots::class.java,
+                StorageAdapter::class.java,
+            ).flatMap { type ->
+                type.methods
+                    .filter {
+                        java.lang.reflect.Modifier
+                            .isPublic(it.modifiers)
+                    }.flatMap { method -> listOf(method.returnType) + method.parameterTypes }
+            }.filter { it.name.startsWith("org.apache.opendal") || it.name.contains("Panama") || it.name.contains("jni") }
 
         assertTrue(leaking.isEmpty(), "公共签名不得暴露 OpenDAL / JNI 类型：$leaking")
     }

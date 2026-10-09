@@ -8,6 +8,7 @@ import com.github.noahshen.alcyone.context.vfs.core.event.AsyncEventNotifier
 import com.github.noahshen.alcyone.context.vfs.core.repository.MountRecord
 import com.github.noahshen.alcyone.context.vfs.core.router.MountRouter
 import com.github.noahshen.alcyone.context.vfs.storage.opendal.LocalFsRoots
+import com.github.noahshen.alcyone.context.vfs.storage.opendal.WebDavRoots
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -15,18 +16,70 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 /**
- * 一块挂载要描述什么：一个逻辑位置、一个实例标识、一个本机目录。
+ * 挂载背后是什么盘：本机目录，还是一台 WebDAV 服务上的一个根。
  *
- * 例：`resources` 命名空间下把 `/resources/docs` 挂到 `/Users/me/docs`。
+ * 两类后端各是一个子类型，配置写错了在 [VfsRuntimeConfig.resolve] 里就拒；
+ * Core / API 看不到 endpoint、凭据，也看不到 OpenDAL 的类型（T24 §2.1）。
+ */
+sealed interface MountBackend {
+    /**
+     * 挂载身份串，写进 `mount` 表的 `physical_root`，也是重开时比对的依据。
+     * Local FS 是规范化后的绝对路径，WebDAV 是整理后的 `endpoint + root`；**都不含凭据**。
+     */
+    fun identity(): String
+
+    /** 本机目录，必须已经存在。规范化（消解符号链接）在 [VfsRuntimeConfig.resolve] 里做。 */
+    data class LocalFs(
+        val root: Path,
+    ) : MountBackend {
+        override fun identity(): String = root.toString()
+    }
+
+    /**
+     * 远端 WebDAV 服务上的一个根（T24）。
+     *
+     * - [endpoint] 只接受 `http://` / `https://`，**不许**把账号密码写成 `user:pass@host`；
+     * - [root] 是服务端的共享根，例如 `/dav/team`；
+     * - [username] / [password] 只活在配置里：不进 `mount` 表、不进身份串、不进任何错误消息。
+     *
+     * [toString] 会把密码遮住，配置打印不会泄密。
+     */
+    data class WebDav(
+        val endpoint: String,
+        val root: String,
+        val username: String = "",
+        val password: String = "",
+    ) : MountBackend {
+        override fun identity(): String = WebDavRoots.identity(endpoint, root)
+
+        override fun toString(): String =
+            "WebDav(endpoint=$endpoint, root=$root, username=${username.ifEmpty { "(anonymous)" }}, password=${redacted()})"
+
+        private fun redacted(): String = if (password.isEmpty()) "(none)" else "***"
+    }
+}
+
+/**
+ * 一块挂载要描述什么：一个逻辑位置、一个实例标识、一个后端。
+ *
+ * 例：`resources` 命名空间下把 `/resources/docs` 挂到 `/Users/me/docs`；
+ * 或者把 `/resources/remote` 挂到 `http://127.0.0.1:8080` 的 `/dav/team`。
  */
 data class MountConfig(
     /** 挂载点的逻辑路径，必须在已配置的命名空间下，且不能是逻辑根 `/`。 */
     val vfsPath: VfsPath,
     /** 实例标识，只作内部唯一键用，不当凭据看；重开时它变了会按冲突拒绝。 */
     val storageKey: String,
-    /** 本机目录，必须已经存在。规范化（消解符号链接）在 [VfsRuntimeConfig.resolve] 里做。 */
-    val root: Path,
-)
+    /** 这块盘是什么：本机目录还是 WebDAV 上的根。 */
+    val backend: MountBackend,
+) {
+    /** 既有本地写法：`MountConfig(path, key, Path.of("/data/docs"))`，等价于 [MountBackend.LocalFs]。 */
+    constructor(
+        vfsPath: VfsPath,
+        storageKey: String,
+        root: Path,
+    ) : this(vfsPath, storageKey, MountBackend.LocalFs(root))
+}
 
 /**
  * Runtime 的全部配置。宿主**只提交这个对象**给 [AlcyoneVfs.create]，
@@ -34,8 +87,9 @@ data class MountConfig(
  *
  * 例：状态库放 `data/state.db`，命名空间 `resources` / `memory`，各挂一块本机目录，读写限额都是 16 MiB。
  *
- * 本轮（S1～S4）只组装到本地目录：公共流式读取 [AlcyoneVfs.openStream] 与挂载配置、
- * 关闭等待期都在实例里做。WebDAV 不在 T18 范围（T24 / T25）。
+ * 一块挂载的后端是本机目录还是 WebDAV，由 [MountBackend] 子类型说清（T24）；
+ * Core / API 只拿到 Storage Port，拿不到 endpoint、凭据或 OpenDAL 类型。
+ * 公共流式读取 [AlcyoneVfs.openStream] 与关闭等待期都在实例里做。
  */
 data class VfsRuntimeConfig(
     /** 状态库文件。相对路径按当前工作目录解析；符号链接别名会被规范化成同一个真实路径。 */
@@ -77,8 +131,8 @@ internal class ResolvedConfig(
     val mounts: List<MountRecord>,
     /** 路由视图：逻辑挂载与配置目录（T09 的校验一次做完）。 */
     val router: MountRouter,
-    /** 每个 storageKey 对应的规范化物理根；同一 key 只开一个存储实例。 */
-    val roots: Map<String, Path>,
+    /** 每个 storageKey 对应的整理后后端（Local FS 已规范化路径，WebDAV 已整理 endpoint / root）；同一 key 只开一个存储实例。 */
+    val backends: Map<String, MountBackend>,
     val limits: VfsLimits,
     val streamTotalLimit: Long?,
     val eventBufferCapacity: Int,
@@ -87,6 +141,16 @@ internal class ResolvedConfig(
     companion object {
         /** Local FS 在挂载身份里的后端类型；换后端时这一项也参与冲突判断。 */
         const val LOCAL_FS_BACKEND_TYPE: String = "local-fs"
+
+        /** WebDAV 在挂载身份里的后端类型（T24）。 */
+        const val WEBDAV_BACKEND_TYPE: String = "webdav"
+
+        /** 挂载身份里的后端类型：按后端子类型分，不按配置写法分。 */
+        fun backendTypeOf(backend: MountBackend): String =
+            when (backend) {
+                is MountBackend.LocalFs -> LOCAL_FS_BACKEND_TYPE
+                is MountBackend.WebDav -> WEBDAV_BACKEND_TYPE
+            }
     }
 }
 
@@ -113,26 +177,28 @@ internal fun VfsRuntimeConfig.resolve(): ResolvedConfig {
             throw invalidArgument("storageKey must be a non-blank name without whitespace or control characters")
         }
     }
-    // 一个 storageKey 只能对应一个目录：先把每条挂载的物理根消解成真实路径（T12），
-    // 再按 key 归并。同一个 key 写成两个目录时，后一条会被静默丢掉，读写却都落到第一条，所以直接拒。
-    val normalizedByKey = LinkedHashMap<String, Path>()
+    // 一个 storageKey 只能对应一个盘：Local FS 先把目录消解成真实路径（T12），WebDAV 先整理 endpoint / root，
+    // 再按 key 归并。同一个 key 写成两个目标时，后一条会被静默丢掉、读写却都落到第一条，所以直接拒。
+    val backendsByKey = LinkedHashMap<String, MountBackend>()
     mounts.forEach { mount ->
-        val normalized = LocalFsRoots.normalize(mount.root)
-        val already = normalizedByKey.putIfAbsent(mount.storageKey, normalized)
+        val normalized = normalizeBackend(mount.backend)
+        val already = backendsByKey.putIfAbsent(mount.storageKey, normalized)
         if (already != null && already != normalized) {
-            throw invalidArgument("storage key '${mount.storageKey}' is configured with different physical directories")
+            throw invalidArgument("storage key '${mount.storageKey}' is configured with more than one storage target")
         }
     }
-    // 根目录必须是已经存在的目录，且彼此不重叠：同一个目录挂两次不算重叠，两个目录互相包含才算（T12）。
-    LocalFsRoots.requireNonOverlapping(normalizedByKey.values)
+    // 本地目录必须已经存在、且彼此不重叠；远端根按完整路径段查重叠。同一个目标挂两次在归并阶段已经变成一块盘。
+    LocalFsRoots.requireNonOverlapping(localRoots(backendsByKey))
+    WebDavRoots.requireNonOverlapping(webDavTargets(backendsByKey))
 
     val records =
         mounts.map { mount ->
+            val backend = backendsByKey.getValue(mount.storageKey)
             MountRecord(
                 path = mount.vfsPath,
                 storageKey = mount.storageKey,
-                backendType = ResolvedConfig.LOCAL_FS_BACKEND_TYPE,
-                physicalRoot = normalizedByKey.getValue(mount.storageKey).toString(),
+                backendType = ResolvedConfig.backendTypeOf(backend),
+                physicalRoot = backend.identity(),
             )
         }
     // 逻辑侧校验：挂载不能是逻辑根、不能在未配置命名空间下、不能重复（T02 §3.1）。
@@ -141,21 +207,38 @@ internal fun VfsRuntimeConfig.resolve(): ResolvedConfig {
     val databasePath = normalizeStateDatabasePath(stateDatabase)
     val lockPath = databasePath.resolveSibling(databasePath.fileName.toString() + LOCK_SUFFIX)
     // 状态库和锁文件不能放在挂载目录里：挂载里的文件能通过公开的 delete 删掉，独占锁就失效了。
-    requireOutsideMounts(databasePath, "state database", normalizedByKey.values, records)
-    requireOutsideMounts(lockPath, "instance lock file", normalizedByKey.values, records)
+    // 只查本地根——WebDAV 挂载没有本机路径，状态库不会「落在」远端盘里。
+    requireOutsideMounts(databasePath, "state database", localRoots(backendsByKey), records)
+    requireOutsideMounts(lockPath, "instance lock file", localRoots(backendsByKey), records)
     return ResolvedConfig(
         databasePath = databasePath,
         lockPath = lockPath,
         namespaces = namespaces,
         mounts = records,
         router = router,
-        roots = normalizedByKey,
+        backends = backendsByKey,
         limits = limits,
         streamTotalLimit = streamTotalLimit,
         eventBufferCapacity = eventBufferCapacity,
         closeGracePeriod = closeGracePeriod,
     )
 }
+
+/** 把一条挂载的后端整理到可直接使用的形态：Local FS 消解符号链接，WebDAV 只做字符串整理，不联网。 */
+private fun normalizeBackend(backend: MountBackend): MountBackend =
+    when (backend) {
+        is MountBackend.LocalFs -> MountBackend.LocalFs(LocalFsRoots.normalize(backend.root))
+        is MountBackend.WebDav ->
+            WebDavRoots.normalize(backend.endpoint, backend.root).let { (endpoint, root) ->
+                MountBackend.WebDav(endpoint, root, backend.username, backend.password)
+            }
+    }
+
+private fun localRoots(backends: Map<String, MountBackend>): List<Path> =
+    backends.values.filterIsInstance<MountBackend.LocalFs>().map { it.root }
+
+private fun webDavTargets(backends: Map<String, MountBackend>): List<Pair<String, String>> =
+    backends.values.filterIsInstance<MountBackend.WebDav>().map { it.endpoint to it.root }
 
 /**
  * 把状态库路径收敛成**真实绝对路径**：相对路径按当前工作目录解析，父目录链上的符号链接换成真实目录。

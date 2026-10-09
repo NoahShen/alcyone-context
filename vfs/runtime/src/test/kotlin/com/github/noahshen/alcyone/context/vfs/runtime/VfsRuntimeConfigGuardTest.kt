@@ -83,7 +83,7 @@ class VfsRuntimeConfigGuardTest {
                 ),
             ).resolve()
 
-        assertEquals(1, resolved.roots.size, "同一个 key 只开一个存储实例")
+        assertEquals(1, resolved.backends.size, "同一个 key 只开一个存储实例")
         assertEquals(2, resolved.mounts.size, "两个逻辑挂载点都在")
         resolved.mounts.forEach { record ->
             assertEquals(real.toRealPath().toString(), record.physicalRoot, "别名与真实路径归一之后是同一块盘")

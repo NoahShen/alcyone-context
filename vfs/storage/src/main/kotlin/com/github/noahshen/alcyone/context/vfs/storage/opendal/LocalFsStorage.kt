@@ -4,7 +4,6 @@ import com.github.noahshen.alcyone.context.vfs.NodeType
 import com.github.noahshen.alcyone.context.vfs.VfsEffect
 import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsException
-import com.github.noahshen.alcyone.context.vfs.core.storage.Storage
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageAttributes
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageCapabilities
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageContent
@@ -53,8 +52,7 @@ class LocalFsStorage private constructor(
     private val statFactory: (String) -> Metadata = { path -> operator.stat(path) },
     /** 测试用的观察点，每次进入 [storageCall] 会被叫一次。生产恒为 `null`。 */
     private val onNativeCall: ((String) -> Unit)?,
-) : Storage,
-    AutoCloseable {
+) : StorageAdapter {
     /**
      * 防止「一边操作一边关闭」。
      *
@@ -458,7 +456,7 @@ class LocalFsStorage private constructor(
         operation: String,
         effect: VfsEffect = VfsEffect.NONE,
         block: () -> T,
-    ): T = storageCall(operation, effect, onNativeCall, block)
+    ): T = storageCall(operation, effect, onNativeCall, block = block)
 
     /** 交给后端的文件路径。 */
     private fun plain(path: StoragePath): String = path.toRelativeString()

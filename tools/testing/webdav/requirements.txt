@@ -1,0 +1,4 @@
+# T24 真实 WebDAV 测试服务的依赖，版本钉死；与 tools/validation/t04 已验证的组合一致。
+# 安装到项目忽略目录 .local/webdav/venv，不碰系统 Python。
+wsgidav==4.3.3
+cheroot==10.0.1

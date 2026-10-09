@@ -23,17 +23,18 @@ import java.nio.file.NoSuchFileException
  * 操作本身是阻塞的（比如读磁盘），所以必须挪到 [Dispatchers.IO]，
  * 否则会把调用方的线程占住。
  *
- * [onEnter] 只给测试用，生产恒为 `null`。
+ * [onEnter] 只给测试用，生产恒为 `null`；[backend] 只影响错误消息里的后端名。
  */
 internal suspend fun <T> storageCall(
     operation: String,
     effect: VfsEffect = VfsEffect.NONE,
     onEnter: ((String) -> Unit)? = null,
+    backend: String = "local storage",
     block: () -> T,
 ): T =
     withContext(Dispatchers.IO) {
         onEnter?.invoke(operation)
-        mapStorageErrors(operation, effect, block)
+        mapStorageErrors(operation, effect, backend, block)
     }
 
 /**
@@ -69,10 +70,12 @@ internal suspend fun <T> handoffOrRelease(
  * 把底层异常翻译成 [VfsException]。
  *
  * 取消异常和已经翻译好的 VFS 异常原样抛出，其余按错误码对照表转换。
+ * [backend] 只用来写错误消息里的后端名（本地盘 / WebDAV）。
  */
 internal fun <T> mapStorageErrors(
     operation: String,
     effect: VfsEffect = VfsEffect.NONE,
+    backend: String = "local storage",
     block: () -> T,
 ): T =
     try {
@@ -82,37 +85,46 @@ internal fun <T> mapStorageErrors(
     } catch (e: VfsException) {
         throw e
     } catch (e: OpenDALException) {
-        throw storageFailure(operation, effect, openDalCode(e), e)
+        throw storageFailure(operation, effect, openDalCode(e), backend, e)
     } catch (e: NoSuchFileException) {
-        throw storageFailure(operation, effect, VfsErrorCode.NOT_FOUND, e)
+        throw storageFailure(operation, effect, VfsErrorCode.NOT_FOUND, backend, e)
     } catch (e: AccessDeniedException) {
-        throw storageFailure(operation, effect, VfsErrorCode.STORAGE_ACCESS_DENIED, e)
+        throw storageFailure(operation, effect, VfsErrorCode.STORAGE_ACCESS_DENIED, backend, e)
     } catch (e: IOException) {
-        throw storageFailure(operation, effect, VfsErrorCode.STORAGE_ERROR, e)
+        throw storageFailure(operation, effect, VfsErrorCode.STORAGE_ERROR, backend, e)
     }
 
 /**
- * OpenDAL 错误码到 VFS 错误码的对照（OpenDAL 0.50.6 / fs / macOS arm64 实测）。
+ * OpenDAL 错误码到 VFS 错误码的对照（OpenDAL 0.50.6，fs 与 webdav 服务，macOS arm64 实测）。
  *
- * 注意 `IsADirectory` 和「删除非空目录返回 `Unexpected`」这两条：
- * [LocalFsStorage] 会自己先判断并给出更准确的错误码，这里只是兜底。
+ * 两条特别注意：
+ * - `IsADirectory` 与「删除非空目录返回 `Unexpected`」：[LocalFsStorage] / [WebDavStorage] 自己会先判断，
+ *   这里只是兑底；
+ * - **HTTP 401 单独认**：OpenDAL 0.50.6 的 webdav 服务把 401 报成 `Unexpected`，错误消息里带着响应行
+ *   `status: 401`。认这一条，认证失败才落到 `STORAGE_ACCESS_DENIED`——这是按观察到的后端行为写的对照，
+ *   不是从 HTTP 语义推断的通用规则。
  */
 private fun openDalCode(error: OpenDALException): VfsErrorCode =
-    when (error.code) {
-        OpenDALException.Code.NotFound -> VfsErrorCode.NOT_FOUND
-        OpenDALException.Code.AlreadyExists, OpenDALException.Code.ConditionNotMatch -> VfsErrorCode.ALREADY_EXISTS
-        OpenDALException.Code.IsADirectory, OpenDALException.Code.NotADirectory -> VfsErrorCode.TYPE_MISMATCH
-        OpenDALException.Code.PermissionDenied -> VfsErrorCode.STORAGE_ACCESS_DENIED
-        OpenDALException.Code.Unsupported -> VfsErrorCode.UNSUPPORTED_OPERATION
-        OpenDALException.Code.ConfigInvalid -> VfsErrorCode.INVALID_ARGUMENT
-        OpenDALException.Code.IsSameFile, OpenDALException.Code.Conflict -> VfsErrorCode.CONFLICT
-        OpenDALException.Code.RangeNotSatisfied -> VfsErrorCode.LIMIT_EXCEEDED
-        OpenDALException.Code.RateLimited, OpenDALException.Code.Unexpected -> VfsErrorCode.STORAGE_ERROR
+    if ("status: 401" in (error.message ?: "")) {
+        VfsErrorCode.STORAGE_ACCESS_DENIED
+    } else {
+        when (error.code) {
+            OpenDALException.Code.NotFound -> VfsErrorCode.NOT_FOUND
+            OpenDALException.Code.AlreadyExists, OpenDALException.Code.ConditionNotMatch -> VfsErrorCode.ALREADY_EXISTS
+            OpenDALException.Code.IsADirectory, OpenDALException.Code.NotADirectory -> VfsErrorCode.TYPE_MISMATCH
+            OpenDALException.Code.PermissionDenied -> VfsErrorCode.STORAGE_ACCESS_DENIED
+            OpenDALException.Code.Unsupported -> VfsErrorCode.UNSUPPORTED_OPERATION
+            OpenDALException.Code.ConfigInvalid -> VfsErrorCode.INVALID_ARGUMENT
+            OpenDALException.Code.IsSameFile, OpenDALException.Code.Conflict -> VfsErrorCode.CONFLICT
+            OpenDALException.Code.RangeNotSatisfied -> VfsErrorCode.LIMIT_EXCEEDED
+            OpenDALException.Code.RateLimited, OpenDALException.Code.Unexpected -> VfsErrorCode.STORAGE_ERROR
+        }
     }
 
 private fun storageFailure(
     operation: String,
     effect: VfsEffect,
     code: VfsErrorCode,
+    backend: String = "local storage",
     cause: Throwable,
-): VfsException = VfsException(code, "local storage $operation failed ($code)", effect = effect).apply { initCause(cause) }
+): VfsException = VfsException(code, "$backend $operation failed ($code)", effect = effect).apply { initCause(cause) }
