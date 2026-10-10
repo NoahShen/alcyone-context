@@ -10,6 +10,7 @@ import com.github.noahshen.alcyone.context.vfs.core.router.MountRouter
 import com.github.noahshen.alcyone.context.vfs.storage.opendal.LocalFsRoots
 import com.github.noahshen.alcyone.context.vfs.storage.opendal.WebDavRoots
 import java.io.IOException
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.time.Duration
@@ -42,7 +43,8 @@ sealed interface MountBackend {
      * - [root] 是服务端的共享根，例如 `/dav/team`；
      * - [username] / [password] 只活在配置里：不进 `mount` 表、不进身份串、不进任何错误消息。
      *
-     * [toString] 会把密码遮住，配置打印不会泄密。
+     * [toString] 不回显 endpoint 中的 userinfo、不打印 username、把密码遮成 `***`——
+     * 配置在 resolve 之前就能打印，错误配置也不能泄密（R4 修复）。
      */
     data class WebDav(
         val endpoint: String,
@@ -52,8 +54,28 @@ sealed interface MountBackend {
     ) : MountBackend {
         override fun identity(): String = WebDavRoots.identity(endpoint, root)
 
-        override fun toString(): String =
-            "WebDav(endpoint=$endpoint, root=$root, username=${username.ifEmpty { "(anonymous)" }}, password=${redacted()})"
+        override fun toString(): String = "WebDav(endpoint=${safeEndpoint()}, root=$root, password=${redacted()})"
+
+        /**
+         * 安全显示 endpoint：有 userinfo 时只留 `scheme` + `://` + `***@` + `host:port`，不显示用户名与密码。
+         *
+         * 配置对象在 [VfsRuntimeConfig.resolve] 之前就能打印，非法的 userinfo 写法也不能把凭据带出去。
+         */
+        private fun safeEndpoint(): String {
+            val uri = runCatching { URI(endpoint) }.getOrNull() ?: return "(invalid endpoint)"
+            if (uri.userInfo == null) return endpoint
+            val scheme = uri.scheme ?: ""
+            val host = uri.host ?: ""
+            val port = uri.port
+            return buildString {
+                append(scheme)
+                    .append(":")
+                    .append("//")
+                    .append("***@")
+                    .append(host)
+                if (port != -1) append(':').append(port)
+            }
+        }
 
         private fun redacted(): String = if (password.isEmpty()) "(none)" else "***"
     }

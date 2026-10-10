@@ -31,6 +31,9 @@ internal class NativeLifetime(
     private val lock = ReentrantReadWriteLock()
     private val closed = AtomicBoolean(false)
 
+    /** 后端名，供错误消息使用（如 [StorageInputStream] 的关闭消息）。 */
+    internal fun label(): String = label
+
     /** 执行一次存储操作；已关闭时抛 `CLOSED`，不进入操作本身。 */
     fun <T> call(block: () -> T): T {
         lock.readLock().lock()

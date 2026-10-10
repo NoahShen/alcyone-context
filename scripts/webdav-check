@@ -24,18 +24,22 @@ import urllib.request
 urllib.request.urlopen("https://pypi.org/simple/", timeout=10)
 EOF
 }
-PY=""
-for candidate in "${WEBDAV_PYTHON:-}" python3 /usr/bin/python3; do
-    [ -n "$candidate" ] || continue
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    if py_can_fetch "$candidate"; then PY="$candidate"; break; fi
-done
-[ -n "$PY" ] || fail "no Python interpreter can reach pypi.org; run with WEBDAV_PYTHON=<path to a working python3>"
 
 # 钉死的依赖没变就不重建 venv；变了就重建，保证可复现。
+# 只在需要重建 venv 时才探测 PyPI；venv 已存在且依赖未变就直接复用（S4 修复）。
 want_hash="$("${SHA[@]}" "$REQS" | awk '{print $1}')"
 have_hash="$(cat "$REQS_HASH" 2>/dev/null || true)"
-if [ ! -x "$VENV/bin/wsgidav" ] || [ "$want_hash" != "$have_hash" ]; then
+PY=""
+if [ -x "$VENV/bin/wsgidav" ] && [ "$want_hash" = "$have_hash" ]; then
+    echo "Reusing the existing WebDAV fixture environment at $VENV ..."
+    PY="$VENV/bin/python"
+else
+    for candidate in "${WEBDAV_PYTHON:-}" python3 /usr/bin/python3; do
+        [ -n "$candidate" ] || continue
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        if py_can_fetch "$candidate"; then PY="$candidate"; break; fi
+    done
+    [ -n "$PY" ] || fail "no Python interpreter can reach pypi.org; run with WEBDAV_PYTHON=<path to a working python3>"
     echo "Preparing the WebDAV fixture environment with $PY ..."
     rm -rf "$VENV"
     mkdir -p "$LOCAL/webdav"
@@ -48,7 +52,7 @@ fi
 # 一次性数据目录：服务的共享根和配置都在这里，结束就删。
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/t24-webdav-XXXXXX")"
 DAV_ROOT="$WORK/root"
-mkdir -p "$DAV_ROOT"
+mkdir -p "$DAV_ROOT/dav/team"  # R1 非根 endpoint/root 真实服务定位用例需要
 LOG="$WORK/server.log"
 CONFIG="$WORK/wsgidav.json"
 SERVER_PID=""
@@ -124,5 +128,6 @@ cd "$ROOT"
 T24_WEBDAV_ENDPOINT="http://127.0.0.1:$PORT" \
 T24_WEBDAV_USER="$DAV_USER" \
 T24_WEBDAV_PASSWORD="$DAV_PASSWORD" \
+T24_WEBDAV_DATA_ROOT="$DAV_ROOT" \
     ./scripts/dev gradle :integration-tests:vfs:webdavTest --rerun-tasks --console=plain
 echo "T24 WebDAV fixture finished; server and temporary root were cleaned up."

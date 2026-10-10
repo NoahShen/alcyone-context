@@ -1,5 +1,13 @@
 # AGENTS.md
 
+## 本次修改（2026-10-10，T24 R1～R4 修复 + S1～S5 优化）
+
+- 按独立复核修复 T24：R1 远端位置规范化（URI 解析、主机小写、默认端口省略、身份查重）、R2 删除 effect 保守化（文件/空目录 DELETE 边界报 UNKNOWN）、R4 配置打印防泄密（userinfo 遮住、username 不打印）；R3 核对 OpenDAL 0.50.6 无超时配置，依赖确实无法满足，已提出方案供确认，批准前保持未通过。S1～S5 建议优化已落实。回归 728 → **730**，真实 WebDAV 4 → **7**。T24 保持 IN_REVIEW，不开始 T25。
+
+## 本次修改（2026-10-10，T24 独立复核）
+
+- `f6cf17c` 独立 728 + 4 例通过，R1 远端位置、R2 删除 effect、R3 网络等待、R4 配置打印待修；更新第 28 条，T24 IN_REVIEW、M5 IN_PROGRESS，不开始 T25。
+
 ## 本次修改（2026-10-09，T24 开发完成）
 
 - T24 WebDAV 接入完成：`MountBackend`（Local FS / WebDAV 两类）扩展 `MountConfig` / `ResolvedConfig` / Runtime 组装（`MountConfig` 保留接 `Path` 的次构造，30 处既有本地调用未改），`vfs/storage` 新增 `WebDavStorage` / `WebDavRoots`（stat、list、建目录、有界读、写、删除；`move` 与 `readStream` 显式 `UNSUPPORTED_OPERATION`），凭据不进 mount 表与打印。可复现服务 `./scripts/webdav-check`（钉死 WsgiDAV 4.3.3 / Cheroot 10.0.1、只听 127.0.0.1、测试凭据、临时根、就绪探测与 trap 清理），真实闭环 4 例走独立 `webdavTest` 任务。测试 712 → **728**（源码与 XML 差额为零），另有真实 WebDAV 4 例单独统计；`vfs/api`、`vfs/core` 零改动。交付三份文档，T24 转 **IN_REVIEW**；M5 等独立复核，不自动开始 T25。涉及第 28 条与当前进度。
@@ -473,7 +481,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 27. [T23 变更操作事务与失败报告验证及验收](docs/tasks/m4-t23/T23_变更操作事务与失败报告验证及验收.md)：**DONE**，`a768c89` / `61cd1f8` 独立 712 例通过，R1 / R2 关闭；见 [复核第 7 节](docs/tasks/m4-t23/T23_架构与技术复核.md#7-a768c89--61cd1f8-修复收口复核)。M4 DONE，不自动开始 T24。
 
-28. [T24 WebDAV 配置与测试服务开发及验收](docs/tasks/m5-t24/T24_WebDAV配置与测试服务开发及验收.md)：**IN_REVIEW**，`./scripts/check` 728 例通过（源码与 XML 差额为零），真实 WebDAV 4 例经 `./scripts/webdav-check` 通过；配置扩展、Runtime 组装、基础 Adapter 与可复现服务已交付，`vfs/api` / `vfs/core` 零改动。完整契约与跨后端移动留 T25，M5 待复核收口。
+28. [T24 WebDAV 配置与测试服务开发及验收](docs/tasks/m5-t24/T24_WebDAV配置与测试服务开发及验收.md)：**IN_REVIEW**，`f6cf17c` 独立回归 728 / 真实 WebDAV 4 例通过，R1～R4 待修；见 [复核记录](docs/tasks/m5-t24/T24_架构与技术复核.md)。不开始 T25。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 

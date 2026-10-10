@@ -85,7 +85,7 @@ internal fun <T> mapStorageErrors(
     } catch (e: VfsException) {
         throw e
     } catch (e: OpenDALException) {
-        throw storageFailure(operation, effect, openDalCode(e), backend, e)
+        throw storageFailure(operation, effect, openDalCode(e, backend), backend, e)
     } catch (e: NoSuchFileException) {
         throw storageFailure(operation, effect, VfsErrorCode.NOT_FOUND, backend, e)
     } catch (e: AccessDeniedException) {
@@ -102,10 +102,14 @@ internal fun <T> mapStorageErrors(
  *   这里只是兑底；
  * - **HTTP 401 单独认**：OpenDAL 0.50.6 的 webdav 服务把 401 报成 `Unexpected`，错误消息里带着响应行
  *   `status: 401`。认这一条，认证失败才落到 `STORAGE_ACCESS_DENIED`——这是按观察到的后端行为写的对照，
- *   不是从 HTTP 语义推断的通用规则。
+ *   不是从 HTTP 语义推断的通用规则。**只对 webdav 后端生效**（S5 修复）：本地盘不会有 HTTP 状态行，
+ *   但限定后端可以避免其他后端的 `Unexpected` 消息里碰巧含 `status: 401` 时被误认。
  */
-private fun openDalCode(error: OpenDALException): VfsErrorCode =
-    if ("status: 401" in (error.message ?: "")) {
+private fun openDalCode(
+    error: OpenDALException,
+    backend: String,
+): VfsErrorCode =
+    if (backend == "webdav storage" && "status: 401" in (error.message ?: "")) {
         VfsErrorCode.STORAGE_ACCESS_DENIED
     } else {
         when (error.code) {

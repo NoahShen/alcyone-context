@@ -82,7 +82,10 @@ class WebDavStorageTest {
     fun `endpoints and roots are normalized once without touching credentials`() {
         assertEquals("http://127.0.0.1:8080", WebDavRoots.normalizeEndpoint("http://127.0.0.1:8080/"))
         assertEquals("http://127.0.0.1:8080/dav", WebDavRoots.normalizeEndpoint("  http://127.0.0.1:8080/dav/  "))
-        assertEquals("https://Dav.example.com:8443/base", WebDavRoots.normalizeEndpoint("https://Dav.example.com:8443/base/"))
+        // 主机统一小写，默认端口省略，路径消解点段。
+        assertEquals("https://dav.example.com:8443/base", WebDavRoots.normalizeEndpoint("https://Dav.example.com:8443/base/"))
+        assertEquals("http://host", WebDavRoots.normalizeEndpoint("http://host:80"))
+        assertEquals("http://host", WebDavRoots.normalizeEndpoint("http://HOST:80/a/../"))
         assertEquals("/dav/team", WebDavRoots.normalizeRoot("/dav/team/"))
         assertEquals("/", WebDavRoots.normalizeRoot(""))
         assertEquals("/", WebDavRoots.normalizeRoot("/"))
@@ -101,11 +104,15 @@ class WebDavStorageTest {
             "ftp://127.0.0.1:8080",
             "http://127.0.0.1:8080/dav?x=1",
             "http://",
+            "http://bad host",
+            "http://host:0",
+            "http://host:99999",
+            "http://host/a%2Fb",
         ).forEach { endpoint ->
             val failure = assertFailsWith<VfsException>("$endpoint") { WebDavRoots.normalizeEndpoint(endpoint) }
             assertEquals(VfsErrorCode.INVALID_ARGUMENT, failure.code, "$endpoint 应当在配置阶段就拒")
         }
-        listOf("dav/team", "/a//b", "/a/../b", "/a/./b").forEach { root ->
+        listOf("dav/team", "/a//b", "/a/../b", "/a/./b", "/a%2Fb").forEach { root ->
             val failure = assertFailsWith<VfsException>("$root") { WebDavRoots.normalizeRoot(root) }
             assertEquals(VfsErrorCode.INVALID_ARGUMENT, failure.code, "$root 应当在配置阶段就拒")
         }
@@ -124,5 +131,43 @@ class WebDavStorageTest {
         assertFailsWith<VfsException>("同一个根挂两次") {
             WebDavRoots.requireNonOverlapping(listOf("http://127.0.0.1:1" to "/a", "http://127.0.0.1:1" to "/a/"))
         }
+    }
+
+    @Test
+    fun `roots that resolve to the same location are rejected even when written differently`() {
+        // R1 反例：endpoint 路径与 root 组合相同 → 身份串相同 → 拒绝。
+        assertFailsWith<VfsException>("endpoint 路径与 root 组合相同") {
+            WebDavRoots.requireNonOverlapping(
+                listOf(
+                    "http://127.0.0.1:1/dav" to "/team",
+                    "http://127.0.0.1:1" to "/dav/team",
+                ),
+            )
+        }
+        // 主机大小写差异在规范化后收敛为同一身份。
+        assertFailsWith<VfsException>("主机大小写") {
+            WebDavRoots.requireNonOverlapping(
+                listOf(
+                    "http://LOCALHOST:1" to "/a",
+                    "http://localhost:1" to "/a",
+                ),
+            )
+        }
+        // 默认端口差异在规范化后收敛为同一身份。
+        assertFailsWith<VfsException>("默认端口") {
+            WebDavRoots.requireNonOverlapping(
+                listOf(
+                    "http://host:80" to "/a",
+                    "http://host" to "/a",
+                ),
+            )
+        }
+        // 不同端口是不同服务，同一段路径互不相干。
+        WebDavRoots.requireNonOverlapping(
+            listOf(
+                "http://host:8080" to "/a",
+                "http://host:9090" to "/a",
+            ),
+        )
     }
 }

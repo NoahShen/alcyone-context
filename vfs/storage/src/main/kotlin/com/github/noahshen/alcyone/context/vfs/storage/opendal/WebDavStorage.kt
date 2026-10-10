@@ -32,8 +32,14 @@ import org.apache.opendal.WriteOptions
  * **不预检连接**：打开 Adapter 不发网络请求，第一次真正操作才连服务器。
  * 这样配置校验阶段（还没碰后端）和后端故障阶段分得开，也避免为了「开一下」就去动远端目录。
  *
- * 本地盘那套符号链接 / JDK 目录枚举的检查不搬过来——远端没有符号链接，也没有可直接读的目录流；
+ * 本地盘那套符号链接 / JDK 目录枚举的检查不搬过来——客户端无法一概识别服务端链接，
+ * 边界依赖服务端配置（WsgiDAV 默认不暴露符号链接语义，但其他服务器可能不同）；
  * 这里的每条规则都按**观察到的 OpenDAL webdav 行为**写，测试服务是 WsgiDAV（T24 §2.4）。
+ *
+ * **账号边界**（任务 §2.2）：如果账号决定服务器可见的根（不同用户看到不同的根），
+ * VFS 无法识别两个不同账号的 URL 是否指向同一份数据——身份串只由 endpoint + root 决定，
+ * 不含用户名。换用户名不一定是同一份数据；换密码也不是换盘。密码轮换可接受，
+ * 但不能声称换用户名永远是同一份数据。
  *
  * 后端行为里有四条和本地盘不一样，所以这里各补了一次显式检查：
  *
@@ -267,8 +273,11 @@ class WebDavStorage private constructor(
     /**
      * 删除文件或目录。不存在报 `NOT_FOUND`；目录不递归删时里面还有东西报 `DIRECTORY_NOT_EMPTY`。
      *
-     * 递归删先排好顺序（这一步只看不删），再从最深的往上删：中途失败时已经删掉过几个就报 `PARTIAL`，
-     * 一项都还没删掉成功就报 `UNKNOWN`——服务端可能「删成功了但回包丢了」，从失败点证明不了「什么都没删」。
+     * 实际 DELETE 请求边界使用保守 effect（R2 修复）：文件、非递归空目录、递归删的第一项都可能在
+     * 「服务端已删除但回包丢失」时失败——从失败点证明不了「什么都没删」，所以报 `UNKNOWN`。
+     * 递归删中途失败时已经删掉过几个就报 `PARTIAL`。
+     *
+     * 递归删先排好顺序（这一步只看不删），再从最深的往上删。
      */
     override suspend fun delete(
         path: StoragePath,
@@ -279,31 +288,41 @@ class WebDavStorage private constructor(
             lifetime.call {
                 val attributes = statOrFail(plain(path), "delete")
                 if (attributes.type == NodeType.FILE) {
-                    operator.delete(plain(path))
+                    deleteConservatively(plain(path))
                 } else if (!recursive) {
                     // 后端删非空目录也会报成功，所以空不空必须自己看。
                     if (listChildren(path).isNotEmpty()) {
                         throw VfsException(VfsErrorCode.DIRECTORY_NOT_EMPTY, "directory is not empty")
                     }
-                    operator.delete(dirPath(path))
+                    deleteConservatively(dirPath(path))
                 } else {
                     val plan = mutableListOf<Pair<StoragePath, NodeType>>()
                     collectForDeletion(path, plan)
                     plan += path to NodeType.DIRECTORY
                     var removed = 0
                     plan.forEach { (target, type) ->
-                        mapStorageErrors(
-                            "delete",
-                            if (removed == 0) VfsEffect.UNKNOWN else VfsEffect.PARTIAL,
-                            backend = "webdav storage",
-                        ) {
-                            // 目录必须带结尾的 `/`，否则后端会当成文件去删，空目录也会失败。
-                            operator.delete(if (type == NodeType.DIRECTORY) dirPath(target) else plain(target))
-                        }
+                        // 目录必须带结尾的 `/`，否则后端会当成文件去删，空目录也会失败。
+                        val targetPath = if (type == NodeType.DIRECTORY) dirPath(target) else plain(target)
+                        deleteConservatively(targetPath, if (removed == 0) VfsEffect.UNKNOWN else VfsEffect.PARTIAL)
                         removed++
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * 实际发 DELETE 请求。
+     *
+     * 默认 effect 是 [VfsEffect.UNKNOWN]：服务端可能已经删掉了目标只是回包丢了，
+     * 从失败点证明不了「什么都没删」，所以保守报「结果不明」。调用方递归删时传 `PARTIAL`。
+     */
+    private fun deleteConservatively(
+        backendPath: String,
+        effect: VfsEffect = VfsEffect.UNKNOWN,
+    ) {
+        mapStorageErrors("delete", effect, backend = "webdav storage") {
+            operator.delete(backendPath)
         }
     }
 

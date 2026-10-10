@@ -129,7 +129,7 @@ internal class StorageInputStream(
                     "stream read exceeded the limit of $limitBytes bytes",
                 )
 
-            State.CLOSED -> throw VfsException(VfsErrorCode.CLOSED, "local storage stream is closed ($operation)")
+            State.CLOSED -> throw VfsException(VfsErrorCode.CLOSED, "${lifetime.label()} stream is closed ($operation)")
         }
     }
 

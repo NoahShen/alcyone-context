@@ -3,6 +3,7 @@ package com.github.noahshen.alcyone.context.vfs.integration.webdav
 import com.github.noahshen.alcyone.context.vfs.DeleteOptions
 import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.StatOptions
+import com.github.noahshen.alcyone.context.vfs.VfsEffect
 import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsPath
@@ -22,7 +23,12 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
+import java.io.IOException
 import java.net.ServerSocket
+import java.net.Socket
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertFailsWith
 
@@ -56,6 +62,9 @@ class WebDavRealServerTest {
     )
 
     private fun uri(path: String) = VfsUri.parse("alcyone://resources/remote$path")
+
+    /** 服务数据根：脚本通过 `T24_WEBDAV_DATA_ROOT` 传进来，用于核对物理文件。 */
+    private fun dataRoot(): Path = Path.of(requireVariable("T24_WEBDAV_DATA_ROOT"))
 
     /** 开实例 → 跑一段 → 关实例：[AlcyoneVfs.close] 是挂起的，所以不用 `use`。 */
     private suspend fun <T> withVfs(
@@ -110,6 +119,31 @@ class WebDavRealServerTest {
                 vfs.delete(uri("/t24-loop"), DeleteOptions(recursive = true))
 
                 assertNotEquals("", spacedInfo.id.value, "第二个文件也拿到了身份")
+            }
+        }
+
+    /** R1：非根 endpoint/root 的真实服务定位证据——文件落到 `/dav/team` 下而不是根 `/` 下。 */
+    @Test
+    @Timeout(120)
+    fun `A03b a non-root endpoint root combination addresses the right place on the real service`() =
+        runBlocking {
+            val content = "non-root location".toByteArray()
+
+            withVfs(config(root = "/dav/team")) { vfs ->
+                val info = vfs.write(uri("/t24-locate/hello.txt"), content)
+                assertArrayEquals(content, withTimeout(30_000) { vfs.read(uri("/t24-locate/hello.txt")) })
+
+                // 物理文件必须落在 `/dav/team` 下，不是根 `/` 下。
+                val teamTarget = dataRoot().resolve("dav/team/t24-locate/hello.txt")
+                assertTrue(Files.exists(teamTarget), "文件应该落在 /dav/team 下：$teamTarget")
+                assertArrayEquals(content, Files.readAllBytes(teamTarget))
+
+                // 根 `/` 下不应该有这个文件。
+                val rootTarget = dataRoot().resolve("t24-locate/hello.txt")
+                assertFalse(Files.exists(rootTarget), "文件不应该落在根 / 下：$rootTarget")
+
+                vfs.delete(uri("/t24-locate"), DeleteOptions(recursive = true))
+                assertFalse(Files.exists(dataRoot().resolve("dav/team/t24-locate")), "删除后目录也不在了")
             }
         }
 
@@ -190,6 +224,61 @@ class WebDavRealServerTest {
             }
         }
 
+    /** R2：文件删除失败（服务端实际删除后断开响应）不再误报 NONE。 */
+    @Test
+    @Timeout(60)
+    fun `R2 deleting a file whose response is lost reports UNKNOWN and the file is physically gone`() =
+        runBlocking {
+            val dataRoot = dataRoot()
+            val target = dataRoot.resolve("r2-file.txt")
+            Files.write(target, "delete-me".toByteArray())
+
+            SilentDeleteServer(dataRoot).use { silent ->
+                val failure =
+                    assertFailsWith<VfsException> {
+                        withVfs(config(endpoint = silent.endpoint)) { vfs ->
+                            vfs.delete(uri("/r2-file.txt"))
+                        }
+                    }
+
+                assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code, "删除请求失败要报 STORAGE_ERROR")
+                assertNotEquals(VfsEffect.NONE, failure.effect, "删除失败不能误报 NONE")
+                assertTrue(
+                    failure.effect == VfsEffect.UNKNOWN || failure.effect == VfsEffect.PARTIAL,
+                    "删除请求边界要用保守 effect，实际是 ${failure.effect}",
+                )
+                assertFalse(Files.exists(target), "服务端实际删除了文件，只是回包丢了")
+                assertFalse(describeChain(failure).contains(password), "错误里也不许出现凭据")
+            }
+        }
+
+    /** R2：非递归空目录删除失败（服务端实际删除后断开响应）不再误报 NONE。 */
+    @Test
+    @Timeout(60)
+    fun `R2 deleting an empty directory whose response is lost reports UNKNOWN and the directory is physically gone`() =
+        runBlocking {
+            val dataRoot = dataRoot()
+            val target = dataRoot.resolve("r2-empty-dir")
+            Files.createDirectories(target)
+
+            SilentDeleteServer(dataRoot).use { silent ->
+                val failure =
+                    assertFailsWith<VfsException> {
+                        withVfs(config(endpoint = silent.endpoint)) { vfs ->
+                            vfs.delete(uri("/r2-empty-dir"))
+                        }
+                    }
+
+                assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code, "删除请求失败要报 STORAGE_ERROR")
+                assertNotEquals(VfsEffect.NONE, failure.effect, "删除失败不能误报 NONE")
+                assertTrue(
+                    failure.effect == VfsEffect.UNKNOWN || failure.effect == VfsEffect.PARTIAL,
+                    "删除请求边界要用保守 effect，实际是 ${failure.effect}",
+                )
+                assertFalse(Files.exists(target), "服务端实际删除了目录，只是回包丢了")
+            }
+        }
+
     /** 异常链的全部消息拼在一起：检查凭据泄漏时用它，而不是只看最外层那一行。 */
     private fun describeChain(failure: Throwable): String =
         generateSequence(failure) { it.cause }
@@ -218,6 +307,159 @@ class WebDavRealServerTest {
                     "$name is not set: run these tests through ./scripts/webdav-check. " +
                         "A missing service is a failure here, never a skip.",
                 )
+    }
+}
+
+/**
+ * R2 测试装置：接受 PROPFIND 请求并返回真实属性，接受 DELETE 请求后删除文件但**不发响应**直接关闭连接。
+ *
+ * 模拟「服务端实际删除了但回包丢失」的场景：OpenDAL 会收到连接关闭错误，
+ * 但物理上文件已经被删除。用于验证 delete 的 effect 是 UNKNOWN 而不是 NONE。
+ *
+ * 装置自身有独立有限退出保障：[close] 关闭监听 socket，accept 循环退出，所有连接线程是 daemon 线程。
+ */
+private class SilentDeleteServer(
+    private val dataRoot: Path,
+) : AutoCloseable {
+    private val serverSocket = ServerSocket(0)
+
+    @Volatile
+    private var running = true
+
+    val endpoint: String get() = "http://127.0.0.1:${serverSocket.localPort}"
+
+    init {
+        Thread { acceptLoop() }
+            .apply {
+                isDaemon = true
+                name = "silent-delete-accept"
+            }.start()
+    }
+
+    private fun acceptLoop() {
+        while (running) {
+            val socket =
+                try {
+                    serverSocket.accept()
+                } catch (e: IOException) {
+                    break
+                }
+            Thread { handle(socket) }
+                .apply {
+                    isDaemon = true
+                    name = "silent-delete-handle"
+                }.start()
+        }
+    }
+
+    private fun handle(socket: Socket) {
+        socket.use {
+            try {
+                val reader = socket.getInputStream().bufferedReader()
+                val requestLine = reader.readLine() ?: return
+                val headers = mutableMapOf<String, String>()
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (line.isEmpty()) break
+                    val idx = line.indexOf(':')
+                    if (idx > 0) {
+                        headers[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
+                    }
+                }
+                val parts = requestLine.split(' ')
+                if (parts.size < 2) return
+                val method = parts[0].uppercase()
+                val rawPath = parts[1]
+                val decoded = URLDecoder.decode(rawPath, StandardCharsets.UTF_8)
+                val target = dataRoot.resolve(decoded.removePrefix("/"))
+
+                when (method) {
+                    "PROPFIND" -> respondPropfind(socket, decoded, target, headers["depth"] ?: "0")
+                    "DELETE" -> deleteAndClose(target)
+                    else -> respond404(socket)
+                }
+            } catch (e: Exception) {
+                // 连接可能在处理中途被客户端关闭，忽略。
+            }
+        }
+    }
+
+    private fun respondPropfind(
+        socket: Socket,
+        path: String,
+        target: Path,
+        depth: String,
+    ) {
+        if (!Files.exists(target)) {
+            respond404(socket)
+            return
+        }
+        val isDir = Files.isDirectory(target)
+        val entries = mutableListOf(propEntry(path, target, isDir))
+        if (depth == "1" && isDir) {
+            Files.list(target).use { stream ->
+                stream.sorted().forEach { child ->
+                    val childPath = path.trimEnd('/') + "/" + child.fileName
+                    entries += propEntry(childPath, child, Files.isDirectory(child))
+                }
+            }
+        }
+        val body =
+            buildString {
+                append("<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n")
+                append("<D:multistatus xmlns:D=\"DAV:\">")
+                entries.forEach { (href, dir, size) ->
+                    val rt = if (dir) "<D:resourcetype><D:collection/></D:resourcetype>" else "<D:resourcetype/>"
+                    val sizeXml = if (!dir && size != null) "<D:getcontentlength>$size</D:getcontentlength>" else ""
+                    append("<D:response><D:href>").append(href).append("</D:href><D:propstat><D:prop>")
+                    append("<D:getlastmodified>Thu, 01 Jan 1970 00:00:00 GMT</D:getlastmodified>")
+                    append(sizeXml)
+                    append(rt)
+                    append("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
+                }
+                append("</D:multistatus>")
+            }.toByteArray()
+        val output = socket.getOutputStream()
+        output.write("HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: ${body.size}\r\n\r\n".toByteArray())
+        output.write(body)
+        output.flush()
+    }
+
+    private fun propEntry(
+        href: String,
+        path: Path,
+        isDir: Boolean,
+    ): Triple<String, Boolean, Long?> = Triple(href, isDir, if (!isDir) Files.size(path) else null)
+
+    /** 删除目标，然后不发响应直接关闭连接（socket.use 会关）。 */
+    private fun deleteAndClose(target: Path) {
+        if (Files.exists(target)) {
+            if (Files.isDirectory(target)) {
+                target.toFile().deleteRecursively()
+            } else {
+                Files.delete(target)
+            }
+        }
+        // 不发响应，socket.use 在 handle 结束时关闭连接，客户端收到 EOF。
+    }
+
+    private fun respond404(socket: Socket) {
+        try {
+            val output = socket.getOutputStream()
+            output.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
+            output.flush()
+        } catch (e: Exception) {
+            // 忽略
+        }
+    }
+
+    override fun close() {
+        running = false
+        try {
+            serverSocket.close()
+        } catch (e: IOException) {
+            // 忽略
+        }
     }
 }
 

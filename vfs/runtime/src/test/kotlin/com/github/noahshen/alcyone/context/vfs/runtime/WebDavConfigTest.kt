@@ -78,6 +78,38 @@ class WebDavConfigTest {
     }
 
     @Test
+    fun `printing a mount with credentials in the url still does not leak them`() {
+        // R4 反例：配置在 resolve 之前就能打印，非法 userinfo 写法也不能把凭据带出去。
+        val smuggled = MountBackend.WebDav("http://demo:synthetic-secret@localhost", "/", "", "")
+        val printed = smuggled.toString()
+
+        assertFalse(printed.contains("synthetic-secret"), "密码出现在了打印里：$printed")
+        assertFalse(printed.contains("demo"), "用户名出现在了打印里：$printed")
+        assertTrue("***" in printed, "userinfo 位置要能看出被遮住了：$printed")
+
+        // 嵌套配置（MountConfig / VfsRuntimeConfig）的打印同样不泄密。
+        val nested =
+            MountConfig(
+                VfsPath.parse("/resources/remote"),
+                "remote",
+                MountBackend.WebDav("http://demo:synthetic-secret@localhost", "/dav"),
+            )
+        val nestedPrinted = nested.toString()
+        assertFalse(nestedPrinted.contains("synthetic-secret"), "嵌套打印里出现了密码：$nestedPrinted")
+        assertFalse(nestedPrinted.contains("demo"), "嵌套打印里出现了用户名：$nestedPrinted")
+
+        val config =
+            VfsRuntimeConfig(
+                stateDatabase = Path.of("data/state.db"),
+                namespaces = setOf("resources"),
+                mounts = listOf(nested),
+            )
+        val configPrinted = config.toString()
+        assertFalse(configPrinted.contains("synthetic-secret"), "配置对象打印里出现了密码：$configPrinted")
+        assertFalse(configPrinted.contains("demo"), "配置对象打印里出现了用户名：$configPrinted")
+    }
+
+    @Test
     fun `an endpoint with credentials in the url is rejected before anything is created`() {
         val failure =
             assertFailsWith<VfsException> {
