@@ -16,9 +16,11 @@ import java.net.URISyntaxException
  * 例：`http://127.0.0.1:8080` + `/dav/team` 的身份是 `http://127.0.0.1:8080/dav/team`。
  *
  * **位置规范化**（R1 修复）：endpoint 用 [URI] 解析，主机统一小写、默认端口（http 80 / https 443）省略、
- * 路径消解点段并拒绝 `%` 编码歧义；身份、相等与包含比较都使用同一套规范结果——
- * 完整路径 = endpoint 路径部分 + root，例如 endpoint `/dav` + root `/team` 的完整路径是 `/dav/team`。
- * 这样 `http://host/dav` + `/team` 与 `http://host` + `/dav/team` 得到相同身份串与完整路径，会被重叠检查拒绝。
+ * 路径消解点段并拒绝 `%` 编码歧义；身份、相等与包含比较都建立在**同一个规范完整目录路径**上——
+ * 完整路径 = endpoint 路径部分 + root，再统一末尾分隔符（除 origin 根外不带结尾 `/`），例如
+ * endpoint `/dav` + root `/team` 的完整路径是 `/dav/team`，endpoint `/dav` + root `/` 也收敛成 `/dav`。
+ * 这样 `http://host/dav` + `/team` 与 `http://host` + `/dav/team` 得到相同身份串与完整路径，会被重叠检查拒绝；
+ * `http://host/dav` + `/` 与 `http://host` + `/dav` 同样收敛到 `/dav`，被当成同一目录。
  */
 object WebDavRoots {
     /**
@@ -120,11 +122,15 @@ object WebDavRoots {
         return "/" + segments.joinToString("/")
     }
 
-    /** 挂载身份串：整理后的 `endpoint + root`，**不含用户名与密码**。 */
+    /**
+     * 挂载身份串：规范 origin + 规范完整目录路径，**不含用户名与密码**。
+     *
+     * `http://host/dav` + `/team` 与 `http://host` + `/dav/team` 得到同一个身份串。
+     */
     fun identity(
         endpoint: String,
         root: String,
-    ): String = normalizeEndpoint(endpoint) + normalizeRoot(root)
+    ): String = origin(endpoint) + fullPath(endpoint, root)
 
     /**
      * 一组远端根必须两两不同、且同一个位置下互不包含，按**完整路径段**比较。
@@ -143,48 +149,63 @@ object WebDavRoots {
      * 识别边界：只看得见规范化后的 endpoint，**看不出两台不同 endpoint 背后是不是同一台服务器**。
      */
     fun requireNonOverlapping(targets: Collection<Pair<String, String>>) {
-        val normalized = targets.map { (endpoint, root) -> normalizeEndpoint(endpoint) to normalizeRoot(root) }
-        val identities = normalized.map { (endpoint, root) -> endpoint + root }
+        // 身份、相等与包含全部基于同一份规范结果：origin + 规范完整目录路径。
+        val locations =
+            targets.map { (endpoint, root) ->
+                val location = fullPath(endpoint, root)
+                origin(endpoint) to location
+            }
+        val identities = locations.map { (origin, location) -> origin + location }
         if (identities.distinct().size != identities.size) {
             throw invalid("webdav roots must be distinct")
         }
-        for (i in normalized.indices) {
-            for (j in i + 1 until normalized.size) {
-                val (leftEndpoint, leftRoot) = normalized[i]
-                val (rightEndpoint, rightRoot) = normalized[j]
-                if (!sameLocation(leftEndpoint, rightEndpoint)) continue
-                val leftPath = fullPath(leftEndpoint, leftRoot)
-                val rightPath = fullPath(rightEndpoint, rightRoot)
-                if (leftPath == rightPath || contains(leftPath, rightPath) || contains(rightPath, leftPath)) {
+        for (i in locations.indices) {
+            for (j in i + 1 until locations.size) {
+                val (leftOrigin, leftPath) = locations[i]
+                val (rightOrigin, rightPath) = locations[j]
+                if (leftOrigin != rightOrigin) continue
+                if (contains(leftPath, rightPath) || contains(rightPath, leftPath)) {
                     throw invalid("webdav roots must be distinct and must not contain each other (roots $i and $j overlap)")
                 }
             }
         }
     }
 
-    /** 两个 endpoint 是否指向同一位置：协议、主机、端口相同（规范化后默认端口已省略）。 */
-    private fun sameLocation(
-        left: String,
-        right: String,
-    ): Boolean =
-        URI(left).let { l ->
-            URI(right).let { r -> l.scheme == r.scheme && l.host == r.host && l.port == r.port }
+    /**
+     * 规范 origin：`scheme://host[:port]`，主机小写、默认端口已省略。
+     *
+     * `http://host:8080/dav` 与 `http://host:8080` 的 origin 都是 `http://host:8080`——
+     * endpoint 里的路径属于位置，不属于 origin。
+     */
+    private fun origin(endpoint: String): String =
+        URI(normalizeEndpoint(endpoint)).let { uri ->
+            buildString {
+                append(uri.scheme).append("://").append(uri.host)
+                if (uri.port != -1) append(':').append(uri.port)
+            }
         }
 
     /**
-     * 挂载在服务上的**完整路径**：endpoint 的路径部分 + root，例如 endpoint `/dav` + root `/team` → `/dav/team`。
+     * 挂载在服务上的**规范完整目录路径**：endpoint 的路径部分 + root，并统一末尾分隔符。
      *
-     * 身份、相等与包含比较都用它——endpoint 里的路径和 root 一样参与位置判断。
+     * endpoint `/dav` + root `/team` → `/dav/team`；endpoint `/dav` + root `/` → `/dav`；
+     * endpoint 空路径 + root `/` → `/`（origin 根，唯一保留 `/` 的形式）。
+     * 身份、相等与包含都用它——endpoint 里的路径和 root 一样参与位置判断。
      */
     fun fullPath(
         endpoint: String,
         root: String,
-    ): String = pathOf(normalizeEndpoint(endpoint)) + normalizeRoot(root)
+    ): String {
+        val joined = pathOf(normalizeEndpoint(endpoint)) + normalizeRoot(root)
+        // 统一末尾分隔符：除 origin 根 `/` 外都不带结尾 `/`，让 `/dav/` 与 `/dav` 收敛成同一个位置。
+        val trimmed = joined.trimEnd('/')
+        return if (trimmed.isEmpty()) "/" else trimmed
+    }
 
     /** 规范 endpoint 的路径部分：`http://host:8080/dav` → `/dav`；没有路径就是空串。 */
     private fun pathOf(endpoint: String): String = normalizePath(URI(endpoint).rawPath ?: "")
 
-    /** [outer] 按完整段包含 [inner]：`/a` 包含 `/a/b`，但不包含 `/a-old`。 */
+    /** [outer] 按完整段包含 [inner]：`/a` 包含 `/a/b`，但不包含 `/a-old`，也不包含它自己。 */
     private fun contains(
         outer: String,
         inner: String,

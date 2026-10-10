@@ -68,6 +68,27 @@ class WebDavConfigTest {
     }
 
     @Test
+    fun `a root of slash shares the identity of the same directory written as an endpoint path`() {
+        // R1 残留：endpoint `/dav` + root `/` 与 endpoint 空路径 + root `/dav` 是同一目录，
+        // 必须收敛成同一个身份串，否则同一目录能重复挂载。
+        val withSlashRoot =
+            MountConfig(
+                VfsPath.parse("/resources/slash"),
+                "slash",
+                MountBackend.WebDav("http://127.0.0.1:8080/dav", "/", "alice", "s3cr3t-pass"),
+            ).backend.identity()
+        val withPathedEndpoint =
+            MountConfig(
+                VfsPath.parse("/resources/pathed"),
+                "pathed",
+                MountBackend.WebDav("http://127.0.0.1:8080", "/dav", "alice", "s3cr3t-pass"),
+            ).backend.identity()
+
+        assertEquals(withPathedEndpoint, withSlashRoot, "同一目录的两种写法必须有同一个身份串")
+        assertEquals("http://127.0.0.1:8080/dav", withSlashRoot, "root=/ 要与 endpoint 路径拼成同一个规范完整路径")
+    }
+
+    @Test
     fun `printing a mount never shows the password`() {
         val mount = remote("/resources/remote", "remote", "/dav/team", password = "hunter2-super-secret")
         val printed = mount.toString() + " " + mount.backend.toString()

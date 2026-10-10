@@ -191,4 +191,38 @@ class WebDavStorageTest {
             ),
         )
     }
+
+    @Test
+    fun `a root of slash converges with the same directory written as an endpoint path`() {
+        // R1 残留：endpoint 路径 `/dav` + root `/`，完整路径过去拼成 `/dav/`，与 endpoint 空路径 + root `/dav`
+        // 拼成的 `/dav` 不等，导致同一目录能重复挂载。规范化后两者都收敛成 `/dav`。
+        assertEquals("/dav", WebDavRoots.fullPath("http://localhost:8080/dav", "/"))
+        assertEquals("/dav", WebDavRoots.fullPath("http://localhost:8080", "/dav"))
+        assertEquals(
+            WebDavRoots.identity("http://localhost:8080/dav", "/"),
+            WebDavRoots.identity("http://localhost:8080", "/dav"),
+            "同一目录的两种写法必须有同一个身份串",
+        )
+        // origin 根本身是唯一保留结尾 `/` 的形式。
+        assertEquals("/", WebDavRoots.fullPath("http://localhost:8080", "/"))
+        assertEquals("http://localhost:8080/", WebDavRoots.identity("http://localhost:8080", "/"))
+
+        assertFailsWith<VfsException>("root=/ 的同一目录要拒") {
+            WebDavRoots.requireNonOverlapping(
+                listOf(
+                    "http://localhost:8080/dav" to "/",
+                    "http://localhost:8080" to "/dav",
+                ),
+            )
+        }
+        // 同址写法不只身份相同，也要拒绝：endpoint `/dav` + root `/` 挂两次。
+        assertFailsWith<VfsException>("root=/ 的同一目录写两次") {
+            WebDavRoots.requireNonOverlapping(
+                listOf(
+                    "http://localhost:8080/dav" to "/",
+                    "http://localhost:8080/dav/" to "/",
+                ),
+            )
+        }
+    }
 }

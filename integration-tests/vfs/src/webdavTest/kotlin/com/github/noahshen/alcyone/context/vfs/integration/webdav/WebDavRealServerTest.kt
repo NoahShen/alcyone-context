@@ -6,7 +6,6 @@ import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.StatOptions
 import com.github.noahshen.alcyone.context.vfs.VfsEffect
 import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
-import com.github.noahshen.alcyone.context.vfs.VfsEvent
 import com.github.noahshen.alcyone.context.vfs.VfsEventType
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsPath
@@ -15,7 +14,6 @@ import com.github.noahshen.alcyone.context.vfs.runtime.AlcyoneVfs
 import com.github.noahshen.alcyone.context.vfs.runtime.MountBackend
 import com.github.noahshen.alcyone.context.vfs.runtime.MountConfig
 import com.github.noahshen.alcyone.context.vfs.runtime.VfsRuntimeConfig
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertArrayEquals
@@ -37,6 +35,7 @@ import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.DriverManager
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertFailsWith
 
@@ -324,17 +323,19 @@ class WebDavRealServerTest {
 
             SilentDeleteServer(dataRoot).use { silent ->
                 withVfs(config(endpoint = silent.endpoint)) { vfs ->
-                    val events = CopyOnWriteArrayList<VfsEvent>()
-                    vfs.subscribe { event -> events += event }
-
                     // 通过 Runtime 登记源（stat 懒注册，不产生变更事件）并设置 Metadata。
                     val info = vfs.stat(uri("/r2-registered.txt"))
                     val tag = NodeMetadata(setOf("r2"), "删除失败也要保留")
                     vfs.setMetadata(info.id, tag)
 
-                    // 等 Metadata 事件到齐（提交后通知，异步投递）。
-                    withTimeout(10_000) { while (events.size < 1) delay(10) }
-                    assertEquals(listOf(VfsEventType.METADATA_UPDATED), events.map { it.type })
+                    // 直接查真实 SQLite 的 event 表：这是删除前已提交的持久事件。
+                    val before = persistedEvents()
+                    assertEquals(
+                        listOf(VfsEventType.METADATA_UPDATED.name),
+                        before.map { it.second },
+                        "登记 + Metadata 只落一条已提交事件",
+                    )
+                    assertEquals(listOf(info.id.value), before.map { it.third }, "事件引用当时的 Node ID")
 
                     val failure = assertFailsWith<VfsException> { vfs.delete(uri("/r2-registered.txt")) }
                     assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
@@ -345,17 +346,15 @@ class WebDavRealServerTest {
                     )
                     assertFalse(describeChain(failure).contains(password), "错误里也不许出现凭据")
 
-                    // 物理上文件已被服务端删除，但逻辑记录与事件都没被这次失败改写。
+                    // 物理上文件已被服务端删除，但逻辑记录与持久事件都没被这次失败改写。
                     assertFalse(Files.exists(target), "服务端实际删除了文件，只是回包丢了")
                     val node = vfs.getNode(info.id)
                     assertEquals(info.id, node.id)
                     assertEquals(uri("/r2-registered.txt").path, node.uri.path)
                     assertEquals(tag, vfs.getMetadata(info.id))
-                    assertEquals(
-                        listOf(VfsEventType.METADATA_UPDATED),
-                        events.map { it.type },
-                        "失败没有产生新事件",
-                    )
+
+                    // 直查 event 表：删除失败没有追加任何成功事件，记录（ID / type / node_id）逐条一致。
+                    assertEquals(before, persistedEvents(), "删除失败不得向 event 表追加成功事件")
                 }
             }
         }
@@ -365,8 +364,9 @@ class WebDavRealServerTest {
     @Timeout(60)
     fun `R5 the silent delete server refuses every path that escapes its own root`() =
         runBlocking {
-            val ownRoot = Files.createTempDirectory("t24-silent-own-root")
-            val outside = ownRoot.parent.resolve(ownRoot.fileName.toString() + "-outside.txt")
+            // 两个子路径都放在 @TempDir 下：不用手动创目录，跑完由 JUnit 清理，不往系统临时区漏文件。
+            val ownRoot = Files.createDirectories(tempDir.resolve("r5-silent-own-root"))
+            val outside = tempDir.resolve("r5-silent-own-root-outside.txt")
             Files.write(outside, "keep me".toByteArray())
 
             SilentDeleteServer(ownRoot).use { silent ->
@@ -389,11 +389,58 @@ class WebDavRealServerTest {
             }
         }
 
+    /**
+     * R5：受控「接纳与关闭相邻」——客户端刚连上、accept 已返回但 worker 可能还没起，此时立刻 close。
+     *
+     * 如果没有先停接纳，close 可能在 accept 登记之前就扫完两个空快照、丢掉这个连接和线程。
+     * 这里同时开多条连接立刻交回 close：验证 close 能等到接纳线程退出、再关已接纳连接与等 worker，
+     * 且不把 join 超时 / 中断吞成清理成功（close 抛错就直接是测试失败）。
+     */
+    @Test
+    @Timeout(30)
+    fun `R5 close right after accept waits for the accept thread and every worker`() {
+        val ownRoot = Files.createDirectories(tempDir.resolve("r5-close-own-root"))
+        val silent = SilentDeleteServer(ownRoot)
+        try {
+            val sockets =
+                (1..5).map {
+                    Socket().apply { connect(InetSocketAddress("127.0.0.1", URI(silent.endpoint).port), 5_000) }
+                }
+            // 客户端不写任何东西：accept 可能已经返回，worker 还没开始读——这正是竞态窗口。
+            silent.close()
+            // close 返回就代表接纳线程与全部 worker 都已结束；不吞超时，所以到这里即已确认。
+            sockets.forEach { socket -> runCatching { socket.close() } }
+        } finally {
+            runCatching { silent.close() }
+        }
+    }
+
     /** 异常链的全部消息拼在一起：检查凭据泄漏时用它，而不是只看最外层那一行。 */
     private fun describeChain(failure: Throwable): String =
         generateSequence(failure) { it.cause }
             .flatMap { sequenceOf(it.message ?: "", it.toString()) }
             .joinToString("\n")
+
+    /**
+     * 直接读真实状态库的 `event` 表，返回删除前后可逐条对比的持久记录（ID / type / node_id）。
+     *
+     * 不靠异步 `subscribe` 通知：通知只是提交后的投递，看不到它不能证明事件没写进库；
+     * 这里绕开 Runtime，直连 SQLite 看**已提交**的那几行。
+     */
+    private fun persistedEvents(): List<Triple<String, String, String>> =
+        DriverManager.getConnection("jdbc:sqlite:${tempDir.resolve("state.db")}").use { connection ->
+            connection.createStatement().use { statement ->
+                statement
+                    .executeQuery("SELECT event_id, event_type, node_id FROM event ORDER BY event_id")
+                    .use { rows ->
+                        buildList {
+                            while (rows.next()) {
+                                add(Triple(rows.getString(1), rows.getString(2), rows.getString(3)))
+                            }
+                        }
+                    }
+            }
+        }
 
     /** 分配一个空闲端口然后立刻放手：那上面没有服务，连接一定失败。 */
     private fun deadEndpoint(): String = ServerSocket(0).use { socket -> "http://127.0.0.1:${socket.localPort}" }
@@ -448,7 +495,8 @@ class WebDavRealServerTest {
  * 装置边界（R5 修复）：
  * - 只绑 127.0.0.1，不监听其他网卡；
  * - 请求路径先解码再规范化，只允许落在自己 [dataRoot] 内的单层路径——点段、多余前导斜杠一律拒；
- * - 连接读取有有限等待；[close] 关掉监听 socket 与所有已接纳连接，并等处理线程到点退出。
+ * - 连接读取有有限等待；[close] 先停监听、确认接纳线程退出不再登记，再关已接纳连接、等全部处理线程；
+ *   join 超时 / 中断不吞，作为测试失败原因报出。
  */
 private class SilentDeleteServer(
     private val dataRoot: Path,
@@ -457,6 +505,13 @@ private class SilentDeleteServer(
 
     private val workers = CopyOnWriteArrayList<Thread>()
     private val openSockets = CopyOnWriteArrayList<Socket>()
+
+    /**
+     * 登记与关闭互斥：accept 拿到 socket 后必须先拿到这把锁才能登记 / 启线程；
+     * [close] 关掉监听后，也要先拿到同一把锁再快照已接纳的连接。
+     * 这样不会出现「accept 已返回、还没登记，close 就先扫了两个空快照」的漏网。
+     */
+    private val lifecycle = Any()
 
     @Volatile
     private var running = true
@@ -475,21 +530,32 @@ private class SilentDeleteServer(
     }
 
     private fun acceptLoop() {
-        while (running) {
+        while (true) {
             val socket =
                 try {
                     serverSocket.accept()
                 } catch (e: IOException) {
                     break
                 }
-            openSockets += socket
-            val worker = Thread { handle(socket) }
-            workers += worker
-            worker
-                .apply {
-                    isDaemon = true
-                    name = "silent-delete-handle"
-                }.start()
+            // 登记与启动 worker 在锁内一步完成：close 拿到锁看到的就是完整的「已接纳」快照。
+            val started =
+                synchronized(lifecycle) {
+                    if (!running) {
+                        runCatching { socket.close() }
+                        false
+                    } else {
+                        openSockets += socket
+                        val worker = Thread { handle(socket) }
+                        workers += worker
+                        worker
+                            .apply {
+                                isDaemon = true
+                                name = "silent-delete-handle"
+                            }.start()
+                        true
+                    }
+                }
+            if (!started) break
         }
     }
 
@@ -638,22 +704,34 @@ private class SilentDeleteServer(
     }
 
     override fun close() {
+        // 1) 先停掉监听：accept 会以 IOException 退出。先置 running=false，即使 accept 刚好拿回一个 socket，
+        //    它进锁后也会看到 running=false 而关掉连接、不再登记（见 acceptLoop）。
         running = false
-        try {
-            serverSocket.close()
-        } catch (e: IOException) {
-            // 忽略
+        runCatching { serverSocket.close() }
+
+        // 2) 先确保接纳线程退出、不再登记，再拿快照：这样下面看到的 socket / worker 就是全集。
+        //    这里不吞超时 / 中断：线程没能结束就把它报成测试失败原因。
+        acceptThread.join(JOIN_TIMEOUT_MILLIS)
+        check(!acceptThread.isAlive) { "silent delete accept thread did not stop" }
+
+        val sockets = synchronized(lifecycle) { openSockets.toList() }
+        val started = synchronized(lifecycle) { workers.toList() }
+
+        // 3) 关已接纳的连接：处理线程的有限读取会到点退出，join 也才有界。
+        sockets.forEach { socket -> runCatching { socket.close() } }
+
+        // 4) 等全部处理线程退出；超时 / 中断照实报错，不把它当成清理成功。
+        started.forEach { worker ->
+            worker.join(JOIN_TIMEOUT_MILLIS)
+            check(!worker.isAlive) { "silent delete worker did not stop: ${worker.name}" }
         }
-        // 关掉已接纳的连接：处理线程的有限读取会到点退出，join 也才有界。
-        openSockets.forEach { socket -> runCatching { socket.close() } }
-        workers.forEach { worker -> runCatching { worker.join(READ_TIMEOUT_MILLIS + 1_000L) } }
-        runCatching { acceptThread.join(READ_TIMEOUT_MILLIS + 1_000L) }
     }
 
     private companion object {
         private const val LOOPBACK = "127.0.0.1"
         private const val BACKLOG = 50
         private const val READ_TIMEOUT_MILLIS = 5_000
+        private const val JOIN_TIMEOUT_MILLIS = READ_TIMEOUT_MILLIS + 1_000L
     }
 }
 
