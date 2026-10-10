@@ -110,6 +110,38 @@ class WebDavConfigTest {
     }
 
     @Test
+    fun `printing a mount whose endpoint has an illegal host does not echo the raw url`() {
+        // R4 残留反例：主机非法（bad host）时 Java URI 只保留 registry authority、host 为 null，
+        // 原文整串不能回显——用固定占位。
+        val smuggled = MountBackend.WebDav("http://demo:synthetic-secret@bad_host", "/", "", "")
+        val printed = smuggled.toString()
+
+        assertFalse(printed.contains("synthetic-secret"), "密码出现在了打印里：$printed")
+        assertFalse(printed.contains("bad_host"), "非法主机的原文也不该整串回显：$printed")
+
+        // 嵌套配置（MountConfig / VfsRuntimeConfig）同样不泄密。
+        val nested =
+            MountConfig(
+                VfsPath.parse("/resources/remote"),
+                "remote",
+                MountBackend.WebDav("http://demo:synthetic-secret@bad_host", "/dav"),
+            )
+        val nestedPrinted = nested.toString()
+        assertFalse(nestedPrinted.contains("synthetic-secret"), "嵌套打印里出现了密码：$nestedPrinted")
+        assertFalse(nestedPrinted.contains("bad_host"), "嵌套打印里出现了非法主机原文：$nestedPrinted")
+
+        val config =
+            VfsRuntimeConfig(
+                stateDatabase = Path.of("data/state.db"),
+                namespaces = setOf("resources"),
+                mounts = listOf(nested),
+            )
+        val configPrinted = config.toString()
+        assertFalse(configPrinted.contains("synthetic-secret"), "配置对象打印里出现了密码：$configPrinted")
+        assertFalse(configPrinted.contains("bad_host"), "配置对象打印里出现了非法主机原文：$configPrinted")
+    }
+
+    @Test
     fun `an endpoint with credentials in the url is rejected before anything is created`() {
         val failure =
             assertFailsWith<VfsException> {
@@ -182,6 +214,32 @@ class WebDavConfigTest {
                 ).resolve()
             }
         assertEquals(VfsErrorCode.INVALID_ARGUMENT, sameRoot.code, "同一个根挂两个 key 也算一块盘")
+    }
+
+    @Test
+    fun `overlap checks combine the endpoint path with the root`() {
+        // R1 残留反例 A：endpoint `/dav` + root `/team` 与 endpoint 空路径 + root `/dav/team/sub`
+        // 的完整路径是包含关系，必须拒。
+        val failure =
+            assertFailsWith<VfsException> {
+                config(
+                    mounts =
+                        listOf(
+                            MountConfig(VfsPath.parse("/resources/a"), "ra", MountBackend.WebDav("$endpoint/dav", "/team")),
+                            MountConfig(VfsPath.parse("/resources/b"), "rb", MountBackend.WebDav(endpoint, "/dav/team/sub")),
+                        ),
+                ).resolve()
+            }
+        assertEquals(VfsErrorCode.INVALID_ARGUMENT, failure.code)
+
+        // R1 残留反例 B：endpoint `/one` + root `/a` 与 endpoint `/two` + root `/a` 不重叠，不该误拒。
+        config(
+            mounts =
+                listOf(
+                    MountConfig(VfsPath.parse("/resources/a"), "ra", MountBackend.WebDav("$endpoint/one", "/a")),
+                    MountConfig(VfsPath.parse("/resources/b"), "rb", MountBackend.WebDav("$endpoint/two", "/a")),
+                ),
+        ).resolve()
     }
 
     @Test

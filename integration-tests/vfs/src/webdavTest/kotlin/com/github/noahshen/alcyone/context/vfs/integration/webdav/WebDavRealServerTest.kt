@@ -2,9 +2,12 @@ package com.github.noahshen.alcyone.context.vfs.integration.webdav
 
 import com.github.noahshen.alcyone.context.vfs.DeleteOptions
 import com.github.noahshen.alcyone.context.vfs.NodeId
+import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.StatOptions
 import com.github.noahshen.alcyone.context.vfs.VfsEffect
 import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
+import com.github.noahshen.alcyone.context.vfs.VfsEvent
+import com.github.noahshen.alcyone.context.vfs.VfsEventType
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.VfsUri
@@ -12,6 +15,7 @@ import com.github.noahshen.alcyone.context.vfs.runtime.AlcyoneVfs
 import com.github.noahshen.alcyone.context.vfs.runtime.MountBackend
 import com.github.noahshen.alcyone.context.vfs.runtime.MountConfig
 import com.github.noahshen.alcyone.context.vfs.runtime.VfsRuntimeConfig
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertArrayEquals
@@ -24,12 +28,16 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
 import java.io.IOException
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertFailsWith
 
 /**
@@ -147,6 +155,32 @@ class WebDavRealServerTest {
             }
         }
 
+    /** R1：带路径的 endpoint 与 root 拆分写法，和只写长 root 的写法落在同一物理位置。 */
+    @Test
+    @Timeout(120)
+    fun `A03b a pathed endpoint plus a short root addresses the same place as the long root`() =
+        runBlocking {
+            val content = "split endpoint location".toByteArray()
+
+            // endpoint 带路径 `/dav` + root `/team`，完整路径仍是 `/dav/team`。
+            withVfs(config(endpoint = "${Companion.endpoint}/dav", root = "/team")) { vfs ->
+                val info = vfs.write(uri("/t24-locate-split/hello.txt"), content)
+                assertArrayEquals(content, withTimeout(30_000) { vfs.read(uri("/t24-locate-split/hello.txt")) })
+
+                // 物理文件必须落在 `/dav/team` 下——与 A03b 的长 root 写法同一位置。
+                val teamTarget = dataRoot().resolve("dav/team/t24-locate-split/hello.txt")
+                assertTrue(Files.exists(teamTarget), "endpoint /dav + root /team 应与 root /dav/team 落点一致：$teamTarget")
+                assertArrayEquals(content, Files.readAllBytes(teamTarget))
+
+                val rootTarget = dataRoot().resolve("t24-locate-split/hello.txt")
+                assertFalse(Files.exists(rootTarget), "文件不应该落在根 / 下：$rootTarget")
+
+                assertNotEquals("", info.id.value)
+                vfs.delete(uri("/t24-locate-split"), DeleteOptions(recursive = true))
+                assertFalse(Files.exists(dataRoot().resolve("dav/team/t24-locate-split")), "删除后目录也不在了")
+            }
+        }
+
     /** A04：同一个状态库按同一份配置重开，已登记的 Node ID 与路径原样保留。 */
     @Test
     @Timeout(120)
@@ -242,10 +276,10 @@ class WebDavRealServerTest {
                     }
 
                 assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code, "删除请求失败要报 STORAGE_ERROR")
-                assertNotEquals(VfsEffect.NONE, failure.effect, "删除失败不能误报 NONE")
+                assertEquals(VfsEffect.UNKNOWN, failure.effect, "删除请求边界直接钉住 UNKNOWN")
                 assertTrue(
-                    failure.effect == VfsEffect.UNKNOWN || failure.effect == VfsEffect.PARTIAL,
-                    "删除请求边界要用保守 effect，实际是 ${failure.effect}",
+                    failure.cause?.javaClass?.name == "org.apache.opendal.OpenDALException",
+                    "后端原始异常原样挂在 cause 上：${failure.cause}",
                 )
                 assertFalse(Files.exists(target), "服务端实际删除了文件，只是回包丢了")
                 assertFalse(describeChain(failure).contains(password), "错误里也不许出现凭据")
@@ -270,12 +304,88 @@ class WebDavRealServerTest {
                     }
 
                 assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code, "删除请求失败要报 STORAGE_ERROR")
-                assertNotEquals(VfsEffect.NONE, failure.effect, "删除失败不能误报 NONE")
+                assertEquals(VfsEffect.UNKNOWN, failure.effect, "删除请求边界直接钉住 UNKNOWN")
                 assertTrue(
-                    failure.effect == VfsEffect.UNKNOWN || failure.effect == VfsEffect.PARTIAL,
-                    "删除请求边界要用保守 effect，实际是 ${failure.effect}",
+                    failure.cause?.javaClass?.name == "org.apache.opendal.OpenDALException",
+                    "后端原始异常原样挂在 cause 上：${failure.cause}",
                 )
                 assertFalse(Files.exists(target), "服务端实际删除了目录，只是回包丢了")
+            }
+        }
+
+    /** R2：Runtime 登记源并设置 Metadata 后删除失败，旧记录与事件不变。 */
+    @Test
+    @Timeout(60)
+    fun `R2 a registered file with metadata keeps its records and events when the delete fails`() =
+        runBlocking {
+            val dataRoot = dataRoot()
+            val target = dataRoot.resolve("r2-registered.txt")
+            Files.write(target, "registered".toByteArray())
+
+            SilentDeleteServer(dataRoot).use { silent ->
+                withVfs(config(endpoint = silent.endpoint)) { vfs ->
+                    val events = CopyOnWriteArrayList<VfsEvent>()
+                    vfs.subscribe { event -> events += event }
+
+                    // 通过 Runtime 登记源（stat 懒注册，不产生变更事件）并设置 Metadata。
+                    val info = vfs.stat(uri("/r2-registered.txt"))
+                    val tag = NodeMetadata(setOf("r2"), "删除失败也要保留")
+                    vfs.setMetadata(info.id, tag)
+
+                    // 等 Metadata 事件到齐（提交后通知，异步投递）。
+                    withTimeout(10_000) { while (events.size < 1) delay(10) }
+                    assertEquals(listOf(VfsEventType.METADATA_UPDATED), events.map { it.type })
+
+                    val failure = assertFailsWith<VfsException> { vfs.delete(uri("/r2-registered.txt")) }
+                    assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
+                    assertEquals(VfsEffect.UNKNOWN, failure.effect, "删除请求边界直接钉住 UNKNOWN")
+                    assertTrue(
+                        failure.cause?.javaClass?.name == "org.apache.opendal.OpenDALException",
+                        "后端原始异常原样挂在 cause 上：${failure.cause}",
+                    )
+                    assertFalse(describeChain(failure).contains(password), "错误里也不许出现凭据")
+
+                    // 物理上文件已被服务端删除，但逻辑记录与事件都没被这次失败改写。
+                    assertFalse(Files.exists(target), "服务端实际删除了文件，只是回包丢了")
+                    val node = vfs.getNode(info.id)
+                    assertEquals(info.id, node.id)
+                    assertEquals(uri("/r2-registered.txt").path, node.uri.path)
+                    assertEquals(tag, vfs.getMetadata(info.id))
+                    assertEquals(
+                        listOf(VfsEventType.METADATA_UPDATED),
+                        events.map { it.type },
+                        "失败没有产生新事件",
+                    )
+                }
+            }
+        }
+
+    /** R5：静默删除装置只操作自己那个临时根——解码后的点段、绝对路径等越界请求被拒，根外文件不动。 */
+    @Test
+    @Timeout(60)
+    fun `R5 the silent delete server refuses every path that escapes its own root`() =
+        runBlocking {
+            val ownRoot = Files.createTempDirectory("t24-silent-own-root")
+            val outside = ownRoot.parent.resolve(ownRoot.fileName.toString() + "-outside.txt")
+            Files.write(outside, "keep me".toByteArray())
+
+            SilentDeleteServer(ownRoot).use { silent ->
+                val rootDirName = ownRoot.fileName.toString()
+                val outsideName = outside.fileName.toString()
+
+                // 越界请求一律被拒（400），根外哨兵文件不动。
+                assertEquals(400, rawRequest(silent.endpoint, "DELETE", "/$rootDirName/../$outsideName"))
+                assertEquals(400, rawRequest(silent.endpoint, "DELETE", "/%2e%2e%2f$outsideName"))
+                assertEquals(400, rawRequest(silent.endpoint, "DELETE", "//tmp/$outsideName"))
+                assertEquals(400, rawRequest(silent.endpoint, "DELETE", "/$rootDirName/../../etc/hostname"))
+                assertTrue(Files.exists(outside), "越界请求不能删到根外文件")
+                assertArrayEquals("keep me".toByteArray(), Files.readAllBytes(outside))
+
+                // 根内合法删除仍然有效：文件被删，只是回包丢失（客户端读到 EOF）。
+                val victim = ownRoot.resolve("victim.txt")
+                Files.write(victim, "delete me".toByteArray())
+                rawRequest(silent.endpoint, "DELETE", "/victim.txt")
+                assertFalse(Files.exists(victim), "根内删除仍然生效")
             }
         }
 
@@ -287,6 +397,25 @@ class WebDavRealServerTest {
 
     /** 分配一个空闲端口然后立刻放手：那上面没有服务，连接一定失败。 */
     private fun deadEndpoint(): String = ServerSocket(0).use { socket -> "http://127.0.0.1:${socket.localPort}" }
+
+    /** 发一条原始 HTTP 请求，返回状态码；读不到响应行返回 -1。 */
+    private fun rawRequest(
+        endpoint: String,
+        method: String,
+        path: String,
+    ): Int {
+        val uri = URI(endpoint)
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(uri.host, uri.port), 5_000)
+            socket.soTimeout = 5_000
+            socket.getOutputStream().apply {
+                write("$method $path HTTP/1.1\r\nHost: ${uri.host}:${uri.port}\r\nConnection: close\r\n\r\n".toByteArray())
+                flush()
+            }
+            val statusLine = socket.getInputStream().bufferedReader().readLine() ?: return -1
+            return statusLine.split(' ').getOrNull(1)?.toIntOrNull() ?: -1
+        }
+    }
 
     private companion object {
         private lateinit var endpoint: String
@@ -316,20 +445,29 @@ class WebDavRealServerTest {
  * 模拟「服务端实际删除了但回包丢失」的场景：OpenDAL 会收到连接关闭错误，
  * 但物理上文件已经被删除。用于验证 delete 的 effect 是 UNKNOWN 而不是 NONE。
  *
- * 装置自身有独立有限退出保障：[close] 关闭监听 socket，accept 循环退出，所有连接线程是 daemon 线程。
+ * 装置边界（R5 修复）：
+ * - 只绑 127.0.0.1，不监听其他网卡；
+ * - 请求路径先解码再规范化，只允许落在自己 [dataRoot] 内的单层路径——点段、多余前导斜杠一律拒；
+ * - 连接读取有有限等待；[close] 关掉监听 socket 与所有已接纳连接，并等处理线程到点退出。
  */
 private class SilentDeleteServer(
     private val dataRoot: Path,
 ) : AutoCloseable {
-    private val serverSocket = ServerSocket(0)
+    private val serverSocket = ServerSocket(0, BACKLOG, InetAddress.getByName(LOOPBACK))
+
+    private val workers = CopyOnWriteArrayList<Thread>()
+    private val openSockets = CopyOnWriteArrayList<Socket>()
 
     @Volatile
     private var running = true
 
-    val endpoint: String get() = "http://127.0.0.1:${serverSocket.localPort}"
+    val endpoint: String get() = "http://$LOOPBACK:${serverSocket.localPort}"
+
+    private val acceptThread: Thread
 
     init {
-        Thread { acceptLoop() }
+        acceptThread = Thread { acceptLoop() }
+        acceptThread
             .apply {
                 isDaemon = true
                 name = "silent-delete-accept"
@@ -344,7 +482,10 @@ private class SilentDeleteServer(
                 } catch (e: IOException) {
                     break
                 }
-            Thread { handle(socket) }
+            openSockets += socket
+            val worker = Thread { handle(socket) }
+            workers += worker
+            worker
                 .apply {
                     isDaemon = true
                     name = "silent-delete-handle"
@@ -353,8 +494,10 @@ private class SilentDeleteServer(
     }
 
     private fun handle(socket: Socket) {
-        socket.use {
-            try {
+        try {
+            // 连接读取有有限等待：客户端不说话时线程不会一直挂住，close 的等待也才有界。
+            socket.soTimeout = READ_TIMEOUT_MILLIS
+            socket.use {
                 val reader = socket.getInputStream().bufferedReader()
                 val requestLine = reader.readLine() ?: return
                 val headers = mutableMapOf<String, String>()
@@ -371,17 +514,48 @@ private class SilentDeleteServer(
                 val method = parts[0].uppercase()
                 val rawPath = parts[1]
                 val decoded = URLDecoder.decode(rawPath, StandardCharsets.UTF_8)
-                val target = dataRoot.resolve(decoded.removePrefix("/"))
+                val target = insideRoot(decoded)
 
-                when (method) {
-                    "PROPFIND" -> respondPropfind(socket, decoded, target, headers["depth"] ?: "0")
-                    "DELETE" -> deleteAndClose(target)
+                when {
+                    target == null -> respond400(socket)
+                    method == "PROPFIND" -> respondPropfind(socket, decoded, target, headers["depth"] ?: "0")
+                    method == "DELETE" -> deleteAndClose(target)
                     else -> respond404(socket)
                 }
-            } catch (e: Exception) {
-                // 连接可能在处理中途被客户端关闭，忽略。
+            }
+        } catch (e: Exception) {
+            // 连接可能在处理中途被客户端或 close 关掉，忽略。
+        } finally {
+            openSockets -= socket
+        }
+    }
+
+    /**
+     * 把请求路径收敛成 [dataRoot] 内的目标；越界一律返回 null。
+     *
+     * 只接受单个前导 `/` 的路径：解码后的 `..` 段、多余前导斜杠（`//` 会让 `Path.resolve` 当成绝对路径）
+     * 以及任何规范化后可能跑出临时根的写法，都不碰；仅允许单个结尾 `/`（WebDAV 目录请求自带）。
+     */
+    private fun insideRoot(decoded: String): Path? {
+        if (!decoded.startsWith("/") || decoded.startsWith("//")) return null
+        // 允许一个结尾 `/`（WebDAV 列目录 / 删目录的请求会带），其余空段一律拒。
+        val path = decoded.removeSuffix("/")
+        val segments = mutableListOf<String>()
+        if (path.isNotEmpty()) {
+            for (segment in path.split('/').drop(1)) {
+                when (segment) {
+                    ".." -> return null
+                    else -> {
+                        if (segment.isEmpty() || segment == ".") return null
+                        segments += segment
+                    }
+                }
             }
         }
+        val base = dataRoot.toAbsolutePath().normalize()
+        // 段列表拼成**相对**路径再 resolve：拼上前导 `/` 会让 resolve 把整个 base 换成绝对路径。
+        val target = if (segments.isEmpty()) base else base.resolve(segments.joinToString("/")).normalize()
+        return target.takeIf { it.startsWith(base) }
     }
 
     private fun respondPropfind(
@@ -443,6 +617,16 @@ private class SilentDeleteServer(
         // 不发响应，socket.use 在 handle 结束时关闭连接，客户端收到 EOF。
     }
 
+    private fun respond400(socket: Socket) {
+        try {
+            val output = socket.getOutputStream()
+            output.write("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n".toByteArray())
+            output.flush()
+        } catch (e: Exception) {
+            // 忽略
+        }
+    }
+
     private fun respond404(socket: Socket) {
         try {
             val output = socket.getOutputStream()
@@ -460,6 +644,16 @@ private class SilentDeleteServer(
         } catch (e: IOException) {
             // 忽略
         }
+        // 关掉已接纳的连接：处理线程的有限读取会到点退出，join 也才有界。
+        openSockets.forEach { socket -> runCatching { socket.close() } }
+        workers.forEach { worker -> runCatching { worker.join(READ_TIMEOUT_MILLIS + 1_000L) } }
+        runCatching { acceptThread.join(READ_TIMEOUT_MILLIS + 1_000L) }
+    }
+
+    private companion object {
+        private const val LOOPBACK = "127.0.0.1"
+        private const val BACKLOG = 50
+        private const val READ_TIMEOUT_MILLIS = 5_000
     }
 }
 

@@ -134,6 +134,27 @@ class WebDavStorageTest {
     }
 
     @Test
+    fun `containment compares the endpoint path and the root together`() {
+        // R1 残留反例 A：endpoint `/dav` + root `/team` 与 endpoint 空路径 + root `/dav/team/sub`
+        // 的完整路径是包含关系（`/dav/team` vs `/dav/team/sub`），必须拒。
+        assertFailsWith<VfsException>("带路径 endpoint 的包含关系要按完整路径判断") {
+            WebDavRoots.requireNonOverlapping(
+                listOf(
+                    "http://127.0.0.1:1/dav" to "/team",
+                    "http://127.0.0.1:1" to "/dav/team/sub",
+                ),
+            )
+        }
+        // R1 残留反例 B：endpoint `/one` + root `/a` 与 endpoint `/two` + root `/a` 的完整路径不重叠，不该误拒。
+        WebDavRoots.requireNonOverlapping(
+            listOf(
+                "http://127.0.0.1:1/one" to "/a",
+                "http://127.0.0.1:1/two" to "/a",
+            ),
+        )
+    }
+
+    @Test
     fun `roots that resolve to the same location are rejected even when written differently`() {
         // R1 反例：endpoint 路径与 root 组合相同 → 身份串相同 → 拒绝。
         assertFailsWith<VfsException>("endpoint 路径与 root 组合相同") {

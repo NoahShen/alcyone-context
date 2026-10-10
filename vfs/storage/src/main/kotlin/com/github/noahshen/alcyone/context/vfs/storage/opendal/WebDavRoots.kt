@@ -16,8 +16,9 @@ import java.net.URISyntaxException
  * 例：`http://127.0.0.1:8080` + `/dav/team` 的身份是 `http://127.0.0.1:8080/dav/team`。
  *
  * **位置规范化**（R1 修复）：endpoint 用 [URI] 解析，主机统一小写、默认端口（http 80 / https 443）省略、
- * 路径消解点段并拒绝 `%` 编码歧义；身份、重叠检查与实际 OpenDAL 寻址使用同一套规范结果。
- * 这样 `http://host/dav` + `/team` 与 `http://host` + `/dav/team` 得到相同身份串，会被重叠检查拒绝。
+ * 路径消解点段并拒绝 `%` 编码歧义；身份、相等与包含比较都使用同一套规范结果——
+ * 完整路径 = endpoint 路径部分 + root，例如 endpoint `/dav` + root `/team` 的完整路径是 `/dav/team`。
+ * 这样 `http://host/dav` + `/team` 与 `http://host` + `/dav/team` 得到相同身份串与完整路径，会被重叠检查拒绝。
  */
 object WebDavRoots {
     /**
@@ -28,7 +29,7 @@ object WebDavRoots {
      *   凭据必须走 `MountBackend.WebDav` 的字段，不能塞进 URL（否则它会出现在身份串里）；
      * - 主机统一小写，默认端口（http 80 / https 443）省略，路径消解点段并拒绝 `%`；
      * - root 以 `/` 开头、结尾不带 `/`（根自己除外），段里不许有空段 / `.` / `..` / 控制字符 / `%`。
-     *   **不套本地 Path 的规范化**：远端 URL 没有符号链接，也没有盘符。
+     *   **不套本地 Path 的规范化**：客户端无法一概识别服务端链接，边界依赖服务端配置；远端路径也没有盘符。
      * - 这一步只做字符串整理，**不发网络请求**，也不替调用方确认远端目录存在。
      */
     fun normalize(
@@ -134,6 +135,11 @@ object WebDavRoots {
      * 与 `http://host` + `/dav/team` 身份相同，直接拒绝；主机大小写、默认端口差异在规范化后收敛，
      * 同址写法也会得到相同身份串。
      *
+     * **包含判断也用完整路径**（R1 残留修复）：endpoint 自己的路径（如 `/dav`）与 root（如 `/team`）
+     * 先拼成完整路径 `/dav/team` 再比包含——只比原始 root 会漏掉 endpoint 里的路径
+     * （`/dav` + `/team` 与 `/dav/team/sub` 会被当成不重叠），也会误判
+     * （`/one` + `/a` 与 `/two` + `/a` 本来不重叠）。
+     *
      * 识别边界：只看得见规范化后的 endpoint，**看不出两台不同 endpoint 背后是不是同一台服务器**。
      */
     fun requireNonOverlapping(targets: Collection<Pair<String, String>>) {
@@ -147,7 +153,9 @@ object WebDavRoots {
                 val (leftEndpoint, leftRoot) = normalized[i]
                 val (rightEndpoint, rightRoot) = normalized[j]
                 if (!sameLocation(leftEndpoint, rightEndpoint)) continue
-                if (leftRoot == rightRoot || contains(leftRoot, rightRoot) || contains(rightRoot, leftRoot)) {
+                val leftPath = fullPath(leftEndpoint, leftRoot)
+                val rightPath = fullPath(rightEndpoint, rightRoot)
+                if (leftPath == rightPath || contains(leftPath, rightPath) || contains(rightPath, leftPath)) {
                     throw invalid("webdav roots must be distinct and must not contain each other (roots $i and $j overlap)")
                 }
             }
@@ -162,6 +170,19 @@ object WebDavRoots {
         URI(left).let { l ->
             URI(right).let { r -> l.scheme == r.scheme && l.host == r.host && l.port == r.port }
         }
+
+    /**
+     * 挂载在服务上的**完整路径**：endpoint 的路径部分 + root，例如 endpoint `/dav` + root `/team` → `/dav/team`。
+     *
+     * 身份、相等与包含比较都用它——endpoint 里的路径和 root 一样参与位置判断。
+     */
+    fun fullPath(
+        endpoint: String,
+        root: String,
+    ): String = pathOf(normalizeEndpoint(endpoint)) + normalizeRoot(root)
+
+    /** 规范 endpoint 的路径部分：`http://host:8080/dav` → `/dav`；没有路径就是空串。 */
+    private fun pathOf(endpoint: String): String = normalizePath(URI(endpoint).rawPath ?: "")
 
     /** [outer] 按完整段包含 [inner]：`/a` 包含 `/a/b`，但不包含 `/a-old`。 */
     private fun contains(

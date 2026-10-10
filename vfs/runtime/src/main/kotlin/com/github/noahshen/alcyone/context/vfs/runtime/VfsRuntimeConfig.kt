@@ -60,12 +60,15 @@ sealed interface MountBackend {
          * 安全显示 endpoint：有 userinfo 时只留 `scheme` + `://` + `***@` + `host:port`，不显示用户名与密码。
          *
          * 配置对象在 [VfsRuntimeConfig.resolve] 之前就能打印，非法的 userinfo 写法也不能把凭据带出去。
+         * 主机非法（如 `bad host`）时 Java URI 只保留 registry authority、`host` 为 null，
+         * 这时整串原文不回显，用固定占位——原文可能带着凭据。
          */
         private fun safeEndpoint(): String {
-            val uri = runCatching { URI(endpoint) }.getOrNull() ?: return "(invalid endpoint)"
+            val uri = runCatching { URI(endpoint) }.getOrNull()
+            val scheme = uri?.scheme
+            val host = uri?.host
+            if (uri == null || scheme == null || host == null) return "(unprintable endpoint)"
             if (uri.userInfo == null) return endpoint
-            val scheme = uri.scheme ?: ""
-            val host = uri.host ?: ""
             val port = uri.port
             return buildString {
                 append(scheme)
