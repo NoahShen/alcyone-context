@@ -22,8 +22,10 @@ import kotlin.concurrent.withLock
 internal class ReaderHandle(
     /** OpenDAL 创建的文件流。只有拿到下面的锁才能碰它。 */
     val native: InputStream,
-    /** 关闭之后回调，用来把它从 [LocalFsStorage] 的待关闭列表里摘掉。 */
+    /** 关闭之后回调，用来把它从 [LocalFsStorage] / [WebDavStorage] 的待关闭列表里摘掉。 */
     private val onReleased: (ReaderHandle) -> Unit = {},
+    /** 错误消息里的后端名。本地盘与 WebDAV 共用这个类，消息不能把后端说错（R2 修复）。 */
+    private val label: String = "local storage",
 ) {
     private val gate = ReentrantLock()
     private var released = false
@@ -31,7 +33,7 @@ internal class ReaderHandle(
     /** 排队执行一次读取；已经关闭就直接报 `CLOSED`，不碰底层。 */
     fun <T> read(block: () -> T): T =
         gate.withLock {
-            if (released) throw VfsException(VfsErrorCode.CLOSED, "local storage read stream is closed")
+            if (released) throw VfsException(VfsErrorCode.CLOSED, "$label read stream is closed")
             block()
         }
 

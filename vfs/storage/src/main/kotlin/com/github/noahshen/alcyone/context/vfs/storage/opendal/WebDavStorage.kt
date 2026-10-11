@@ -87,6 +87,10 @@ class WebDavStorage private constructor(
     /** 已经打开、但还没关闭的读文件流。关闭存储时要把它们都关掉。 */
     private val liveReaders = ConcurrentHashMap.newKeySet<ReaderHandle>()
 
+    internal fun liveReaderCount(): Int = liveReaders.size
+
+    internal fun firstLiveReaderHandle(): ReaderHandle? = liveReaders.firstOrNull()
+
     companion object {
         /**
          * 打开一个 WebDAV 存储。**不发网络请求**，所以端点不可达时这里不会失败，
@@ -213,9 +217,7 @@ class WebDavStorage private constructor(
 
     /**
      * 读文件前的检查：拒绝「拿文件当目录」的情况，然后查出文件信息。
-     *
-     * 查服务器这一步也是阻塞的，所以放在后台线程里，否则会把调用方的线程占住。
-     * 它刻意放在长时间读文件的锁外面，免得一次慢查询挡住关闭操作。
+     * 查服务器是阻塞的，因此切到后台线程执行。
      */
     private suspend fun precheckForRead(path: StoragePath): StorageAttributes =
         call("read precheck") {
@@ -554,7 +556,13 @@ class WebDavStorage private constructor(
 
     /** 打开文件流并记进 [liveReaders]，保证关闭存储时不会漏掉被 Runtime 遗忘的流。 */
     private fun newReader(backendPath: String): ReaderHandle {
-        val handle = ReaderHandle(operator.createInputStream(backendPath)) { liveReaders.remove(it) }
+        val handle =
+            ReaderHandle(
+                operator.createInputStream(backendPath),
+                onReleased = { liveReaders.remove(it) },
+                // 后端名传下去：读流在释放后再读时，消息要说清是哪块盘（R2 修复）。
+                label = "webdav storage",
+            )
         liveReaders += handle
         return handle
     }

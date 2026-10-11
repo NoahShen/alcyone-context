@@ -107,18 +107,22 @@ internal class StorageInputStream(
         state = State.CLOSED
         // 先标记已关闭再关：万一关闭失败，再调一次也不会有别的动作。
         // 不经过 lifetime：外层存储已经关闭时，这里也要能正常关掉或者什么都不做。
-        mapStorageErrors("close read stream") { handle.release() }
+        // 后端名从 lifetime 取，本地盘与 WebDAV 共用这一层，消息和错误码不能互相说错（R2 修复）。
+        mapStorageErrors("close read stream", backend = lifetime.label()) { handle.release() }
     }
 
     /**
      * 先经过 [NativeLifetime.call] 再经过 [mapStorageErrors]：
      * 前者避免和关闭撞车，后者把后端异常转成 `STORAGE_ERROR` 并保留 `cause`。
      * 错误消息只说读流的哪一步失败，不带磁盘路径或后端原文。
+     *
+     * 后端名必须传下去：WebDAV 专用的「HTTP 401 → `STORAGE_ACCESS_DENIED`」规则按后端名生效，
+     * 漏传会退回默认的本地盘，读流上的 401 就会被错报成 `STORAGE_ERROR`（R2 修复）。
      */
     private fun <T> mapped(
         operation: String,
         block: () -> T,
-    ): T = mapStorageErrors(operation) { lifetime.call(block) }
+    ): T = mapStorageErrors(operation, backend = lifetime.label()) { lifetime.call(block) }
 
     private fun beforeRead(operation: String) {
         when (state) {

@@ -1,5 +1,6 @@
 package com.github.noahshen.alcyone.context.vfs.integration.webdav
 
+import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.VfsEffect
 import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsException
@@ -26,29 +27,27 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.DriverManager
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertFailsWith
 
 /**
  * T25 A06：失败事实——远端写入部分完成后失败、目标确认失败、删源失败都不误提交；UNKNOWN 不降级，已知变化不报 NONE。
- *
- * 组装方式：真 [DefaultVfs] + 真 SQLite + 真 [LocalFsStorage]（源）+ 真 [WebDavStorage]（远端目标），
- * 用包装 Storage 在**精确失败点**注入（真服务不会自己停在「写了一半」或「确认那一步」）。
- * 物理事实对着真实服务磁盘与服务端响应断言；逻辑事实对着事件表、Node 路径与异常 code / effect 断言。
- *
- * 另含**一条真实 HTTP 结果丢失证据**：一个只监听 loopback 的故障服务，对 PUT 请求读入请求体后不回包直接断开，
- * 让目标盘的写入在「服务端可能已改了一点」处失败；断言源保持完整、不调用源删除、无成功移动事件。
- *
- * 每个用例用独立的远端子目录，跑完清理，避免用例间互相污染。
+ * 以及 R4：Adapter 级直接调用失败与流回收证据。
  */
 class T25WebDavFailureReportTest {
     @TempDir
@@ -58,7 +57,6 @@ class T25WebDavFailureReportTest {
 
     private fun localUri(name: String) = VfsUri.parse("alcyone://resources/local/$name")
 
-    /** 每个用例的 `case` 是一个独立远端子目录，源与目标都落在它里面。 */
     private fun remoteUri(
         case: String,
         name: String,
@@ -74,36 +72,86 @@ class T25WebDavFailureReportTest {
         runBlocking {
             val localRoot = Files.createDirectories(tempDir.resolve("local"))
             Files.writeString(localRoot.resolve("a06-source.txt"), "source-kept")
-            val dataRoot = WebDavFixture.dataRoot()
+            val faultDataRoot = Files.createDirectories(tempDir.resolve("fault-data"))
 
-            // 故障服务把自己的根当远端共享：PROPFIND 返回真实属性，PUT 后不回包直接断开。
-            DroppedWriteServer(dataRoot).use { fault ->
+            DroppedWriteServer(faultDataRoot).use { fault ->
                 withStack(localRoot, endpoint = fault.endpoint) { stack ->
-                    val before = stack.eventRows()
+                    // 1. 先进行 stat 登记并设置 metadata
+                    val statInfo = stack.vfs.stat(localUri("a06-source.txt"))
+                    val nodeId = statInfo.id
+                    val meta = NodeMetadata(tags = setOf("test-tag"), description = "pre-move meta")
+                    stack.vfs.setMetadata(nodeId, meta)
+
+                    val beforeEvents = stack.eventRows()
+
                     val failure =
                         assertFailsWith<VfsException> {
                             stack.vfs.move(localUri("a06-source.txt"), remoteUri("dropped", "target.txt"))
                         }
 
-                    assertTrue(failure.cause != null, "后端原始异常挂在 cause 上：${failure.cause}")
+                    // 断言服务端确已收到并处理了 PUT 请求（写入已发生）
+                    assertTrue(fault.putCount.get() >= 1, "PUT 请求确实已由故障服务接收并落盘: ${fault.putCount.get()}")
+
+                    // 目标物理临时文件在服务端落盘并包含写入内容
+                    val droppedTarget = faultDataRoot.resolve("dropped/target.txt")
+                    assertTrue(Files.exists(droppedTarget), "服务端临时目录中目标物理文件已落盘: $droppedTarget")
+                    assertEquals("source-kept", Files.readString(droppedTarget), "服务端落盘内容与源一致")
+
+                    // 异常类型与 effect 断言
+                    assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code, "写响应断开保留 STORAGE_ERROR")
                     assertEquals(
                         VfsEffect.UNKNOWN,
                         failure.effect,
-                        "写入边界结果丢失直接钉住 UNKNOWN，不降级为 NONE / PARTIAL：${failure.effect}",
+                        "写入边界结果丢失直接钉住 UNKNOWN，不降级为 NONE / PARTIAL",
                     )
+                    assertNotNull(failure.cause, "后端原始异常挂在 cause 上")
+
+                    // 数据库状态验证：node 路径未变，metadata 未变，没有 FILE_MOVED 事件
+                    val nodeRows = stack.queryRows("SELECT id, vfs_path FROM node WHERE id = '$nodeId'")
+                    assertEquals(1, nodeRows.size)
+                    assertEquals("/resources/local/a06-source.txt", nodeRows[0][1], "Node vfs_path 保持源路径未迁移")
+
+                    val metaRows = stack.queryRows("SELECT payload FROM metadata WHERE node_id = '$nodeId'")
+                    assertEquals(1, metaRows.size)
+                    assertTrue(metaRows[0][0].contains("pre-move meta"), "Metadata 保持未变")
+
                     assertFalse(
                         stack.eventRows().any { it[0] == "FILE_MOVED" },
                         "写入失败不得提交成功移动事件",
                     )
-                    assertEquals(before, stack.eventRows(), "事件表逐条不变")
+                    assertEquals(beforeEvents, stack.eventRows(), "事件表逐条不变")
 
-                    // 源物理与逻辑都保留。
+                    // 源物理文件保持完整
                     assertTrue(Files.exists(localRoot.resolve("a06-source.txt")), "源物理文件保留")
                     assertEquals("source-kept", Files.readString(localRoot.resolve("a06-source.txt")))
                     assertArrayEquals("source-kept".toByteArray(), stack.vfs.read(localUri("a06-source.txt")), "源逻辑内容可读")
                 }
             }
         }
+
+    /**
+     * R3：向故障服务直接发起带 '/../' 的路径逃逸请求，断言收到 400 且临时根外未受影响。
+     */
+    @Test
+    @Timeout(60)
+    fun `R3 dropped write server rejects path traversal with 400`() {
+        val faultDataRoot = Files.createDirectories(tempDir.resolve("fault-data-traversal"))
+        DroppedWriteServer(faultDataRoot).use { fault ->
+            val uri = URI(fault.endpoint)
+            Socket(uri.host, uri.port).use { socket ->
+                val out = socket.getOutputStream()
+                val request = "PROPFIND /../escape.txt HTTP/1.1\r\nHost: ${uri.host}:${uri.port}\r\n\r\n"
+                out.write(request.toByteArray())
+                out.flush()
+
+                val reader = socket.getInputStream().bufferedReader()
+                val statusLine = reader.readLine()
+                assertNotNull(statusLine, "应当收到响应行")
+                assertTrue(statusLine.contains("400"), "带 '/../' 的请求必须返回 400 Bad Request: $statusLine")
+            }
+            assertFalse(Files.exists(tempDir.resolve("escape.txt")), "根外文件不得被创建或影响")
+        }
+    }
 
     /**
      * A06：**目标确认失败**——写入已成功但确认那一步抛错：源不删、不提交、effect 至少 PARTIAL（已知目标已写入）。
@@ -118,7 +166,9 @@ class T25WebDavFailureReportTest {
 
             try {
                 withStack(localRoot) { stack ->
-                    // 打开一个「写入成功、但随后对指定目标 stat 失败」的远端包装。
+                    val statInfo = stack.vfs.stat(localUri("a06-source.txt"))
+                    val nodeId = statInfo.id
+
                     val failingRemote = FailingStatStorage(stack.rawRemote, failOnStatOf = "confirm/$target")
                     val before = stack.eventRows()
 
@@ -133,6 +183,9 @@ class T25WebDavFailureReportTest {
                     assertTrue(Files.exists(physical("confirm/$target")), "目标已写入服务端")
                     assertTrue(Files.exists(localRoot.resolve("a06-source.txt")), "确认失败不删源")
                     assertEquals(before, stack.eventRows(), "确认失败不提交任何事件")
+
+                    val nodeRows = stack.queryRows("SELECT vfs_path FROM node WHERE id = '$nodeId'")
+                    assertEquals("/resources/local/a06-source.txt", nodeRows[0][0], "Node 路径未变")
                 }
             } finally {
                 deleteRemoteQuietly("confirm")
@@ -140,7 +193,7 @@ class T25WebDavFailureReportTest {
         }
 
     /**
-     * A06：**删源失败**——目标已确认但删源那一步失败：目标留着、源也留着、不提交、effect 至少 PARTIAL。
+     * A06：**删源失败**——目标已确认但删源那一步失败：目标留着、源也留着、不提交、effect 收紧为 PARTIAL。
      */
     @Test
     @Timeout(120)
@@ -151,6 +204,9 @@ class T25WebDavFailureReportTest {
 
             try {
                 withStack(localRoot) { stack ->
+                    val statInfo = stack.vfs.stat(localUri("a06-source.txt"))
+                    val nodeId = statInfo.id
+
                     val failingLocal = FailingDeleteStorage(stack.rawLocal)
                     val before = stack.eventRows()
 
@@ -159,18 +215,21 @@ class T25WebDavFailureReportTest {
                             stack.vfsWith(local = failingLocal).move(localUri("a06-source.txt"), remoteUri("delsrc", "target.txt"))
                         }
 
-                    assertTrue(failure.effect != VfsEffect.NONE, "删源失败不能报 NONE：${failure.effect}")
+                    assertEquals(VfsEffect.PARTIAL, failure.effect, "删源失败收紧断言为 PARTIAL")
 
                     assertTrue(Files.exists(physical("delsrc/target.txt")), "目标在服务端")
                     assertTrue(Files.exists(localRoot.resolve("a06-source.txt")), "删源失败源还在")
                     assertEquals(before, stack.eventRows(), "删源失败不提交任何事件")
+
+                    val nodeRows = stack.queryRows("SELECT vfs_path FROM node WHERE id = '$nodeId'")
+                    assertEquals("/resources/local/a06-source.txt", nodeRows[0][0], "Node 路径未变")
                 }
             } finally {
                 deleteRemoteQuietly("delsrc")
             }
         }
 
-    /** A06：成功反例——一次正常跨后端移动只提交一条 FILE_MOVED，源删、目标在（对照上面三条失败）。 */
+    /** A06：成功反例——一次正常跨后端移动只提交一条 FILE_MOVED，源删、目标在。 */
     @Test
     @Timeout(120)
     fun `A06 a successful cross backend move commits one FILE_MOVED and removes the source`() =
@@ -192,9 +251,100 @@ class T25WebDavFailureReportTest {
             }
         }
 
+    // ------------------------------------------------------------------ R4 Adapter move 直接测试
+
+    @Test
+    @Timeout(60)
+    fun `R4 direct WebDavStorage move validates preconditions`() =
+        runBlocking {
+            val remote = WebDavStorage.create(WebDavFixture.endpoint, "/", WebDavFixture.user, WebDavFixture.password)
+            try {
+                remote.createDirectory(StoragePath.parse("r4-test"))
+                remote.write(
+                    StoragePath.parse("r4-test/src.txt"),
+                    "data".toByteArray(),
+                    com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode.CREATE_NEW,
+                )
+
+                // 1. 源缺失 -> NOT_FOUND
+                val nf =
+                    assertFailsWith<VfsException> {
+                        remote.move(StoragePath.parse("r4-test/missing.txt"), StoragePath.parse("r4-test/dst.txt"))
+                    }
+                assertEquals(VfsErrorCode.NOT_FOUND, nf.code)
+                assertEquals(VfsEffect.NONE, nf.effect)
+
+                // 2. 目标已存在 -> ALREADY_EXISTS
+                remote.write(
+                    StoragePath.parse("r4-test/existing.txt"),
+                    "exist".toByteArray(),
+                    com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode.CREATE_NEW,
+                )
+                val ae =
+                    assertFailsWith<VfsException> {
+                        remote.move(StoragePath.parse("r4-test/src.txt"), StoragePath.parse("r4-test/existing.txt"))
+                    }
+                assertEquals(VfsErrorCode.ALREADY_EXISTS, ae.code)
+                assertEquals(VfsEffect.NONE, ae.effect)
+
+                // 3. 父目录缺失 -> NOT_FOUND
+                val pnf =
+                    assertFailsWith<VfsException> {
+                        remote.move(StoragePath.parse("r4-test/src.txt"), StoragePath.parse("r4-test/no-dir/dst.txt"))
+                    }
+                assertEquals(VfsErrorCode.NOT_FOUND, pnf.code)
+                assertEquals(VfsEffect.NONE, pnf.effect)
+
+                // 4. 目录 move -> UNSUPPORTED_OPERATION
+                remote.createDirectory(StoragePath.parse("r4-test/sub-dir"))
+                val dirMove =
+                    assertFailsWith<VfsException> {
+                        remote.move(StoragePath.parse("r4-test/sub-dir"), StoragePath.parse("r4-test/dst-dir"))
+                    }
+                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, dirMove.code)
+                assertEquals(VfsEffect.NONE, dirMove.effect)
+            } finally {
+                runCatching { remote.delete(StoragePath.parse("r4-test"), recursive = true) }
+                remote.close()
+            }
+        }
+
+    // ------------------------------------------------------------------ R4 遗忘流回收直接证据
+
+    @Test
+    @Timeout(60)
+    fun `R4 forgotten stream is reclaimed directly on adapter close without relying on stream close`() =
+        runBlocking {
+            val remote = WebDavStorage.create(WebDavFixture.endpoint, "/", WebDavFixture.user, WebDavFixture.password)
+            try {
+                remote.createDirectory(StoragePath.parse("r4-stream"))
+                remote.write(
+                    StoragePath.parse("r4-stream/file.txt"),
+                    "stream-bytes".toByteArray(),
+                    com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode.CREATE_NEW,
+                )
+
+                val stream = remote.readStream(StoragePath.parse("r4-stream/file.txt"))
+                val liveReadersField = WebDavStorage::class.java.getDeclaredField("liveReaders").apply { isAccessible = true }
+                val liveReaders = liveReadersField.get(remote) as Set<*>
+
+                assertEquals(1, liveReaders.size, "readStream 打开后 liveReaders 包含 1 个句柄")
+
+                // 直接关闭 adapter，不调用 stream.close()
+                remote.close()
+
+                assertTrue(liveReaders.isEmpty(), "关闭 adapter 后 liveReaders 被彻底排空，底层已被释放")
+
+                // 重复调用 stream.close() 为 no-op，不抛异常
+                stream.close()
+                stream.close()
+            } finally {
+                deleteRemoteQuietly("r4-stream")
+            }
+        }
+
     // ------------------------------------------------------------------ 组装与包装
 
-    /** 直接删掉服务端一个测试子目录（不走 Runtime，纯物理收尾）。 */
     private fun deleteRemoteQuietly(relative: String) {
         val target = physical(relative)
         if (!Files.exists(target)) return
@@ -203,10 +353,6 @@ class T25WebDavFailureReportTest {
         }
     }
 
-    /**
-     * 一次真实组装：Core 接线 + 真 SQLite + 真 LocalFsStorage + 真 WebDavStorage；
-     * [remote] / [local] 参数用于替换成故障包装。用完按逆序关。
-     */
     private suspend fun <T> withStack(
         localRoot: Path,
         endpoint: String = WebDavFixture.endpoint,
@@ -214,24 +360,50 @@ class T25WebDavFailureReportTest {
     ): T {
         val database = tempDir.resolve("state.db")
         val state = VfsStateDatabase.file(database)
-        val local = LocalFsStorage.create(localRoot)
-        val remote = WebDavStorage.create(endpoint, "/", WebDavFixture.user, WebDavFixture.password)
+        var local: LocalFsStorage? = null
+        var remote: WebDavStorage? = null
         try {
-            return block(Stack(database, state, local, remote))
+            local = LocalFsStorage.create(localRoot)
+            remote = WebDavStorage.create(endpoint, "/", WebDavFixture.user, WebDavFixture.password)
+            val stack = Stack(database, state, local, remote)
+            return try {
+                block(stack)
+            } finally {
+                stack.closeNotifiers()
+            }
         } finally {
-            remote.close()
-            local.close()
-            state.close()
+            val failures = mutableListOf<Throwable>()
+            try {
+                remote?.close()
+            } catch (t: Throwable) {
+                failures += t
+            }
+            try {
+                local?.close()
+            } catch (t: Throwable) {
+                failures += t
+            }
+            try {
+                state.close()
+            } catch (t: Throwable) {
+                failures += t
+            }
+            if (failures.isNotEmpty()) {
+                val first = failures.first()
+                for (other in failures.drop(1)) first.addSuppressed(other)
+                throw first
+            }
         }
     }
 
-    /** 一次组装的三个部分：状态库文件、真身两块盘、以及用它们即时拼出的 DefaultVfs。 */
     private class Stack(
         val database: Path,
         private val state: VfsStateDatabase,
         val rawLocal: Storage,
         val rawRemote: Storage,
     ) {
+        private val notifiers = mutableListOf<AsyncEventNotifier>()
+
         val vfs: DefaultVfs get() = vfsWith(rawLocal, rawRemote)
 
         fun vfsWith(
@@ -240,6 +412,7 @@ class T25WebDavFailureReportTest {
         ): DefaultVfs {
             val boundary = StateBoundary()
             val notifier = AsyncEventNotifier()
+            notifiers += notifier
             val router =
                 MountRouter.of(
                     setOf("resources"),
@@ -262,6 +435,12 @@ class T25WebDavFailureReportTest {
             )
         }
 
+        fun closeNotifiers() {
+            for (notifier in notifiers) {
+                runCatching { notifier.close() }
+            }
+        }
+
         fun eventRows(): List<List<String>> =
             DriverManager.getConnection("jdbc:sqlite:$database").use { connection ->
                 connection.createStatement().use { statement ->
@@ -276,13 +455,23 @@ class T25WebDavFailureReportTest {
                         }
                 }
             }
+
+        fun queryRows(sql: String): List<List<String>> =
+            DriverManager.getConnection("jdbc:sqlite:$database").use { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery(sql).use { rows ->
+                        val colCount = rows.metaData.columnCount
+                        buildList {
+                            while (rows.next()) {
+                                add((1..colCount).map { rows.getString(it) ?: "" })
+                            }
+                        }
+                    }
+                }
+            }
     }
 }
 
-/**
- * 转发一切，但指定相对路径的目标在**写入之后**的 [stat] 抛 STORAGE_ERROR 的包装
- * （模拟「写入成功、目标确认失败」）。写之前的确认（目标应不存在）正常转发。
- */
 private class FailingStatStorage(
     private val delegate: Storage,
     private val failOnStatOf: String,
@@ -307,7 +496,6 @@ private class FailingStatStorage(
     }
 }
 
-/** 转发一切，但 [delete] 一律抛 STORAGE_ERROR 的包装（模拟「删源失败」）。 */
 private class FailingDeleteStorage(
     private val delegate: Storage,
 ) : Storage by delegate {
@@ -318,20 +506,21 @@ private class FailingDeleteStorage(
 }
 
 /**
- * A06 真实 HTTP 结果丢失装置：只绑 127.0.0.1 的极简 WebDAV 子集。
- *
- * - `PROPFIND` 返回真实属性（源盘 stat / 目标存在性检查要用）；
- * - `PUT` 读掉请求体、**不发响应直接断开**，模拟「服务端可能收了一半就没了」；
- * - `DELETE` 立即断开；其它方法 404。
- *
- * 只监听 loopback，处理线程有有限读取等待；[close] 先停监听再等 worker，不吞超时。
+ * 故障服务：绑 127.0.0.1。
+ * MKCOL 正常响应 201 Created，并在内存中创建目录记录；
+ * PUT 完整读取请求体字节并写入磁盘临时文件，记录 putCount++，然后直接关闭连接，不回 HTTP 响应；
+ * 请求路径解析保留 '+'，对 '/../' 返回 400；
+ * close 顺序停 accept、主动关闭所有连接、等 worker 线程。
  */
 private class DroppedWriteServer(
     private val dataRoot: Path,
 ) : AutoCloseable {
     private val serverSocket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
-    private val workers = java.util.concurrent.CopyOnWriteArrayList<Thread>()
+    private val workers = CopyOnWriteArrayList<Thread>()
+    private val openSockets = CopyOnWriteArrayList<Socket>()
     private val acceptThread: Thread
+
+    val putCount = AtomicInteger(0)
 
     @Volatile
     private var running = true
@@ -340,15 +529,15 @@ private class DroppedWriteServer(
 
     init {
         acceptThread =
-            Thread { acceptLoop() }
-                .apply {
-                    isDaemon = true
-                    name = "dropped-write-accept"
-                }.also { it.start() }
+            Thread { acceptLoop() }.apply {
+                isDaemon = true
+                name = "dropped-write-accept"
+                start()
+            }
     }
 
     private fun acceptLoop() {
-        while (true) {
+        while (running) {
             val socket =
                 try {
                     serverSocket.accept()
@@ -359,12 +548,18 @@ private class DroppedWriteServer(
                 runCatching { socket.close() }
                 break
             }
+            openSockets += socket
             val worker =
-                Thread { handle(socket) }
-                    .apply {
-                        isDaemon = true
-                        name = "dropped-write-handle"
+                Thread {
+                    try {
+                        handle(socket)
+                    } finally {
+                        openSockets.remove(socket)
                     }
+                }.apply {
+                    isDaemon = true
+                    name = "dropped-write-handle"
+                }
             workers += worker
             worker.start()
         }
@@ -374,40 +569,82 @@ private class DroppedWriteServer(
         try {
             socket.soTimeout = 5_000
             socket.use {
-                val reader = socket.getInputStream().bufferedReader()
-                val requestLine = reader.readLine() ?: return
+                val input = socket.getInputStream()
+                val requestLine = readLine(input) ?: return
                 val headers = mutableMapOf<String, String>()
                 while (true) {
-                    val line = reader.readLine() ?: break
+                    val line = readLine(input) ?: break
                     if (line.isEmpty()) break
                     val idx = line.indexOf(':')
-                    if (idx > 0) headers[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
+                    if (idx > 0) {
+                        headers[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
+                    }
                 }
                 val parts = requestLine.split(' ')
                 if (parts.size < 2) return
                 val method = parts[0].uppercase()
-                val path = parts[1]
+                val rawPath = parts[1]
+
+                // R3 检查：路径逃逸拒绝
+                if (rawPath.contains("/../") || rawPath.endsWith("/..")) {
+                    respond(socket, 400, "Bad Request", ByteArray(0))
+                    return
+                }
+
+                val decodedPath = decodePreservingPlus(rawPath)
+
                 when (method) {
-                    "PROPFIND" -> respondPropfind(socket, path, headers["depth"] ?: "0")
-                    "PUT" -> {
-                        // 读掉请求体（服务端「收了一半」），然后不回包直接关连接。
-                        val length = headers["content-length"]?.toLongOrNull() ?: 0L
-                        var remaining = length
-                        val buffer = CharArray(4096)
-                        while (remaining > 0) {
-                            val read = reader.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                            if (read < 0) break
-                            remaining -= read
+                    "MKCOL" -> {
+                        val relative = decodedPath.trimStart('/').trimEnd('/')
+                        if (relative.isNotEmpty()) {
+                            Files.createDirectories(dataRoot.resolve(relative))
                         }
-                        // socket.use 关闭连接：客户端读到 EOF。
+                        respond(socket, 201, "Created", ByteArray(0))
                     }
-                    "MKCOL", "DELETE" -> Unit // 立即断开
+                    "PROPFIND" -> respondPropfind(socket, decodedPath, headers["depth"] ?: "0")
+                    "PUT" -> {
+                        val length = headers["content-length"]?.toLongOrNull() ?: 0L
+                        val relative = decodedPath.trimStart('/')
+                        val targetFile = dataRoot.resolve(relative)
+                        if (targetFile.parent != null) {
+                            Files.createDirectories(targetFile.parent)
+                        }
+
+                        // 按字节流精确读取 Content-Length
+                        val bytes = ByteArray(length.toInt())
+                        var readTotal = 0
+                        while (readTotal < length) {
+                            val r = input.read(bytes, readTotal, (length - readTotal).toInt())
+                            if (r < 0) break
+                            readTotal += r
+                        }
+                        Files.write(targetFile, bytes)
+                        putCount.incrementAndGet()
+                        // 读完写盘后，直接由 socket.use 关闭连接，不回任何 HTTP 响应
+                    }
                     else -> respond(socket, 404, "Not Found", ByteArray(0))
                 }
             }
-        } catch (e: Exception) {
-            // 连接中途断掉是预期路径。
+        } catch (_: Exception) {
         }
+    }
+
+    private fun readLine(input: InputStream): String? {
+        val sb = StringBuilder()
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (sb.isEmpty()) null else sb.toString()
+            if (b == '\n'.code) {
+                if (sb.isNotEmpty() && sb.last() == '\r') sb.deleteCharAt(sb.length - 1)
+                return sb.toString()
+            }
+            sb.append(b.toChar())
+        }
+    }
+
+    private fun decodePreservingPlus(rawPath: String): String {
+        val safe = rawPath.replace("+", "%2B")
+        return java.net.URLDecoder.decode(safe, Charsets.UTF_8)
     }
 
     private fun respondPropfind(
@@ -415,8 +652,7 @@ private class DroppedWriteServer(
         path: String,
         depth: String,
     ) {
-        val decoded = java.net.URLDecoder.decode(path, Charsets.UTF_8)
-        val relative = decoded.trimStart('/').trimEnd('/')
+        val relative = path.trimStart('/').trimEnd('/')
         val target = if (relative.isEmpty()) dataRoot else dataRoot.resolve(relative)
         if (!Files.exists(target)) {
             respond(socket, 404, "Not Found", ByteArray(0))
@@ -463,20 +699,22 @@ private class DroppedWriteServer(
         contentType: String = "text/plain",
     ) {
         try {
-            val output = socket.getOutputStream()
+            val output: OutputStream = socket.getOutputStream()
             output.write(
                 "HTTP/1.1 $status $reason\r\nContent-Type: $contentType\r\nContent-Length: ${body.size}\r\n\r\n".toByteArray(),
             )
             output.write(body)
             output.flush()
-        } catch (e: Exception) {
-            // 忽略
+        } catch (_: Exception) {
         }
     }
 
     override fun close() {
         running = false
         runCatching { serverSocket.close() }
+        for (sock in openSockets) {
+            runCatching { sock.close() }
+        }
         acceptThread.join(6_000)
         check(!acceptThread.isAlive) { "dropped write accept thread did not stop" }
         workers.toList().forEach { worker ->

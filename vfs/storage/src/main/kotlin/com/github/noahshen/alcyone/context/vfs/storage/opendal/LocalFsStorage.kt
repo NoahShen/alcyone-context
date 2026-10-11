@@ -237,7 +237,7 @@ class LocalFsStorage private constructor(
 
     /** 打开文件流并记进 [liveReaders]，保证关闭存储时不会漏掉它。 */
     private fun newReader(backendPath: String): ReaderHandle {
-        val handle = ReaderHandle(readerFactory(backendPath)) { liveReaders.remove(it) }
+        val handle = ReaderHandle(readerFactory(backendPath), onReleased = { liveReaders.remove(it) })
         liveReaders += handle
         return handle
     }

@@ -98,12 +98,29 @@ class T25WebDavMoveTest {
                 assertEquals(registeredAt, vfs.getNode(info.id).registeredAt, "registeredAt 不变")
                 localFileId = info.id
 
-                // 3) WebDAV → Local FS 文件移动：源物理消失，落到本地盘。
+                // 3) WebDAV → Local FS 文件移动：源物理消失，落到本地盘；保留 Node ID / Metadata。
                 vfs.write(remote("/a03/to-local.txt"), "remote-content".toByteArray())
+                val remoteInfo = vfs.stat(remote("/a03/to-local.txt"))
+                val remoteTag = NodeMetadata(setOf("t25-remote"), "远端回迁保留 Metadata")
+                vfs.setMetadata(remoteInfo.id, remoteTag)
+                val remoteRegisteredAt = vfs.getNode(remoteInfo.id).registeredAt
+
                 val back = vfs.move(remote("/a03/to-local.txt"), local("/a03-from-remote.txt"))
                 assertEquals(NodeType.FILE, back.type)
+                assertEquals(remoteInfo.id, back.id, "反向移动保留 Node ID")
                 assertEquals("remote-content", Files.readString(localRoot.resolve("a03-from-remote.txt")), "内容落到本地")
                 assertFalse(Files.exists(physical("a03/to-local.txt")), "远端源物理消失")
+                assertEquals(remoteInfo.id, vfs.getNode(remoteInfo.id).id, "已登记节点 ID 保持不变")
+                assertEquals(
+                    "/resources/local/a03-from-remote.txt",
+                    vfs
+                        .getNode(remoteInfo.id)
+                        .uri.path
+                        .toString(),
+                    "路径迁到本地",
+                )
+                assertEquals(remoteTag, vfs.getMetadata(remoteInfo.id), "反向移动 Metadata 保留")
+                assertEquals(remoteRegisteredAt, vfs.getNode(remoteInfo.id).registeredAt, "registeredAt 不变")
 
                 // 4) 目标已存在：文件移动拒绝，源与目标都不动。
                 vfs.write(remote("/a03/one.txt"), "one".toByteArray())
@@ -228,6 +245,11 @@ class T25WebDavMoveTest {
                 vfs.delete(remote("/docs/empty/placeholder.txt"))
                 assertEquals(NodeType.DIRECTORY, vfs.stat(remote("/docs/empty")).type, "远端空目录存在")
 
+                val remoteChild = vfs.stat(remote("/docs/readme.txt"))
+                val remoteTag = NodeMetadata(setOf("remote-child"), "远端子文件元数据")
+                vfs.setMetadata(remoteChild.id, remoteTag)
+                val remoteChildRegisteredAt = vfs.getNode(remoteChild.id).registeredAt
+
                 val moved = vfs.move(remote("/docs"), local("/docs"))
                 assertEquals(NodeType.DIRECTORY, moved.type)
 
@@ -236,10 +258,25 @@ class T25WebDavMoveTest {
                 assertTrue(Files.isDirectory(localRoot.resolve("docs/empty")), "空目录被显式建出来")
                 assertFalse(Files.exists(physical("docs")), "远端源树整棵消失")
 
+                // 比对已登记子项身份与元数据
+                assertEquals(remoteChild.id, vfs.getNode(remoteChild.id).id, "反向目录移动已登记子项 ID 保留")
+                assertEquals(
+                    "/resources/local/docs/readme.txt",
+                    vfs
+                        .getNode(remoteChild.id)
+                        .uri.path
+                        .toString(),
+                )
+                assertEquals(remoteTag, vfs.getMetadata(remoteChild.id), "Metadata 保留")
+                assertEquals(remoteChildRegisteredAt, vfs.getNode(remoteChild.id).registeredAt, "registeredAt 保留")
+
                 val moveEvents = WebDavFixture.eventRows(database).filter { it[0] == "DIRECTORY_MOVED" }
                 assertEquals(1, moveEvents.size, "只发一条根级 DIRECTORY_MOVED")
-                assertEquals("alcyone://resources/remote/docs", moveEvents.single()[3])
-                assertEquals("alcyone://resources/local/docs", moveEvents.single()[4])
+                val rootMoveEvent = moveEvents.single()
+                assertEquals(moved.id.toString(), rootMoveEvent[1], "DIRECTORY_MOVED 关联根节点 ID")
+                assertEquals("alcyone://resources/local/docs", rootMoveEvent[2], "DIRECTORY_MOVED 的 uri 为目标根")
+                assertEquals("alcyone://resources/remote/docs", rootMoveEvent[3], "sourceUri 是远端源根")
+                assertEquals("alcyone://resources/local/docs", rootMoveEvent[4], "targetUri 是本地目标根")
 
                 // 收尾清理：删掉搬到本地的目录树。
                 vfs.delete(local("/docs"), DeleteOptions(recursive = true))
