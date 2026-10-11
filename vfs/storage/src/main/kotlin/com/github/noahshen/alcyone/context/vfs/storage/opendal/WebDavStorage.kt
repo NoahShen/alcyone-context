@@ -15,6 +15,8 @@ import org.apache.opendal.Metadata
 import org.apache.opendal.OpenDALException
 import org.apache.opendal.Operator
 import org.apache.opendal.WriteOptions
+import java.io.InputStream
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 把 VFS 的文件操作落到远端 WebDAV 服务器上，底层用 Apache OpenDAL 的 `webdav` 服务（T24）。
@@ -23,11 +25,13 @@ import org.apache.opendal.WriteOptions
  * 实际动的就是 `http://127.0.0.1:8080/dav/team/报告/a.txt`。它只管和服务器说话，
  * 不生成 Node ID、不写事件、不碰状态库。
  *
- * **这一轮只做最小闭环**：`stat` / `list` / 建目录 / 有界读 / 写 / 删除。两件已知边界：
+ * **这一轮做完整闭环**（T25）：`stat` / `list` / 建目录 / 有界读 / 流式读 / 写 / 删除 / 原生文件移动。
+ * 关键边界：
  *
- * - **不做移动**：`move` 直接 `UNSUPPORTED_OPERATION`，能力表里 `nativeFileMove` / `nativeDirectoryMove`
- *   也报 `false`，于是 Core 走复制回退而不是调这里的 `move`（rename 的完整验收留 T25）。
- * - **不做流式读取**：`readStream` 直接 `UNSUPPORTED_OPERATION`；`read` 走有界读，行为与本地盘一致。
+ * - **原生文件移动**（T25 A03）：实测 OpenDAL 0.50.6 webdav `capability.rename == true`，文件 rename 可用；
+ *   Adapter 在 rename 之前补 Port 要求的「目标全新」「父目录存在」检查（后端 rename 会覆盖目标、会顺手建父目录）。
+ *   目录 rename 实测返回 `IsADirectory`，能力表 `nativeDirectoryMove` 仍报 `false`，目录移动交给 Core 整树复制回退。
+ * - **流式读取**（T25 A02）：复用 [StorageInputStream] / [ReaderHandle] / [NativeLifetime] 机制，按**实际读出字节**计限。
  *
  * **不预检连接**：打开 Adapter 不发网络请求，第一次真正操作才连服务器。
  * 这样配置校验阶段（还没碰后端）和后端故障阶段分得开，也避免为了「开一下」就去动远端目录。
@@ -60,8 +64,28 @@ class WebDavStorage private constructor(
      *
      * OpenDAL 的 [Operator] 关掉之后再用会让 JVM 崩溃，所以每个操作都经 [NativeLifetime] 加锁，
      * 关闭时等进行中的操作收尾。关闭幂等。
+     *
+     * 释放分三步，**顺序不能变**：先把还开着的文件流尽量关掉，再关 Operator，最后统一报错。
+     * 这样一次 `openStream` 之后被 Runtime 遗忘的流，也会在关存储时清理掉。
      */
-    private val lifetime = NativeLifetime(label = "webdav storage") { operator.close() }
+    private val lifetime =
+        NativeLifetime(label = "webdav storage") {
+            val failures = mutableListOf<Throwable>()
+            drainReaders(failures)
+            try {
+                operator.close()
+            } catch (e: Throwable) {
+                failures += e
+            }
+            // 第一个失败当主异常，其余挂在 suppressed 上，一个都不吞。
+            failures.firstOrNull()?.let { first ->
+                failures.drop(1).forEach(first::addSuppressed)
+                throw first
+            }
+        }
+
+    /** 已经打开、但还没关闭的读文件流。关闭存储时要把它们都关掉。 */
+    private val liveReaders = ConcurrentHashMap.newKeySet<ReaderHandle>()
 
     companion object {
         /**
@@ -102,13 +126,14 @@ class WebDavStorage private constructor(
         /**
          * 声明这块盘支持哪些操作。宁可报少也不要多报。
          *
-         * `nativeFileMove` / `nativeDirectoryMove` 恒为 `false`：rename 的完整行为这一轮没有验收，
-         * 与其报了再让 Core 调一个没验过的 `move`，不如报 `false`，Core 自然走复制回退（T25 验收）。
+         * `nativeFileMove` 跟随后端 `rename` 能力（T25 实测验过文件 rename 可用，与真实服务的能力表一致）；
+         * `nativeDirectoryMove` 恒为 `false`：实测 webdav rename 目录返回 `IsADirectory`，目录移动走 Core 复制回退。
          */
         private fun capabilitiesOf(operator: Operator): StorageCapabilities {
             val capability = operator.info.capability
             return StorageCapabilities(
-                nativeFileMove = false,
+                // 与本地盘同一条口径：没有 stat 就做不了「目标全新」的预检，不能自称原生移动。
+                nativeFileMove = capability.rename && capability.stat,
                 nativeDirectoryMove = false,
                 createDirectory = capability.createDir,
                 boundedRead = capability.read,
@@ -153,18 +178,49 @@ class WebDavStorage private constructor(
     }
 
     /**
-     * 流式读取这一轮**明确阶段拒绝**：流的所有权、关流顺序和网络半截失败都还没验收（T25）。
+     * 流式读取（T25 A02）：复用 [LocalFsStorage] 那套 reader 所有权与 native 生命周期机制。
      *
-     * 拒绝发生在碰到服务器之前，所以它不会留下任何远端副作用。
+     * 关流顺序没有要求，两种都行：
+     * - 先关流再关存储：一切正常。
+     * - 先关存储：存储关闭时会把还开着的文件流都关掉，之后再关流是空操作，不报错。
+     *
+     * 限额按**实际读出字节**计（[StorageInputStream]），不看 stat 长度；`maxBytes = null` 表示无界。
      */
     override suspend fun readStream(
         path: StoragePath,
         maxBytes: Long?,
-    ): StorageStream =
-        throw VfsException(
-            VfsErrorCode.UNSUPPORTED_OPERATION,
-            "streaming reads are not supported by the webdav storage in this release; use the bounded read instead",
-        )
+    ): StorageStream {
+        if (path.isRoot) throw VfsException(VfsErrorCode.TYPE_MISMATCH, "mount root is a directory")
+        if (maxBytes != null && maxBytes < 0) throw VfsException(VfsErrorCode.INVALID_ARGUMENT, "maxBytes must not be negative")
+        val attributes = precheckForRead(path)
+        if (attributes.type == NodeType.DIRECTORY) throw VfsException(VfsErrorCode.TYPE_MISMATCH, "read target is a directory")
+        // 文件流在后台任务里打开。万一交到调用方手上之前协程被取消，就在这里关掉。
+        var opened: StorageStream? = null
+        return handoffOrRelease(release = { opened?.close() }) {
+            call("open read stream") {
+                lifetime.call {
+                    val handle = newReader(plain(path))
+                    try {
+                        WebDavStream(attributes, handle, maxBytes)
+                    } catch (e: Throwable) {
+                        handle.release()
+                        throw e
+                    }.also { opened = it }
+                }
+            }
+        }
+    }
+
+    /**
+     * 读文件前的检查：拒绝「拿文件当目录」的情况，然后查出文件信息。
+     *
+     * 查服务器这一步也是阻塞的，所以放在后台线程里，否则会把调用方的线程占住。
+     * 它刻意放在长时间读文件的锁外面，免得一次慢查询挡住关闭操作。
+     */
+    private suspend fun precheckForRead(path: StoragePath): StorageAttributes =
+        call("read precheck") {
+            lifetime.call { statOrFail(plain(path), "read") }
+        }
 
     /** 单层完整列举：不含自身与孙级，不承诺排序。 */
     override suspend fun list(path: StoragePath): List<StorageEntry> =
@@ -256,19 +312,44 @@ class WebDavStorage private constructor(
     }
 
     /**
-     * 改名 / 移动：这一轮**明确阶段拒绝**，能力表也不声称支持，Core 不会走到这里。
+     * 原生文件移动（T25 A03）。遵守 Port 语义：目标全新、源存在、目标父目录存在。
      *
-     * 与 [readStream] 同一条理由：rename 的完整行为（目录、并发、错误码）留到 T25 验收，
-     * 不用空实现或「假成功」蒙混过去。
+     * 实测 OpenDAL 0.50.6 webdav rename 可用，但行为与 Port 要求不一致，所以在这里补检查：
+     * - 目标已存在时会覆盖而不是报错 → 必须提前检查目标不存在（[ALREADY_EXISTS]）；
+     * - 目标父目录不存在时会顺手建出来 → 必须提前检查父目录存在（[NOT_FOUND]）；
+     * - 源不存在报 [NOT_FOUND]；目录移动报 [UNSUPPORTED_OPERATION]（实测 rename 目录返回 `IsADirectory`）。
+     *
+     * 三个阶段：先检查（`NONE`）→ reshape（`UNKNOWN`）→ 复查目标（`PARTIAL`）。
+     * 探测到的已存在 / 缺失是**预检**，不对并发提供原子保障；真正 rename 失败时从失败点证明不了结果，
+     * 保留后端 code / effect（含 UNKNOWN）不降级。
      */
     override suspend fun move(
         source: StoragePath,
         target: StoragePath,
-    ): StorageAttributes =
-        throw VfsException(
-            VfsErrorCode.UNSUPPORTED_OPERATION,
-            "native move is not supported by the webdav storage in this release; moves go through the copy fallback",
-        )
+    ): StorageAttributes {
+        if (source.isRoot || target.isRoot) throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "cannot move the mount root")
+        // 第一步：检查源类型、目标是否全新、目标父目录是否存在。
+        call("move", VfsEffect.NONE) {
+            lifetime.call {
+                val sourceAttributes = statOrFail(plain(source), "move")
+                if (sourceAttributes.type == NodeType.DIRECTORY) {
+                    throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "native directory move is not supported by the webdav backend")
+                }
+                if (metadataOrNull(plain(target)) != null) {
+                    throw VfsException(VfsErrorCode.ALREADY_EXISTS, "move target already exists")
+                }
+                requireExistingParentDirectory(target)
+            }
+        }
+        // 第二步：真正 rename。失败时分不清改没改，所以只能说「结果不明」。
+        call("move content", VfsEffect.UNKNOWN) {
+            lifetime.call { operator.rename(plain(source), plain(target)) }
+        }
+        // 第三步：再查一次目标确认。改名已经成功了，查不到就说「已经改了东西」。
+        return call("move attributes", VfsEffect.PARTIAL) {
+            afterChange { lifetime.call { statOrFail(plain(target), "move", VfsEffect.PARTIAL) } }
+        }
+    }
 
     /**
      * 删除文件或目录。不存在报 `NOT_FOUND`；目录不递归删时里面还有东西报 `DIRECTORY_NOT_EMPTY`。
@@ -471,6 +552,74 @@ class WebDavStorage private constructor(
         }
     }
 
-    /** 打开文件流：`read` 里自己关，所以不用像本地盘那样登记到待关闭列表（`readStream` 已被拒绝）。 */
-    private fun newReader(backendPath: String): ReaderHandle = ReaderHandle(operator.createInputStream(backendPath))
+    /** 打开文件流并记进 [liveReaders]，保证关闭存储时不会漏掉被 Runtime 遗忘的流。 */
+    private fun newReader(backendPath: String): ReaderHandle {
+        val handle = ReaderHandle(operator.createInputStream(backendPath)) { liveReaders.remove(it) }
+        liveReaders += handle
+        return handle
+    }
+
+    /**
+     * 尽量把所有还开着的文件流都关掉，关不掉的记进 [failures]，**不中断其余**。
+     *
+     * 场景：三个流里有一个关的时候后端报错。正确的做法是三个都试一次，而不是关掉第一个就冒出去——
+     * 那样另外两个文件句柄会一直被占着。由 [lifetime] 在关闭存储时调用。
+     */
+    private fun drainReaders(failures: MutableList<Throwable>) {
+        // 先取快照：关流时会把自身从 liveReaders 摘掉，边遍历边改容易漏。
+        for (handle in liveReaders.toList()) {
+            try {
+                handle.release()
+            } catch (e: Throwable) {
+                failures += storageCleanupFailure(e)
+            }
+        }
+        liveReaders.clear()
+    }
+
+    /**
+     * 把清理失败翻译成 VFS 错误码（原始异常挂在 `cause` 上）；翻译不了就保留原异常。
+     *
+     * 这一步自身也不能抛：它正在关停途中，弄不好会让后面的资源跟着漏掉。
+     */
+    private fun storageCleanupFailure(cause: Throwable): Throwable =
+        try {
+            mapStorageErrors("close read stream", backend = "webdav storage") { throw cause }
+        } catch (mapped: Throwable) {
+            mapped
+        }
+
+    /**
+     * 一个只能打开一次的读文件流（复用 [LocalFsStorage] 的所有权机制）。
+     *
+     * 文件流实际由 [ReaderHandle] 保管，本类和 [StorageInputStream] 都只是能触发关闭的入口，
+     * 所以谁先关都行，而且只会关一次。三种顺序的结果：
+     *
+     * 1. 先关流：正常关掉。
+     * 2. 先关存储：存储关闭时会把还开着的文件流都关掉，之后再关这个流是空操作，不报错。
+     * 3. 还没打开就关存储：一样由存储关掉，之后再关也是空操作。
+     */
+    private inner class WebDavStream(
+        override val attributes: StorageAttributes,
+        private val handle: ReaderHandle,
+        private val limitBytes: Long?,
+    ) : StorageStream {
+        private var opened = false
+        private var finished = false
+
+        override fun openStream(): InputStream =
+            lifetime.call {
+                if (finished) throw VfsException(VfsErrorCode.CLOSED, "storage stream is closed")
+                if (opened) throw VfsException(VfsErrorCode.STATE_ERROR, "storage stream is single-shot; call readStream again to reopen")
+                opened = true
+                StorageInputStream(handle, limitBytes, lifetime)
+            }
+
+        override fun close() {
+            if (finished) return
+            finished = true
+            // 不经过 lifetime：存储已经关闭时，这里也要能正常关掉或者什么都不做。
+            mapStorageErrors("close read stream", backend = "webdav storage") { handle.release() }
+        }
+    }
 }

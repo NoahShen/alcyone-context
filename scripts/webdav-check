@@ -53,6 +53,11 @@ fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/t24-webdav-XXXXXX")"
 DAV_ROOT="$WORK/root"
 mkdir -p "$DAV_ROOT/dav/team"  # R1 非根 endpoint/root 真实服务定位用例需要
+# T25 A05：一块**真实只读**的共享——WsgiDAV 的 FilesystemProvider `readonly: true`，写请求服务端直接 403。
+# 预置一个文件，供“能读但写被拒”的反例共用；服务进程对读写共享仍有写权限，只读靠服务端开关而不是文件系统权限。
+DAV_READONLY_ROOT="$WORK/readonly"
+mkdir -p "$DAV_READONLY_ROOT"
+printf 'read-only fixture content' > "$DAV_READONLY_ROOT/preset.txt"
 LOG="$WORK/server.log"
 CONFIG="$WORK/wsgidav.json"
 SERVER_PID=""
@@ -93,7 +98,7 @@ cat > "$CONFIG" <<JSON
   "port": $PORT,
   "server": "cheroot",
   "verbose": 3,
-  "provider_mapping": {"": "$DAV_ROOT"},
+  "provider_mapping": {"": "$DAV_ROOT", "/readonly": {"root": "$DAV_READONLY_ROOT", "readonly": true}},
   "http_authenticator": {
     "domain_controller": "wsgidav.dc.simple_dc.SimpleDomainController",
     "accept_basic": true,
@@ -129,5 +134,6 @@ T24_WEBDAV_ENDPOINT="http://127.0.0.1:$PORT" \
 T24_WEBDAV_USER="$DAV_USER" \
 T24_WEBDAV_PASSWORD="$DAV_PASSWORD" \
 T24_WEBDAV_DATA_ROOT="$DAV_ROOT" \
+T25_WEBDAV_READONLY_ROOT="$DAV_READONLY_ROOT" \
     ./scripts/dev gradle :integration-tests:vfs:webdavTest --rerun-tasks --console=plain
 echo "T24 WebDAV fixture finished; server and temporary root were cleaned up."

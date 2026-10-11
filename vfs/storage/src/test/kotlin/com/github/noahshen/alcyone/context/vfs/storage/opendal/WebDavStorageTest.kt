@@ -25,15 +25,15 @@ class WebDavStorageTest {
 
     @Test
     @Timeout(60)
-    fun `capabilities do not claim moves this release never verified`() =
+    fun `capabilities report only what this release verified`() =
         runBlocking {
             val storage = open()
             try {
                 val capabilities = storage.capabilities()
-                assertFalse(capabilities.nativeFileMove, "rename 没验收过，不能报原生文件移动")
-                assertFalse(capabilities.nativeDirectoryMove, "rename 没验收过，不能报原生目录移动")
-                assertTrue(capabilities.createDirectory, "MKCOL 是这一轮验过的最小闭环之一")
-                assertTrue(capabilities.boundedRead, "有界读是这一轮验过的最小闭环之一")
+                assertTrue(capabilities.nativeFileMove, "T25 实测 webdav rename 可用，文件移动能力如实声明")
+                assertFalse(capabilities.nativeDirectoryMove, "T25 实测 webdav rename 目录返回 IsADirectory，不能报原生目录移动")
+                assertTrue(capabilities.createDirectory, "MKCOL 是验过的最小闭环之一")
+                assertTrue(capabilities.boundedRead, "有界读是验过的最小闭环之一")
                 assertFalse(capabilities.readOnly, "只读与否要后端说了算，打开时猜不出来")
             } finally {
                 storage.close()
@@ -42,18 +42,15 @@ class WebDavStorageTest {
 
     @Test
     @Timeout(60)
-    fun `unverified methods refuse explicitly instead of pretending to work`() =
+    fun `the mount root cannot be moved and a closed adapter refuses before any network call`() =
         runBlocking {
             val storage = open()
             try {
-                val move =
-                    assertFailsWith<VfsException> { storage.move(StoragePath.parse("a.txt"), StoragePath.parse("b.txt")) }
-                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, move.code, "移动是阶段拒绝，不是空实现")
-                assertEquals(VfsEffect.NONE, move.effect, "拒绝发生在任何副作用之前")
-
-                val stream = assertFailsWith<VfsException> { storage.readStream(StoragePath.parse("a.txt"), null) }
-                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, stream.code, "流式读取同样阶段拒绝")
-                assertEquals(VfsEffect.NONE, stream.effect)
+                // 挂载根拒绝：碰后端之前就报，不需要网络。
+                val rootMove =
+                    assertFailsWith<VfsException> { storage.move(StoragePath.root, StoragePath.parse("b.txt")) }
+                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, rootMove.code, "移动挂载根在任何副作用之前被拒")
+                assertEquals(VfsEffect.NONE, rootMove.effect)
             } finally {
                 storage.close()
             }
@@ -73,7 +70,7 @@ class WebDavStorageTest {
                 "消息要说清是哪块盘关了，不能说成 local storage：${closed.message}",
             )
             // 能力查询不碰后端，关了也照答——否则一次慢操作就能把能力查询一起堵住。
-            assertFalse(storage.capabilities().nativeFileMove)
+            assertTrue(storage.capabilities().nativeFileMove, "T25 实测 webdav rename 可用，能力表如实声明")
         }
 
     // ---- endpoint / root 的整理规则（WebDavRoots）----
