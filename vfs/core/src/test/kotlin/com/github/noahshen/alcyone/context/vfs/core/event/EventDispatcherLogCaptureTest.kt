@@ -89,10 +89,12 @@ class EventDispatcherLogCaptureTest {
 
             val secretMarker = "t28-secret-marker-do-not-leak"
 
+            var originalProviderWasSet = false
             try {
                 // 模拟 SLF4J 初始化成功，挂接测试 Provider
                 stateField.set(null, 3)
                 providerField.set(null, provider)
+                originalProviderWasSet = true
 
                 val dispatcher = EventDispatcher()
 
@@ -151,8 +153,10 @@ class EventDispatcherLogCaptureTest {
                     assertFalse(throwableFullText.contains(secretMarker), "日志异常堆栈不得包含凭据标记：$throwableFullText")
                 }
             } finally {
-                stateField.set(null, origState)
-                providerField.set(null, origProvider)
+                if (originalProviderWasSet) {
+                    providerField.set(null, origProvider)
+                    stateField.set(null, origState)
+                }
             }
         }
 }

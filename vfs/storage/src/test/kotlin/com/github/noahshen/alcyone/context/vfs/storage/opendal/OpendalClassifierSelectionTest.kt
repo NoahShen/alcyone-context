@@ -33,8 +33,21 @@ class OpendalClassifierSelectionTest {
                 .redirectErrorStream(true)
                 .start()
 
-        val output = process.inputStream.bufferedReader().readText()
-        val exitCode = process.waitFor()
+        val output =
+            try {
+                val reader = process.inputStream.bufferedReader()
+                val text = reader.readText()
+                val finished = process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+                if (!finished) {
+                    process.destroyForcibly()
+                    error("Gradle classifier resolution timed out for os='$osName', arch='$osArch'")
+                }
+                text
+            } catch (t: Throwable) {
+                process.destroyForcibly()
+                throw t
+            }
+        val exitCode = process.exitValue()
 
         return if (exitCode == 0) {
             val classifier =

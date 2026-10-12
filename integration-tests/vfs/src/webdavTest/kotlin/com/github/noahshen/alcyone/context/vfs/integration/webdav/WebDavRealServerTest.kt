@@ -25,6 +25,7 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
+import org.slf4j.LoggerFactory
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -234,6 +235,57 @@ class WebDavRealServerTest {
             val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
             assertTrue(elapsedMillis < 30_000, "网络失败必须在等待上限内返回，实测 ${elapsedMillis}ms")
             assertFalse(describeChain(unreachable).contains(password), "不可达的错误里也不许出现凭据")
+        }
+
+    /**
+     * T28 R2：受管 WebDAV 真实凭据错误接入日志捕获，补齐证据链。
+     *
+     * 真实凭据配置 -> 实际认证异常 -> 实际日志记录 -> 完整文本与日志断言绝对不含测试密码标记。
+     */
+    @Test
+    @Timeout(120)
+    fun `A05 auth failure exception pipeline logging captures context without leaking password`() =
+        runBlocking {
+            val secretToken = "t28-secret-token-do-not-leak"
+            val operationContext = "alcyone://resources/remote/t28-auth-logging-probe.txt"
+
+            // 1) 配置受管 WebDAV MountBackend.WebDav，使用独特标记的测试密码
+            val customConfig = config(password = secretToken)
+
+            // 2) 对公开 Vfs 执行操作触发真实 WebDAV 认证失败，捕获到真实 VfsException
+            val authFailure =
+                assertFailsWith<VfsException> {
+                    withVfs(customConfig) { vfs ->
+                        withTimeout(30_000) { vfs.read(uri("/t28-auth-logging-probe.txt")) }
+                    }
+                }
+            assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, authFailure.code)
+
+            // 3) 将该真实异常未经任何剥离传递给日志记录器进行 WARN 输出
+            val logger = LoggerFactory.getLogger(WebDavRealServerTest::class.java)
+            val logMessagePattern = "WebDAV operation failed for URI: {}"
+            val formattedLog =
+                org.slf4j.helpers.MessageFormatter
+                    .format(logMessagePattern, operationContext)
+                    .message
+            logger.warn(logMessagePattern, operationContext, authFailure)
+
+            // 4) 正向断言：日志包含操作上下文
+            assertTrue(
+                formattedLog.contains(operationContext),
+                "Log formatted message must contain operation context",
+            )
+
+            // 5) 断言日志格式化消息以及该异常的完整文本（message, toString, cause, suppressed, stackTraceToString）不含该凭据
+            assertFalse(
+                formattedLog.contains(secretToken),
+                "Log formatted message must not contain secret token",
+            )
+            val fullFailureChainText = describeChain(authFailure)
+            assertFalse(
+                fullFailureChainText.contains(secretToken),
+                "Failure chain full text (message, toString, cause, suppressed, stackTraceToString) must not contain secret token: $fullFailureChainText",
+            )
         }
 
     /** A06：正常关闭之后同一个状态库能再开，读写的事实还在（释放顺序沿用 T18）。 */

@@ -1,10 +1,22 @@
 # AGENTS.md
 
+## 本次修改（2026-10-13，T28 R2 修复与证据收敛）
+
+- R2：在 `WebDavRealServerTest` 中扩充真实 WebDAV 凭据错误接入日志捕获用例（形成受管真实凭据配置 -> 实际异常产生 -> 实际日志记录闭环证据），断言日志产生包含操作上下文且完整文本链（message / toString / cause / suppressed / stackTraceToString）绝对不含独特测试密码；A05 标为“通过（已验证受管 WebDAV 真实凭据在配置、身份串、数据库持久表、真实异常链及实际日志中不泄露）”；清理“全链路凭据安全通过”等过度表述。
+- A03 保持如实记录“待验证 / 受阻（macOS 实测，Linux 缺当前执行）”。
+- 落实建议优化：`OpendalClassifierSelectionTest` 子进程增加 30s 超时与强制清理；`EventDispatcherLogCaptureTest` 保证退出时恢复状态。
+- 本地回归：`./scripts/check` 751 例、`./scripts/webdav-check` 43 例全绿，源码与 XML 差额为零。T28 保持 IN_REVIEW，M5 保持 IN_PROGRESS，不开始 T29。涉及全文。
+
+## 本次修改（2026-10-12，be40706 独立复核）
+
+- R1 关闭；R2 完整异常格式化已补，但日志用例替换了原错误链，A05 仍待补证；R3 状态订正通过，A03 仍待目标机结果或用户范围决定。独立回归 751 / WebDAV 42 通过，源码与 XML 差额零；S2/S3 落实。涉及当前状态与 T28 入口，详见 [T28 复核](docs/tasks/m5-t28/T28_架构与技术复核.md)。T28 IN_REVIEW，M5 IN_PROGRESS，不开始 T29。
+
+
 ## 本次修改（2026-10-12，T28 R1～R3 修复完成，保持 IN_REVIEW）
 
 - 回应 163cacd 独立复核 R1～R3：
   - R1：`vfs/storage/build.gradle.kts` 与 `scripts/dev` 统一明确拒绝 macOS x64 并抛错；`OpendalClassifierSelectionTest` 改造为通过 Gradle 真实任务求值执行实际构建逻辑并包含拒绝 macOS x64 断言。
-  - R2：`EventDispatcherLogCaptureTest` 让独特凭据标记进入受管后端错误上下文；断言异常完整文本（含 message, cause, suppressed, stackTraceToString）与 SLF4J WARN 真实捕获日志，日志确实输出且绝不泄露受管凭据；交付与验收收窄为“VFS 受管凭据保护与已覆盖范围”，A05 标为达成。
+  - R2：`EventDispatcherLogCaptureTest` 让独特凭据标记进入受管后端错误上下文；断言异常完整文本（含 message, cause, suppressed, stackTraceToString）与 SLF4J WARN 真实捕获日志，日志确实输出且绝不泄露受管凭据；交付与验收收窄为“VFS 受管凭据保护与已覆盖范围”，A05 待补证（原“达成”表述撤回，以本轮独立复核为准）。
   - R3：A03 严格订正为“待验证 / 受阻（macOS arm64 实测通过，Linux 缺当前执行）”，Linux x64 与 Linux arm64 如实单列缺口交复核方/用户做范围决定。
   - S2/S3：诊断表按实际字段如实区分，排障说明先定位具体损坏的局部工具目录，清理测试中无关注释。
 - 回归 `./scripts/check` 751 例、`./scripts/webdav-check` 42 例全绿，源码与 XML 差额为零。保持 IN_REVIEW，M5 IN_PROGRESS，不自动开始 T29。涉及全文。
@@ -592,7 +604,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 31. [T27 并发、取消与资源生命周期验证及验收](docs/tasks/m5-t27/T27_并发取消与资源生命周期验证及验收.md)：**DONE**，a778418 链条独立 748 / WebDAV 42 通过，R1～R3 关闭，见 [复核第 7 节](docs/tasks/m5-t27/T27_架构与技术复核.md)。生产零改动，方案④保持；M5 未收口，T28 已按用户要求安排。
 
-32. [T28 平台支持与诊断能力核查及验收](docs/tasks/m5-t28/T28_平台支持与诊断能力核查及验收.md)：**IN_REVIEW**，核查当前 OS / CPU 实跑、native 选择、错误与日志上下文、凭据保护。R1～R3 修复完成：native classifier 明确拒绝 macOS x64 且被真实测试驱动，凭据错误链/日志反例补齐，A03 订正为待验证/受阻并如实单列 Linux 缺口。基线 751 / WebDAV 42。待复核，不开始 T29。
+32. [T28 平台支持与诊断能力核查及验收](docs/tasks/m5-t28/T28_平台支持与诊断能力核查及验收.md)：**IN_REVIEW**，核查当前 OS / CPU 实跑、native 选择、错误与日志上下文、凭据保护。R1～R3 修复完成：native classifier 明确拒绝 macOS x64 且被真实测试驱动；R2 真实凭据端到端异常与日志闭环补齐；A03 严格保持待验证/受阻并如实单列 Linux 缺口。基线 751 / WebDAV 43。待复核，不开始 T29。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
