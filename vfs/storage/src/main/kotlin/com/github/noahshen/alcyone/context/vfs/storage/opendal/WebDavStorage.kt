@@ -87,10 +87,6 @@ class WebDavStorage private constructor(
     /** 已经打开、但还没关闭的读文件流。关闭存储时要把它们都关掉。 */
     private val liveReaders = ConcurrentHashMap.newKeySet<ReaderHandle>()
 
-    internal fun liveReaderCount(): Int = liveReaders.size
-
-    internal fun firstLiveReaderHandle(): ReaderHandle? = liveReaders.firstOrNull()
-
     companion object {
         /**
          * 打开一个 WebDAV 存储。**不发网络请求**，所以端点不可达时这里不会失败，
