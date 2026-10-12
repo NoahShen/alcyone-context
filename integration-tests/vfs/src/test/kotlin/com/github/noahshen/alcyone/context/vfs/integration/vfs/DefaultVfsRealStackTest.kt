@@ -1211,6 +1211,81 @@ class DefaultVfsRealStackTest {
             }
         }
 
+    /**
+     * T27 A03：Metadata 更新与移动**共用**一把 StateBoundary 的受控交错代表。
+     *
+     * 受控次序：移动先发起，卡在真正 rename 之前（此刻正拿着边界）；随后按**旧 Node ID** 发起 Metadata 更新，
+     * 它必须排队等边界、在放行之前**一次状态库都没碰**；放行后移动提交完，Metadata 更新才进状态库，
+     * 且落在移动后的新路径、`METADATA_UPDATED` 的 URI 是新路径。
+     *
+     * 第二调用的返回值 / 异常直接保存后断言，不另查一次替代。
+     */
+    @Test
+    @Timeout(60)
+    fun `A03 a metadata update by the old id queues behind a move at the shared boundary`() =
+        runBlocking {
+            lateinit var pausing: PausingMetadataMoveStorage
+            withStack(
+                wrapStorage = { PausingMetadataMoveStorage(it, blockingSource = "a.txt").also { wrapper -> pausing = wrapper } },
+            ) { stack ->
+                stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val oldId = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
+
+                // 移动先发起，停在真正 rename 之前——此刻它正拿着边界。
+                val move = async(Dispatchers.Default) { stack.vfs.move(uri("/a.txt"), uri("/b.txt")) }
+                pausing.awaitFirstMove()
+                // 移动还没提交：库里只有 FILE_CREATED，旧路径仍是唯一有效记录。
+                assertEquals(listOf("FILE_CREATED"), eventTypes(), "移动停在边界里时还没提交任何事件")
+                assertEquals(oldId, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "旧路径仍有效")
+                assertNull(stack.metadata.get(oldId), "此刻还没写 Metadata")
+
+                // 第二调用用**旧 ID** 更新 Metadata：它的第一个挂起点就是取边界，所以此刻一定排队等着。
+                val metadataResult = CompletableDeferred<Result<Unit>>()
+                val update =
+                    async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                        metadataResult.complete(runCatching { stack.vfs.setMetadata(oldId, NodeMetadata(setOf("ct"), "胸部 CT")) })
+                    }
+                // UNDISPATCHED：更新在当前线程直接开跑，直到第一个挂起点才交回控制权。
+                // 它已经发起、停在取边界上，但是决不会提前完成。
+                assertFalse(update.isCompleted, "Metadata 更新已经跑到第一个挂起点却直接跑完了——它没被边界挡住")
+                // 确定判据：被挡住的更新没有进入受保护工作——库里状态一个字节没变。
+                assertEquals(listOf("FILE_CREATED"), eventTypes(), "被挡住的更新没有追加任何事件")
+                assertNull(stack.metadata.get(oldId), "被挡住的更新没有提前写 Metadata")
+
+                pausing.releaseMove()
+
+                val moved = withTimeout(30_000) { move.await() }
+                val secondResult = withTimeout(30_000) { metadataResult.await() }
+
+                // 第二调用的返回值直接断言：它真的成功了。
+                assertTrue(secondResult.isSuccess, "按旧 ID 的更新应当成功，实际：${secondResult.exceptionOrNull()}")
+                assertEquals(oldId, moved.id, "移动复用原身份")
+                assertEquals(uri("/b.txt"), moved.uri, "移动落到目标")
+                assertEquals(oldId, stack.nodes.findByPath(VfsPath.parse("/resources/b.txt"))?.id, "新路径下就是原身份")
+                assertNull(stack.nodes.findByPath(VfsPath.parse("/resources/a.txt")), "旧路径不再有有效记录")
+                assertEquals(NodeMetadata(setOf("ct"), "胸部 CT"), stack.metadata.get(oldId), "Metadata 落在同一个（已移动）身份上")
+                assertEquals(
+                    listOf("FILE_CREATED", "FILE_MOVED", "METADATA_UPDATED"),
+                    eventTypes(),
+                    "更新确实在移动提交之后才进库",
+                )
+
+                // Metadata 事件的 URI 是移动后的新路径。
+                val metadataUri =
+                    DriverManager.getConnection("jdbc:sqlite:$databaseFile").use { connection ->
+                        connection.createStatement().use { statement ->
+                            statement.executeQuery("SELECT uri FROM event WHERE event_type = 'METADATA_UPDATED'").use { rows ->
+                                rows.next()
+                                rows.getString(1)
+                            }
+                        }
+                    }
+                assertEquals(uri("/b.txt").toString(), metadataUri, "Metadata 事件的 URI 是新路径")
+
+                update.join()
+            }
+        }
+
     // __REAL_STACK_APPEND__
 }
 
@@ -1376,6 +1451,45 @@ private class BlockerStorage(
             throw VfsException(VfsErrorCode.STORAGE_ERROR, "cannot create directory under the blocking file")
         }
         delegate.createDirectory(path)
+    }
+}
+
+/**
+ * 包一层存储：指定源路径的 [Storage.move] 在**真正移动之前**挂住，由测试放行。
+ *
+ * T27 A03 用它把移动停在「已经拿着共享边界、还没真正 rename」的阶段，制造与 Metadata 更新的受控交错。
+ */
+private class PausingMetadataMoveStorage(
+    private val delegate: Storage,
+    private val blockingSource: String,
+) : Storage by delegate {
+    private val release = CompletableDeferred<Unit>()
+    private val arrivals = Channel<Unit>(Channel.UNLIMITED)
+
+    override suspend fun move(
+        source: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
+        target: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
+    ): com.github.noahshen.alcyone.context.vfs.core.storage.StorageAttributes {
+        if (source.toRelativeString() == blockingSource) {
+            arrivals.trySend(Unit)
+            try {
+                release.await()
+            } catch (stopped: CancellationException) {
+                release.complete(Unit)
+                throw stopped
+            }
+        }
+        return delegate.move(source, target)
+    }
+
+    /** 第一个移动已经进了 Storage.move，也就是正拿着边界。 */
+    suspend fun awaitFirstMove() {
+        withTimeout(30_000) { arrivals.receive() }
+    }
+
+    /** 放行挂住的移动；幂等。 */
+    fun releaseMove() {
+        release.complete(Unit)
     }
 }
 
