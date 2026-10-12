@@ -20,13 +20,20 @@ dependencies {
 }
 
 // Classifier names published by org.apache.opendal:opendal; verified present for 0.50.6.
-fun opendalNativeClassifier(): String {
-    val onMac = System.getProperty("os.name").startsWith("Mac")
-    val onArm = System.getProperty("os.arch") in setOf("aarch64", "arm64")
+// 未知 OS 或 CPU 明确拒绝，禁止静默落入 Linux x64（A02）。
+fun opendalNativeClassifier(
+    osName: String = System.getProperty("os.name"),
+    osArch: String = System.getProperty("os.arch"),
+): String {
+    val isMac = osName.startsWith("Mac")
+    val isLinux = osName.startsWith("Linux")
+    val isArm = osArch in setOf("aarch64", "arm64")
+    val isX64 = osArch in setOf("x86_64", "amd64")
     return when {
-        onMac && onArm -> "osx-aarch_64"
-        onMac -> "osx-x86_64"
-        onArm -> "linux-aarch_64"
-        else -> "linux-x86_64"
+        isMac && isArm -> "osx-aarch_64"
+        isMac && isX64 -> "osx-x86_64"
+        isLinux && isArm -> "linux-aarch_64"
+        isLinux && isX64 -> "linux-x86_64"
+        else -> error("Unsupported OS/CPU for OpenDAL native: os.name='$osName', os.arch='$osArch'")
     }
 }
