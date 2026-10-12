@@ -1,5 +1,14 @@
 # AGENTS.md
 
+## 本次修改（2026-10-12，T28 R1～R3 修复完成，保持 IN_REVIEW）
+
+- 回应 163cacd 独立复核 R1～R3：
+  - R1：`vfs/storage/build.gradle.kts` 与 `scripts/dev` 统一明确拒绝 macOS x64 并抛错；`OpendalClassifierSelectionTest` 改造为通过 Gradle 真实任务求值执行实际构建逻辑并包含拒绝 macOS x64 断言。
+  - R2：`EventDispatcherLogCaptureTest` 让独特凭据标记进入受管后端错误上下文；断言异常完整文本（含 message, cause, suppressed, stackTraceToString）与 SLF4J WARN 真实捕获日志，日志确实输出且绝不泄露受管凭据；交付与验收收窄为“VFS 受管凭据保护与已覆盖范围”，A05 标为达成。
+  - R3：A03 严格订正为“待验证 / 受阻（macOS arm64 实测通过，Linux 缺当前执行）”，Linux x64 与 Linux arm64 如实单列缺口交复核方/用户做范围决定。
+  - S2/S3：诊断表按实际字段如实区分，排障说明先定位具体损坏的局部工具目录，清理测试中无关注释。
+- 回归 `./scripts/check` 751 例、`./scripts/webdav-check` 42 例全绿，源码与 XML 差额为零。保持 IN_REVIEW，M5 IN_PROGRESS，不自动开始 T29。涉及全文。
+
 ## 本次修改（2026-10-12，T28 开发与核查完成，状态 IN_REVIEW）
 
 - 第 32 条由 TODO（已安排）改为 **IN_REVIEW**：核查当前平台支持现状（macOS arm64 实测通过、Linux x64 等待当前实跑、Linux arm64 缺少硬件未测、不支持平台明确拒绝）；修复 `vfs/storage/build.gradle.kts` 中 `opendalNativeClassifier()` 的静默兜底缺陷并补分支测试（2 例）；整理六类诊断入口与最小上下文，补齐 SLF4J 正向日志捕获与凭据不泄露测试（1 例）。测试 `./scripts/check` 748 → **751**、`./scripts/webdav-check` **42** 全绿，源码与 XML 差额为零。方案④保持，不自动开始 T29。涉及全文。
@@ -583,7 +592,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 31. [T27 并发、取消与资源生命周期验证及验收](docs/tasks/m5-t27/T27_并发取消与资源生命周期验证及验收.md)：**DONE**，a778418 链条独立 748 / WebDAV 42 通过，R1～R3 关闭，见 [复核第 7 节](docs/tasks/m5-t27/T27_架构与技术复核.md)。生产零改动，方案④保持；M5 未收口，T28 已按用户要求安排。
 
-32. [T28 平台支持与诊断能力核查及验收](docs/tasks/m5-t28/T28_平台支持与诊断能力核查及验收.md)：**IN_REVIEW**，核查当前 OS / CPU 实跑、native 选择、错误与日志上下文、凭据保护。未测平台显式列出，不能用配置或历史 CI 代替当前实跑；修复 classifier 未知系统静默兜底；基线 748 → 751 / WebDAV 42。待复核，不开始 T29。
+32. [T28 平台支持与诊断能力核查及验收](docs/tasks/m5-t28/T28_平台支持与诊断能力核查及验收.md)：**IN_REVIEW**，核查当前 OS / CPU 实跑、native 选择、错误与日志上下文、凭据保护。R1～R3 修复完成：native classifier 明确拒绝 macOS x64 且被真实测试驱动，凭据错误链/日志反例补齐，A03 订正为待验证/受阻并如实单列 Linux 缺口。基线 751 / WebDAV 42。待复核，不开始 T29。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 

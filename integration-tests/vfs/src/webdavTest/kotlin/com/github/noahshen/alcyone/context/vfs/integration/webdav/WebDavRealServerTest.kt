@@ -415,11 +415,21 @@ class WebDavRealServerTest {
         }
     }
 
-    /** 异常链的全部消息拼在一起：检查凭据泄漏时用它，而不是只看最外层那一行。 */
+    /** 异常链的全部消息、toString、suppressed 与堆栈拼在一起：检查凭据泄漏时用它。 */
     private fun describeChain(failure: Throwable): String =
-        generateSequence(failure) { it.cause }
-            .flatMap { sequenceOf(it.message ?: "", it.toString()) }
-            .joinToString("\n")
+        buildString {
+            append(failure.stackTraceToString()).append("\n")
+            val seen = mutableSetOf<Throwable>()
+
+            fun collect(t: Throwable) {
+                if (!seen.add(t)) return
+                append(t.message ?: "").append("\n")
+                append(t.toString()).append("\n")
+                t.cause?.let { collect(it) }
+                t.suppressed.forEach { collect(it) }
+            }
+            collect(failure)
+        }
 
     /**
      * 直接读真实状态库的 `event` 表，返回删除前后可逐条对比的持久记录（ID / type / node_id）。

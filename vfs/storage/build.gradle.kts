@@ -20,7 +20,7 @@ dependencies {
 }
 
 // Classifier names published by org.apache.opendal:opendal; verified present for 0.50.6.
-// 未知 OS 或 CPU 明确拒绝，禁止静默落入 Linux x64（A02）。
+// 未知 OS 或 CPU 明确拒绝，禁止静默落入 Linux x64；与 scripts/dev 统一明确拒绝 macOS x64（R1）。
 fun opendalNativeClassifier(
     osName: String = System.getProperty("os.name"),
     osArch: String = System.getProperty("os.arch"),
@@ -31,9 +31,19 @@ fun opendalNativeClassifier(
     val isX64 = osArch in setOf("x86_64", "amd64")
     return when {
         isMac && isArm -> "osx-aarch_64"
-        isMac && isX64 -> "osx-x86_64"
         isLinux && isArm -> "linux-aarch_64"
         isLinux && isX64 -> "linux-x86_64"
         else -> error("Unsupported OS/CPU for OpenDAL native: os.name='$osName', os.arch='$osArch'")
+    }
+}
+
+// 供测试执行真实构建逻辑（R1）：测试通过 project.tasks.named("resolveOpendalClassifier") 或直接调用此函数
+tasks.register("resolveOpendalClassifier") {
+    val targetOs = project.findProperty("targetOs") as? String ?: System.getProperty("os.name")
+    val targetArch = project.findProperty("targetArch") as? String ?: System.getProperty("os.arch")
+    val classifier = opendalNativeClassifier(targetOs, targetArch)
+    extra["classifier"] = classifier
+    doLast {
+        println("classifier=$classifier")
     }
 }
