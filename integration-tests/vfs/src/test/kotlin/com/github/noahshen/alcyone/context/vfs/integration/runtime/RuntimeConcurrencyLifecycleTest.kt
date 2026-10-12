@@ -16,6 +16,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -45,8 +46,9 @@ import kotlin.test.assertFailsWith
  * - A07 反复创建 / 关闭：有限轮次（这里 3 轮）真实资源，交替「显式关流」与「交给 Runtime 回收」，
  *   每轮确认旧流不可读、同库能再打开。结论限定为所测轮次与可观测资源，不作堆内存 / 无泄漏推断。
  *
- * 时序用 `CompletableDeferred` 启停门控制，不用 `Thread.sleep`；每个用例都有 [Timeout] 兜底，
- * 失败路径在 `finally` 里放行 / 收尾，再交给 `withVfs` 关 Runtime。
+ * 时序用 `CompletableDeferred` 启停门控制，不用 `Thread.sleep`；每个用例都有 [Timeout] 兜底。
+ * 并发子任务在 `withVfs` **内部**用 `coroutineScope` 托管：一旦等待抛错，作用域先取消并等待这批子任务，
+ * 然后才让 `withVfs` 关 Runtime，不把未收尾的子任务挂到外层 `runBlocking` 上（R2）。
  */
 class RuntimeConcurrencyLifecycleTest {
     @TempDir
@@ -82,8 +84,9 @@ class RuntimeConcurrencyLifecycleTest {
             Files.writeString(disk.resolve("external.txt"), "outside")
 
             withVfs(config()) { vfs ->
-                // 先证明事件通路是活的：写一个种子文件，它的 FILE_CREATED 会进事件日志。
+                // 先写一个种子文件：直接断言它落了一条事件，说明持久事件写入可用（这里没有订阅，不是进程内通知通路的验证）。
                 vfs.write(uri("/seed.txt"), "seed".toByteArray())
+                assertEquals(1, eventCount(), "种子写的 FILE_CREATED 已持久进事件表")
                 val eventsAfterSeed = eventCount()
 
                 // 读取不是登记操作：read 之后仍未登记，list 也不登记，都不追加事件。
@@ -94,16 +97,20 @@ class RuntimeConcurrencyLifecycleTest {
                 assertEquals(eventsAfterSeed, eventCount(), "read / list 不产生变更事件")
 
                 // 同一启动门一起发起：先把所有协程建好停在门上，再一次性放行。
+                // 用 coroutineScope 托管这批子任务：只要有一个 awaitAll 抛错，作用域会先取消其余子任务并等它们收尾，
+                // 然后才返回到 withVfs 去关 vfs.close()，不会把没跑完的子任务留在外层 runBlocking 上。
                 val gate = CompletableDeferred<Unit>()
                 val results =
-                    (1..8)
-                        .map {
-                            async(Dispatchers.Default) {
-                                gate.await()
-                                vfs.stat(uri("/external.txt")).id
-                            }
-                        }.also { gate.complete(Unit) }
-                        .awaitAll()
+                    coroutineScope {
+                        (1..8)
+                            .map {
+                                async(Dispatchers.Default) {
+                                    gate.await()
+                                    vfs.stat(uri("/external.txt")).id
+                                }
+                            }.also { gate.complete(Unit) }
+                            .awaitAll()
+                    }
 
                 assertEquals(1, results.distinct().size, "并发 stat 同一路径最终只有一个有效身份：$results")
                 assertEquals(1, countActive("/resources/docs/external.txt"), "状态库里只有一条有效记录")
@@ -129,17 +136,20 @@ class RuntimeConcurrencyLifecycleTest {
             withVfs(config()) { vfs ->
                 val gate = CompletableDeferred<Unit>()
                 // 甲写 A、乙写 B：不预设谁赢，两边都收集「结果或异常」。
+                // 用 coroutineScope 托管这两个子任务：awaitAll 抛错时先取消 / 等它们收尾，再让 withVfs 关 vfs.close()。
                 val attempts =
-                    listOf("A", "B")
-                        .map { payload ->
-                            async(Dispatchers.Default) {
-                                gate.await()
-                                runCatching {
-                                    vfs.write(uri("/race.txt"), payload.toByteArray(), WriteOptions(WriteMode.CREATE_NEW))
-                                } to payload
-                            }
-                        }.also { gate.complete(Unit) }
-                        .awaitAll()
+                    coroutineScope {
+                        listOf("A", "B")
+                            .map { payload ->
+                                async(Dispatchers.Default) {
+                                    gate.await()
+                                    runCatching {
+                                        vfs.write(uri("/race.txt"), payload.toByteArray(), WriteOptions(WriteMode.CREATE_NEW))
+                                    } to payload
+                                }
+                            }.also { gate.complete(Unit) }
+                            .awaitAll()
+                    }
 
                 val succeeded = attempts.filter { it.first.isSuccess }
                 val failed = attempts.filter { it.first.isFailure }
@@ -171,9 +181,10 @@ class RuntimeConcurrencyLifecycleTest {
     /**
      * A03：移动先完成，再按**旧 Node ID** 更新 Metadata。
      *
-     * 受控交错：移动整条链都用共享的串行边界。这里用可观测的事实核对受控次序——移动先返回（拿到目标
-     * 路径），随后的 `setMetadata` 用移动前的旧 ID 定位，必须落到新路径，且 `METADATA_UPDATED` 事件的
-     * URI 是新路径。`setMetadata` 自己的返回值 / 异常由我们直接保存后断言。
+     * 这是**顺序接线代表**（不是受控交错）：移动整条链先跑完、正常返回（拿到目标路径），随后才发起
+     * `setMetadata`。它核对的是「移动之后旧 ID 仍指向同一身份、更新落到新路径」，用它验证跨操作的顺序接线；
+     * 真正的受控交错（两操作在一把边界上排队）在 `DefaultVfsRealStackTest` 的包装用例里。第二调用自己的返回值 /
+     * 异常由我们直接保存后断言。
      */
     @Test
     @Timeout(60)

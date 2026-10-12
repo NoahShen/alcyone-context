@@ -44,11 +44,14 @@ import com.github.noahshen.alcyone.context.vfs.storage.opendal.LocalFsStorage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -1218,71 +1221,105 @@ class DefaultVfsRealStackTest {
      * 它必须排队等边界、在放行之前**一次状态库都没碰**；放行后移动提交完，Metadata 更新才进状态库，
      * 且落在移动后的新路径、`METADATA_UPDATED` 的 URI 是新路径。
      *
+     * **直接判据（R1）**：包装一层 [UnitOfWork]，在委托真事务、**任何挂起点之前**同步记进入次数。`setMetadata →
+     * EventPipeline.commitInsideBoundary → SqliteUnitOfWork.inTransaction` 内部还有 `withContext(Dispatchers.IO)`
+     * 这样的调度点，光看「库没变化」排除不了第二调用已经走到那里。所以移动停住后先记事务入口基线，
+     * UNDISPATCHED 启动更新后直接断言入口计数**没涨**——这才是「它被外层 StateBoundary 挡住、根本没到事务委托入口」。
+     *
      * 第二调用的返回值 / 异常直接保存后断言，不另查一次替代。
+     *
+     * **清理（R2）**：第一个子任务一起跑就用 try/finally 托管；失败路径先**放行 pausing 门**，再在 NonCancellable 里
+     * 取消并 join 所有已启动子协程，之后才退出 withStack 关资源。
      */
     @Test
     @Timeout(60)
     fun `A03 a metadata update by the old id queues behind a move at the shared boundary`() =
         runBlocking {
             lateinit var pausing: PausingMetadataMoveStorage
+            lateinit var entryCount: TransactionEntryCounter
             withStack(
                 wrapStorage = { PausingMetadataMoveStorage(it, blockingSource = "a.txt").also { wrapper -> pausing = wrapper } },
+                unitOfWork = { real -> TransactionEntryCounter(real).also { wrapper -> entryCount = wrapper } },
             ) { stack ->
                 stack.vfs.write(uri("/a.txt"), "hello".toByteArray())
                 val oldId = stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))!!.id
 
                 // 移动先发起，停在真正 rename 之前——此刻它正拿着边界。
                 val move = async(Dispatchers.Default) { stack.vfs.move(uri("/a.txt"), uri("/b.txt")) }
-                pausing.awaitFirstMove()
-                // 移动还没提交：库里只有 FILE_CREATED，旧路径仍是唯一有效记录。
-                assertEquals(listOf("FILE_CREATED"), eventTypes(), "移动停在边界里时还没提交任何事件")
-                assertEquals(oldId, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "旧路径仍有效")
-                assertNull(stack.metadata.get(oldId), "此刻还没写 Metadata")
+                // 从第一个子任务启动起就进入 try/finally；异常路径也要放门、取消、等两方收尾再关资源。
+                var update: Deferred<Unit>? = null
+                try {
+                    pausing.awaitFirstMove()
+                    // 基线：移动进事务那一次已经记过，之后不该再有新的进入，直到我们放行。
+                    val entriesAtPause = entryCount.entries()
+                    // 移动还没提交：库里只有 FILE_CREATED，旧路径仍是唯一有效记录。
+                    assertEquals(listOf("FILE_CREATED"), eventTypes(), "移动停在边界里时还没提交任何事件")
+                    assertEquals(oldId, stack.nodes.findByPath(VfsPath.parse("/resources/a.txt"))?.id, "旧路径仍有效")
+                    assertNull(stack.metadata.get(oldId), "此刻还没写 Metadata")
 
-                // 第二调用用**旧 ID** 更新 Metadata：它的第一个挂起点就是取边界，所以此刻一定排队等着。
-                val metadataResult = CompletableDeferred<Result<Unit>>()
-                val update =
-                    async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
-                        metadataResult.complete(runCatching { stack.vfs.setMetadata(oldId, NodeMetadata(setOf("ct"), "胸部 CT")) })
-                    }
-                // UNDISPATCHED：更新在当前线程直接开跑，直到第一个挂起点才交回控制权。
-                // 它已经发起、停在取边界上，但是决不会提前完成。
-                assertFalse(update.isCompleted, "Metadata 更新已经跑到第一个挂起点却直接跑完了——它没被边界挡住")
-                // 确定判据：被挡住的更新没有进入受保护工作——库里状态一个字节没变。
-                assertEquals(listOf("FILE_CREATED"), eventTypes(), "被挡住的更新没有追加任何事件")
-                assertNull(stack.metadata.get(oldId), "被挡住的更新没有提前写 Metadata")
+                    // 第二调用用**旧 ID** 更新 Metadata：它的第一个挂起点就是取边界，所以此刻一定排队等着。
+                    val metadataResult = CompletableDeferred<Result<Unit>>()
+                    update =
+                        async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                            metadataResult.complete(runCatching { stack.vfs.setMetadata(oldId, NodeMetadata(setOf("ct"), "胸部 CT")) })
+                        }
+                    // UNDISPATCHED：更新在当前线程直接开跑，直到第一个挂起点才交回控制权。
+                    // 它已经发起、停在取边界上，但决不会提前完成。
+                    assertFalse(update.isCompleted, "Metadata 更新已经跑到第一个挂起点却直接跑完了——它没被边界挡住")
+                    // 直接判据：被挡住的更新**没进事务委托入口**——进入计数一个都没涨。
+                    assertEquals(
+                        entriesAtPause,
+                        entryCount.entries(),
+                        "被挡住的更新不该走到事务委托入口（StateBoundary 应在它之前拦住）",
+                    )
+                    // 再加一层库状态不变（补充证据，不是唯一判据）。
+                    assertEquals(listOf("FILE_CREATED"), eventTypes(), "被挡住的更新没有追加任何事件")
+                    assertNull(stack.metadata.get(oldId), "被挡住的更新没有提前写 Metadata")
 
-                pausing.releaseMove()
+                    pausing.releaseMove()
 
-                val moved = withTimeout(30_000) { move.await() }
-                val secondResult = withTimeout(30_000) { metadataResult.await() }
+                    val moved = withTimeout(30_000) { move.await() }
+                    val secondResult = withTimeout(30_000) { metadataResult.await() }
 
-                // 第二调用的返回值直接断言：它真的成功了。
-                assertTrue(secondResult.isSuccess, "按旧 ID 的更新应当成功，实际：${secondResult.exceptionOrNull()}")
-                assertEquals(oldId, moved.id, "移动复用原身份")
-                assertEquals(uri("/b.txt"), moved.uri, "移动落到目标")
-                assertEquals(oldId, stack.nodes.findByPath(VfsPath.parse("/resources/b.txt"))?.id, "新路径下就是原身份")
-                assertNull(stack.nodes.findByPath(VfsPath.parse("/resources/a.txt")), "旧路径不再有有效记录")
-                assertEquals(NodeMetadata(setOf("ct"), "胸部 CT"), stack.metadata.get(oldId), "Metadata 落在同一个（已移动）身份上")
-                assertEquals(
-                    listOf("FILE_CREATED", "FILE_MOVED", "METADATA_UPDATED"),
-                    eventTypes(),
-                    "更新确实在移动提交之后才进库",
-                )
+                    // 放行后事务入口确实又进了一次（第二调用的更新）。
+                    assertTrue(entryCount.entries() > entriesAtPause, "放行后第二调用必须真的进事务委托入口")
+                    // 第二调用的返回值直接断言：它真的成功了。
+                    assertTrue(secondResult.isSuccess, "按旧 ID 的更新应当成功，实际：${secondResult.exceptionOrNull()}")
+                    assertEquals(oldId, moved.id, "移动复用原身份")
+                    assertEquals(uri("/b.txt"), moved.uri, "移动落到目标")
+                    assertEquals(oldId, stack.nodes.findByPath(VfsPath.parse("/resources/b.txt"))?.id, "新路径下就是原身份")
+                    assertNull(stack.nodes.findByPath(VfsPath.parse("/resources/a.txt")), "旧路径不再有有效记录")
+                    assertEquals(NodeMetadata(setOf("ct"), "胸部 CT"), stack.metadata.get(oldId), "Metadata 落在同一个（已移动）身份上")
+                    assertEquals(
+                        listOf("FILE_CREATED", "FILE_MOVED", "METADATA_UPDATED"),
+                        eventTypes(),
+                        "更新确实在移动提交之后才进库",
+                    )
 
-                // Metadata 事件的 URI 是移动后的新路径。
-                val metadataUri =
-                    DriverManager.getConnection("jdbc:sqlite:$databaseFile").use { connection ->
-                        connection.createStatement().use { statement ->
-                            statement.executeQuery("SELECT uri FROM event WHERE event_type = 'METADATA_UPDATED'").use { rows ->
-                                rows.next()
-                                rows.getString(1)
+                    // Metadata 事件的 URI 是移动后的新路径。
+                    val metadataUri =
+                        DriverManager.getConnection("jdbc:sqlite:$databaseFile").use { connection ->
+                            connection.createStatement().use { statement ->
+                                statement.executeQuery("SELECT uri FROM event WHERE event_type = 'METADATA_UPDATED'").use { rows ->
+                                    rows.next()
+                                    rows.getString(1)
+                                }
                             }
                         }
-                    }
-                assertEquals(uri("/b.txt").toString(), metadataUri, "Metadata 事件的 URI 是新路径")
+                    assertEquals(uri("/b.txt").toString(), metadataUri, "Metadata 事件的 URI 是新路径")
 
-                update.join()
+                    update.join()
+                } finally {
+                    // 兜底：正常路径已 join 过，这里是异常 / 超时路径的保障。必须先放门（避免死等），
+                    // 再躲开外层取消，取消并等待两个子协程（含事务回滚）真正结束，之后 withStack 才关资源。
+                    withContext(NonCancellable) {
+                        pausing.releaseMove()
+                        if (move.isActive) move.cancel()
+                        update?.let { if (it.isActive) it.cancel() }
+                        move.join()
+                        update?.join()
+                    }
+                }
             }
         }
 
@@ -1464,14 +1501,16 @@ private class PausingMetadataMoveStorage(
     private val blockingSource: String,
 ) : Storage by delegate {
     private val release = CompletableDeferred<Unit>()
-    private val arrivals = Channel<Unit>(Channel.UNLIMITED)
+
+    // 只等一次到达：用一个 CompletableDeferred 代替无界 Channel 更直白（S1）。
+    private val arrived = CompletableDeferred<Unit>()
 
     override suspend fun move(
         source: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
         target: com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath,
     ): com.github.noahshen.alcyone.context.vfs.core.storage.StorageAttributes {
         if (source.toRelativeString() == blockingSource) {
-            arrivals.trySend(Unit)
+            arrived.complete(Unit)
             try {
                 release.await()
             } catch (stopped: CancellationException) {
@@ -1484,7 +1523,7 @@ private class PausingMetadataMoveStorage(
 
     /** 第一个移动已经进了 Storage.move，也就是正拿着边界。 */
     suspend fun awaitFirstMove() {
-        withTimeout(30_000) { arrivals.receive() }
+        withTimeout(30_000) { arrived.await() }
     }
 
     /** 放行挂住的移动；幂等。 */
@@ -1578,6 +1617,28 @@ private class CollidingEventUnitOfWork(
                 }
             block(decorated)
         }
+}
+
+/**
+ * 包一层事务：在委托真事务、**任何挂起点之前**同步把进入次数加一。
+ *
+ * T27 R1 用它给「第二调用有没有走到事务入口」一个直接判据：`setMetadata` 链是
+ * `EventPipeline.commitInsideBoundary → UnitOfWork.inTransaction`，中间还有 `withContext(Dispatchers.IO)` 这类调度点，
+ * 光看「库没变化」排除不了它已经走到那里。计数在这里同步自增（不经过任何 suspend），
+ * 所以「计数没涨」就等价于「它连事务委托入口都没进」。
+ */
+private class TransactionEntryCounter(
+    private val delegate: SqliteUnitOfWork,
+) : UnitOfWork {
+    private val entries = AtomicInteger()
+
+    override suspend fun <T> inTransaction(block: suspend (TransactionScope) -> T): T {
+        entries.incrementAndGet()
+        return delegate.inTransaction(block)
+    }
+
+    /** 至今进入事务入口的次数。 */
+    fun entries(): Int = entries.get()
 }
 
 /**

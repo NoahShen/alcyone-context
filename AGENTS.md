@@ -1,5 +1,14 @@
 # AGENTS.md
 
+## 本次修改（2026-10-12，T27 R1～R3 复核修复完成，保持 IN_REVIEW）
+
+- 回应 3fae812 独立复核 R1～R3（提交 `4cbaf86`）：R1 A03 受控交错加事务入口直接判据（包装 `UnitOfWork` 同步记进入次数，放行前断言未涨）；R2 A03 与公开 stat / CREATE_NEW 补失败清理（try/finally + NonCancellable cancel/join、`coroutineScope` 托管）；R3 三份文档证据索引与说明订正；S1～S3 一并处理。仅改测试与文档，生产代码零改动。回归 `./scripts/check` 748 / WebDAV 42 全绿，差额零。保持 IN_REVIEW，M5 IN_PROGRESS，不开始 T28。
+
+## 本次修改（2026-10-12，T27 独立复核）
+
+- 3fae812 独立 748 / WebDAV 42 通过，源码与 XML 差额零；R1 交错判据、R2 新增任务清理、R3 证据说明待修。更新 T27 当前结论，见 T27 架构与技术复核；保持 IN_REVIEW，M5 IN_PROGRESS，不开始 T28。
+
+
 ## 本次修改（2026-10-12，T27 开发完成，状态 IN_REVIEW）
 
 - 第 31 条由 TODO（已安排）改为 **IN_REVIEW**：以复用 T13 / T15 / T18 / T23 / T25 / T26 证据为主，补公开 Runtime 与受控交错上的五条代表——A01 同路径并发 stat 唯一身份且无登记事件、A02 公开 Runtime 同路径 CREATE_NEW 一成一败（内容 / 身份 / 事件对应获胜调用）、A03 Metadata 更新 × 移动共用边界的受控交错 + 公开入口代表、A07 三轮真资源创建 / 关闭（显式关流与遗漏回收交替）。新增 `RuntimeConcurrencyLifecycleTest` 4 例、`DefaultVfsRealStackTest` +1 例，生产代码零改动，未新增公共 API / 诊断接口。回归 `./scripts/check` 743 → **748**，真实 WebDAV **42 不变**，两组均 0 失败 / 错误 / 跳过，源码与 XML 差额为零；方案④保持。T27 通过不代表 M5 收口，不自动开始 T28。
@@ -558,7 +567,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 
 30. [T26 事件持久化与进程内分发验证及验收](docs/tasks/m5-t26/T26_事件持久化与进程内分发验证及验收.md)：**DONE**，3cb3aa8 链条独立复核通过，R1 / R2 关闭，743 / WebDAV 42 通过；见 [复核第 8 节](docs/tasks/m5-t26/T26_架构与技术复核.md)。生产零改动，方案④保持，M5 未收口，T27 已按用户要求安排。
 
-31. [T27 并发、取消与资源生命周期验证及验收](docs/tasks/m5-t27/T27_并发取消与资源生命周期验证及验收.md)：**IN_REVIEW**，前置已满足；复用已有串行化 / 取消 / 关闭证据，补公开同路径竞争、Metadata 交错和反复生命周期代表；基线 743 → 748 / WebDAV 42。开发完成，等独立复核；不扩展崩溃恢复，不开始 T28。
+31. [T27 并发、取消与资源生命周期验证及验收](docs/tasks/m5-t27/T27_并发取消与资源生命周期验证及验收.md)：**IN_REVIEW**，3fae812 独立 748 / WebDAV 42 通过；R1～R3 复核修复已完成（`4cbaf86`：A03 事务入口直接判据、失败清理、证据说明订正），见 [复核记录](docs/tasks/m5-t27/T27_架构与技术复核.md)。生产零改动，方案④保持，等复核确认后收口，不开始 T28。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
