@@ -10,11 +10,6 @@ import com.github.noahshen.alcyone.context.vfs.runtime.AlcyoneVfs
 import com.github.noahshen.alcyone.context.vfs.runtime.MountConfig
 import com.github.noahshen.alcyone.context.vfs.runtime.VfsRuntimeConfig
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -33,7 +28,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  *
  * - **A04 Consumer 隔离 + 公开查询**：公开入口上两个 Consumer，一个抛普通异常，另一个仍收到**同一个事件**，
  *   且其后继操作与事件照常；两个 Consumer 收到的事件按**事件 ID** 与真实 `event` 表逐字段对照；
- *   回调内通过公开 `getNode` / `getMetadata` 查询已提交状态，把查询结果交给测试协程直接断言。
+ *   Consumer **在回调返回之前**用公开 `getNode` 查一次刚提交的状态，把查询结果交给测试协程直接断言。
  * - **A06 正常重开不自动重放**：保存旧事件字段快照，正常关库重开同一库，核对旧事件原样保留；
  *   新实例的新订阅**不自动收到旧日志**，并用重开后**新生成的标记事件**确认通知通路确实工作——
  *   避免把「监听器根本没接上」误当作不重放的证明。
@@ -71,8 +66,10 @@ class RuntimeEventNotificationTest {
      * 本用例另外补齐 A01 / A03 的公开接线：
      * - 把两个 Consumer 收到的事件按**事件 ID** 与真实 `event` 表逐条对照（类型 / Node ID / URI / 毫秒时间，
      *   非移动事件的 source / target 为空）；直接比较两个 Consumer 的事件身份，证明它们收到的是同一批。
-     * - 回调内用公开 `getNode` 查询已提交状态，把结果 / 异常交给测试协程断言：查询跑在 Consumer 回调里，
-     *   若它自锁或看到未提交状态，测试会直接失败，而不是被通知器当普通异常吞掉。
+     * - Consumer **在回调返回之前**用公开 `getNode` 查询已提交状态，把结果 / 异常交给测试协程断言：
+     *   公开回调不是挂起函数，用**回调内部有界的 `runBlocking { withTimeout(...) }`** 桥接，
+     *   所以查询在回调里同步跑完、回调返回时查询已经结束。若实现自锁或看到未提交状态，测试会直接失败，
+     *   而不是被通知器当普通异常吞掉；等待上限在查询内部，反例自锁也不会把 `notifier.close` 永久卡住。
      */
     @Test
     @Timeout(60)
@@ -86,52 +83,54 @@ class RuntimeEventNotificationTest {
             // 不用 AssertionError 直接抛：那会被分发器当「Consumer 抛错」处理（Error 不吞，但会把分发协程打挂），
             // 断言就到不了测试；把结果攒起来由测试断言，才真能传出来。
             val committedQuery = CompletableDeferred<Result<NodeId?>>()
-            // 公开 subscribe 的回调不是挂起函数，所以发起查询要另起一个协程；它属于测试作用域，
-            // 测试等它完成后再做下一步。
-            val queryScope = CoroutineScope(currentCoroutineContext() + Job())
+            // 查询等待上限放在查询内部（下面的 runBlocking + withTimeout），不只放在主测试 await 上：
+            // 反例实现若自锁，回调会在这里超时返回，不会把 notifier.close 永久卡住。
+            val queryTimeoutMs = 10_000L
 
-            try {
-                withVfs(config()) { vfs ->
-                    // 先订阅再触发：抛错的 Consumer 排在前面，健康 Consumer 排在后面。
-                    vfs.subscribe { event ->
-                        throwing.add(event)
-                        throw IllegalStateException("injected push failure for ${event.id}")
-                    }
-                    vfs.subscribe { event -> healthy.record(event) }
-                    // 第三个 Consumer 在回调内查已提交状态；只查不写，查完前不做任何会改状态的操作。
-                    vfs.subscribe { event ->
-                        if (event.type == VfsEventType.FILE_CREATED && !committedQuery.isCompleted) {
-                            queryScope.launch { committedQuery.complete(runCatching { vfs.getNode(event.nodeId!!).id }) }
-                        }
-                    }
-
-                    val written = vfs.write(uri("/a.txt"), "hello".toByteArray())
-                    val created = healthy.await(written.id, VfsEventType.FILE_CREATED)
-                    assertEquals(listOf(written.id), created.map { it.nodeId }, "健康 Consumer 收到了同一个 FILE_CREATED")
-
-                    // 回调里查到的已提交身份：查询已经完成，测试才继续；期间没有做任何会改状态的操作。
-                    val queried = withTimeout(30_000) { committedQuery.await() }
-                    assertEquals(written.id, queried.getOrElse { throw it }, "回调内公开 getNode 查到已提交的同一 Node")
-
-                    // 后续操作与事件仍正常：替换 Metadata 也会通知，抛错 Consumer 挡不住它。
-                    vfs.setMetadata(written.id, NodeMetadata(setOf("ct"), "胸部 CT"))
-                    healthy.await(written.id, VfsEventType.METADATA_UPDATED)
-
-                    // 后续再写一个文件：事件照常送达，抛错 Consumer 也没把分发链带走。
-                    val second = vfs.write(uri("/b.txt"), "again".toByteArray())
-                    val secondCreated = healthy.await(second.id, VfsEventType.FILE_CREATED)
-                    assertEquals(second.id, secondCreated.single().nodeId, "后续操作的事件照常到达")
-
-                    // 抛错 Consumer 确实看到了事件（说明它真的被调过），只是它挡不住别人。
-                    assertTrue(throwing.isNotEmpty(), "抛错 Consumer 应该被调用过")
-
-                    // 已提交状态照旧：文件还在，逻辑记录还在。
-                    assertEquals("hello", vfs.read(uri("/a.txt")).toString(Charsets.UTF_8))
-                    assertEquals("again", vfs.read(uri("/b.txt")).toString(Charsets.UTF_8))
-                    assertEquals(setOf("ct"), vfs.getMetadata(written.id).tags)
+            withVfs(config()) { vfs ->
+                // 先订阅再触发：抛错的 Consumer 排在前面，健康 Consumer 排在后面。
+                vfs.subscribe { event ->
+                    throwing.add(event)
+                    throw IllegalStateException("injected push failure for ${event.id}")
                 }
-            } finally {
-                queryScope.cancel()
+                vfs.subscribe { event -> healthy.record(event) }
+                // 第三个 Consumer 在回调返回之前查一次已提交状态：公开回调不是挂起函数，
+                // 用回调内部有界的 runBlocking + withTimeout 桥接，查询在回调里同步跑完。
+                // 只查不写，查完前不做任何会改状态的操作。
+                vfs.subscribe { event ->
+                    if (event.type == VfsEventType.FILE_CREATED && !committedQuery.isCompleted) {
+                        val outcome =
+                            runCatching {
+                                runBlocking { withTimeout(queryTimeoutMs) { vfs.getNode(event.nodeId!!).id } }
+                            }
+                        committedQuery.complete(outcome)
+                    }
+                }
+
+                val written = vfs.write(uri("/a.txt"), "hello".toByteArray())
+                val created = healthy.await(written.id, VfsEventType.FILE_CREATED)
+                assertEquals(listOf(written.id), created.map { it.nodeId }, "健康 Consumer 收到了同一个 FILE_CREATED")
+
+                // 回调里查到的已提交身份：查询已在回调内完成，测试才继续；期间没有做任何会改状态的操作。
+                val queried = withTimeout(30_000) { committedQuery.await() }
+                assertEquals(written.id, queried.getOrElse { throw it }, "回调内公开 getNode 查到已提交的同一 Node")
+
+                // 后续操作与事件仍正常：替换 Metadata 也会通知，抛错 Consumer 挡不住它。
+                vfs.setMetadata(written.id, NodeMetadata(setOf("ct"), "胸部 CT"))
+                healthy.await(written.id, VfsEventType.METADATA_UPDATED)
+
+                // 后续再写一个文件：事件照常送达，抛错 Consumer 也没把分发链带走。
+                val second = vfs.write(uri("/b.txt"), "again".toByteArray())
+                val secondCreated = healthy.await(second.id, VfsEventType.FILE_CREATED)
+                assertEquals(second.id, secondCreated.single().nodeId, "后续操作的事件照常到达")
+
+                // 抛错 Consumer 确实看到了事件（说明它真的被调过），只是它挡不住别人。
+                assertTrue(throwing.isNotEmpty(), "抛错 Consumer 应该被调用过")
+
+                // 已提交状态照旧：文件还在，逻辑记录还在。
+                assertEquals("hello", vfs.read(uri("/a.txt")).toString(Charsets.UTF_8))
+                assertEquals("again", vfs.read(uri("/b.txt")).toString(Charsets.UTF_8))
+                assertEquals(setOf("ct"), vfs.getMetadata(written.id).tags)
             }
 
             // —— 通知与持久事件按事件 ID 对照 ——
@@ -236,7 +235,8 @@ class RuntimeEventNotificationTest {
 
     /** create → 用 → close 三步；`close()` 是挂起函数，所以用 `try/finally`。
      *
-     * 当前没有注入关闭失败：主路径异常照抛，`close()` 不会把它盖住。将来若要叠加
+     * 当前未覆盖「关闭同时失败」：没有注入关闭失败，所以本用例里 close 不会把主异常盖住——
+     * 这只说明当前没覆盖该组合，不等于实现上保证 close 永不会失败。将来若要叠加
      * 「清理本身也失败」的场景，这里应改成保留主异常、把 close 失败挂到 suppressed 上，
      * 而不是用 close 的异常顶掉主异常。
      */
