@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 
 plugins {
     base
+    `maven-publish`
     alias(libs.plugins.kotlin.jvm) apply false
     alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.sqldelight) apply false
@@ -71,6 +72,43 @@ subprojects {
             }
         }
         tasks.matching { it.name == "check" }.configureEach { dependsOn("spotlessCheck") }
+    }
+
+    val publishableArtifacts = mapOf(
+        ":common" to "alcyone-common",
+        ":vfs:api" to "alcyone-vfs-api",
+        ":vfs:core" to "alcyone-vfs-core",
+        ":vfs:storage" to "alcyone-vfs-storage",
+        ":vfs:persistence" to "alcyone-vfs-persistence",
+        ":vfs:runtime" to "alcyone-vfs-runtime",
+    )
+
+    val artifactName = publishableArtifacts[path]
+    if (artifactName != null) {
+        apply(plugin = "maven-publish")
+        group = "com.github.noahshen.alcyone"
+        version = "0.1.0-SNAPSHOT"
+
+        afterEvaluate {
+            configure<PublishingExtension> {
+                publications {
+                    create<MavenPublication>("mavenJava") {
+                        artifactId = artifactName
+                        from(components["java"])
+                        pom {
+                            name.set(artifactName)
+                            description.set("Alcyone Context VFS - $artifactName")
+                        }
+                    }
+                }
+                repositories {
+                    maven {
+                        name = "projectLocal"
+                        url = uri(rootDir.resolve(".local/sdk-repository"))
+                    }
+                }
+            }
+        }
     }
 }
 

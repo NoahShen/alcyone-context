@@ -1,15 +1,49 @@
 # Alcyone VFS SDK 使用指南
 
-## 本次修改（2026-10-13，复核方措辞收尾）
+## 本次修改（2026-10-13，T31 SDK 打包与本地消费开发及验收）
 
-- §2.2 分开配置重叠 INVALID_ARGUMENT 与重开身份 CONFLICT；§6.2 删除 worker 仅能因关闭退出的绝对表述，限定取消分支。
+- 更新接入现状说明：从“仅源码工程内调用”更新为“已在 macOS arm64 上完成项目内本地仓库产物（0.1.0-SNAPSHOT）消费验证，尚未公开发布”；
+- 明确独立 JVM 消费工程的依赖坐标、本地仓库配置及 JDK 21 要求，给出最小 Gradle 消费声明范例。
 
 > 本次修改（2026-10-13，T30 复核第 6 节修复收尾）：
 > - §2.2 配置解析冲突错误码更正为 INVALID_ARGUMENT（与重开 Mount 身份 CONFLICT 区分）；
 > - §3.1 移动语义更正：目录移动发射单条根级 DIRECTORY_MOVED，文件移动发射 FILE_MOVED；删除“原生原子 rename”表述，说明能力位仅表示后端支持原生操作，不承诺 Storage 与 SQLite 联合原子性，亦不对任意 WebDAV 服务提供原子承诺；同 Mount 无原生能力也走复制回退（已交付 Adapter 目录原生能力均为 false）；复制路径单文件受读写限额约束；更正“确认存在”为按既有实现核对可用长度/目录集合后删源；
 > - §6、§7 补充说明：代码示例均位于 suspend 函数内、假定 vfs 已创建且 targetUri 尚不存在；补齐分发器不捕获 Error 说明；关闭时序明确到期先发协作取消再等清理完成。
 
-本文档面向需要在源码工程中集成使用 Alcyone VFS 的开发者。当前版本仅支持在源码工程内直接调用，底层隐藏了 Local FS 与 WebDAV 的具体存储差异。
+本文档面向需要在 JVM 工程中集成使用 Alcyone VFS 的开发者。
+当前接入现状：已在 macOS arm64 上完成项目内本地仓库产物（`0.1.0-SNAPSHOT`）消费验证，尚未公开发布至外部 Maven Central。
+在外部独立工程消费时，需在构建中指向本地产物仓库（或从源码执行本地发布）。
+
+### 独立工程接入坐标与仓库配置
+
+#### 1. 依赖坐标
+- **核心 Runtime 入口**：
+  `com.github.noahshen.alcyone:alcyone-vfs-runtime:0.1.0-SNAPSHOT`（传递依赖 API、Core、Storage、Persistence、Common）
+- **日志实现**：宿主自行提供 SLF4J 实现（例如 `org.slf4j:slf4j-simple:2.0.17`），SDK 本身不强制绑定日志实现。
+
+#### 2. Gradle (Kotlin DSL) 配置范例
+```kotlin
+repositories {
+    maven {
+        name = "projectLocal"
+        url = uri("/path/to/alcyone-context/.local/sdk-repository")
+        content {
+            includeGroup("com.github.noahshen.alcyone")
+        }
+    }
+    mavenCentral()
+}
+
+dependencies {
+    implementation("com.github.noahshen.alcyone:alcyone-vfs-runtime:0.1.0-SNAPSHOT")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
+}
+```
+
+#### 3. 运行环境与 Native 说明
+- **JDK/JVM 版本**：Java 21（推荐使用 Adoptium Temurin 21）；
+- **Native 平台**：当前阶段产物在 **macOS arm64** 环境下完成本地发布与闭环验证，包含 OpenDAL `osx-aarch_64` native 与 SQLite native；Linux 平台配置已保留但当前未实测，不作通用跨平台保证。
 
 ---
 

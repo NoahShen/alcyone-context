@@ -1,6 +1,6 @@
 # Alcyone Context VFS
 
-> 本次修改（2026-10-13，T30 复核修复 R1～R5）：更正事件类型枚举（FILE_DELETED / DIRECTORY_DELETED）；澄清 Python 环境依赖（系统需预装 Python，依赖包装于项目私有 venv）；澄清 LocalFsSampleTest 默认终端仅显示 BUILD SUCCESSFUL，详细 [sample] 输出位于 XML 报告的 system-out；调整开发格式化与日常检查入口说明。
+> 本次修改（2026-10-13，T31 SDK 打包与本地消费开发及验收）：更新接入现状为“已在 macOS arm64 上完成项目内本地仓库产物（0.1.0-SNAPSHOT）消费验证，尚未公开发布”；补充本地仓库配置、依赖坐标与 JDK/JVM 要求；新增 SDK 本地打包与独立消费验证命令。
 
 Alcyone Context 的虚拟文件系统（VFS, Virtual File System）是一个面向 Agent 场景设计的内嵌式文件系统 SDK 库（Agent-native VFS Library）。它为上层 Agent 与 Context System 提供统一的抽象文件访问能力，隐藏底层存储后端（Local FS、WebDAV 等）的交互细节与协议差异。
 
@@ -14,9 +14,9 @@ Alcyone Context 的虚拟文件系统（VFS, Virtual File System）是一个面�
   - 统一文件与目录操作：read（全量/流式）、write（三种写模式：CREATE_NEW / REPLACE_EXISTING / UPSERT）、stat、getNode、list、move、delete；
   - 节点身份持久化与元数据管理：Node ID 保持连续，Metadata 整体替换；
   - 进程内异步事件订阅（`FILE_CREATED`、`FILE_WRITTEN`、`FILE_MOVED`、`FILE_DELETED`、`DIRECTORY_DELETED`、`METADATA_UPDATED` 等）。
-- **当前接入现状（未独立发布）**：
-  - **当前仅供源码工程内引用**，尚未发布至 Maven Central 或独立私有仓库。
-  - 请勿在构建脚本中配置未发布的 Maven / Gradle 坐标。独立产物消费验证将在后续里程碑任务（T31）中完成。
+- **当前接入现状（已完成本地消费验证，尚未公开发布）**：
+  - **本地仓库验证已闭环**：已在 macOS arm64 上完成项目内本地仓库（`.local/sdk-repository/`）产物（版本 `0.1.0-SNAPSHOT`）由独立最小 JVM 工程消费验证，涵盖 Runtime 核心完整生命周期与正常重开；
+  - **尚未公开发布**：尚未发布至远端 Maven Central 或外部私有仓库，请勿在无本地仓库源的外部工程中依赖该坐标；
   - 规划中的 Memory 管理、Git 同步、自动故障恢复等高级特性尚未完成，不属于当前已交付范围。
 
 ---
@@ -57,7 +57,13 @@ Alcyone Context 的虚拟文件系统（VFS, Virtual File System）是一个面�
    - 详细生命周期观测输出（如 `[sample] wrote ...`、`[sample] read ...` 等）记录在测试结果 XML 报告的 `<system-out>` 节点中：
      `integration-tests/vfs/build/test-results/test/TEST-com.github.noahshen.alcyone.context.vfs.integration.runtime.LocalFsSampleTest.xml`。
 
-4. **全量测试回归**：
+4. **SDK 本地打包与独立消费验证**：
+   ```bash
+   ./scripts/t31-consumer-check
+   ```
+   自动清空并重新打包 6 个 SDK 模块（`alcyone-common`、`alcyone-vfs-api`、`alcyone-vfs-core`、`alcyone-vfs-storage`、`alcyone-vfs-persistence`、`alcyone-vfs-runtime`）至项目内本地仓库（`.local/sdk-repository/`），并触发独立消费工程（`tools/validation/t31-consumer`）仅通过 Maven 坐标依赖运行端到端验证。
+
+5. **全量测试回归**：
    - 常规测试套件（752 例）：
      ```bash
      ./scripts/check

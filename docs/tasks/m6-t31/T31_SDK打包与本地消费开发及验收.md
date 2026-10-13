@@ -1,10 +1,13 @@
 # T31 SDK 打包与本地消费开发及验收
 
-## 本次修改（2026-10-13，安排 T31）
+## 本次修改（2026-10-13，T31 开发完成）
 
-- 新增本地产物、独立消费验证、native 与传递依赖检查及 A01～A08，涉及全文。前置 T29 / T30 DONE，基线常规 752 / WebDAV 43；T31 **TODO（已安排）**，本轮仅准备任务文档，不修改实现或构建配置。
+- 完成六个必要模块（common、vfs/api、vfs/core、vfs/storage、vfs/persistence、vfs/runtime）的 Maven 发布配置，目标限定于项目内本地仓库 `.local/sdk-repository/`；
+- 建立独立最小 JVM 消费工程（`tools/validation/t31-consumer`），通过 Maven 坐标依赖成功执行公开 Runtime 完整生命周期及重开一致性验证；
+- 交付一键打包与消费验证脚本 `./scripts/t31-consumer-check`；
+- 更新 README.md、SDK_使用指南.md 以及交付/使用/验收文档，主工程常规 752 例与 WebDAV 43 例全绿。
 
-状态：**TODO（已安排）**。开发 Agent 开始后改 IN_PROGRESS，完成自测后 IN_REVIEW，由独立复核方确认 DONE；M6 仍 IN_PROGRESS，不开始 T32，不推送、打标签或公开发布。
+状态：**IN_REVIEW**。开发自测已全部完成并闭环，等待独立复核；M6 仍 IN_PROGRESS，不开始 T32，不推送、打标签或公开发布。
 
 依据：[开发计划](../../开发计划与进度.md)、[T30 收口复核](../m6-t30/T30_架构与技术复核.md#7-484a49d-收口复核2026-10-13)、[SDK 使用指南](../../vfs/SDK_使用指南.md)。保留当前未提交的 T30 复核文档，不覆盖或将其误记为本次实现。
 

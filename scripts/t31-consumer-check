@@ -1,0 +1,13 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+echo "=== [1/2] Publishing SDK artifacts to project-local repository (.local/sdk-repository) ==="
+rm -rf "$ROOT/.local/sdk-repository"
+"$ROOT/scripts/dev" gradle publishMavenJavaPublicationToProjectLocalRepository
+
+echo "=== [2/2] Running independent JVM consumer validation ==="
+"$ROOT/tools/validation/t31-consumer/run-consumer.sh" run
+
+echo "=== T31 SDK packaging and consumer validation SUCCESS ==="

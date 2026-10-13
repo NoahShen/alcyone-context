@@ -1,6 +1,10 @@
 # AGENTS.md
 
-## 本次修改（2026-10-13，安排 T31）
+## 本次修改（2026-10-13，T31 开发完成，状态 IN_REVIEW）
+
+- 完成 [T31 SDK 打包与本地消费开发及验收](docs/tasks/m6-t31/T31_SDK打包与本地消费开发及验收.md)：为 6 个必要模块配置 Maven 本地发布（`.local/sdk-repository/`，版本 `0.1.0-SNAPSHOT`），排除测试与根聚合；建立独立最小 JVM 消费工程（`tools/validation/t31-consumer`），仅通过坐标依赖闭环验证公开 Runtime 完整生命周期及重开一致性；新增 `./scripts/t31-consumer-check`；更新 README.md 与 SDK 使用指南；主工程常规 752 例、WebDAV 43 例全绿，源码与 XML 差额为零。T31 转为 **IN_REVIEW**，M6 保持 IN_PROGRESS，不开始 T32。
+
+## 历史修改（2026-10-13，安排 T31）
 
 - 新增 T31 SDK 打包与本地消费开发及验收入口，覆盖六模块本地产物、独立 JVM 消费、native/传递依赖、私有工具链及 A01～A08。T30 DONE，T31 TODO（已安排），M6 IN_PROGRESS，基线 752 / WebDAV 43；本轮仅准备文档，不修改代码/构建、不发布、不开始 T32。涉及任务入口与当前安排。
 
