@@ -1,6 +1,9 @@
 # Alcyone VFS SDK 使用指南
 
-> 本次修改（2026-10-13，T30 复核修复 R1～R5）：更正 NodeMetadata 清空方式为 NodeMetadata()；修复事件等待示例（区分新建与覆盖场景、按 URI 与事件类型匹配、增加超时边界、删除无返回句柄的 val subscription、标明 suspend 上下文与 import）；对齐 storageKey 归并规则与本地根/状态库路径约束；补充 list 物理项与配置目录入口合并语义；补充 move 原生与跨 Mount 复制删除编排与单文件内存上限；纠正限额配置命名为 defaultReadMaxBytes / defaultWriteMaxBytes，补充 ReadOptions 收紧语义与流默认无总量上限；纠正 Consumer 异常分层语义（EventDispatcher 重抛取消，AsyncEventNotifier 隔离记录）；纠正 SQLite 单连接机制与宽限期等待 inFlight.done 语义；收窄凭据脱敏范围说明；精简术语。
+> 本次修改（2026-10-13，T30 复核第 6 节修复收尾）：
+> - §2.2 配置解析冲突错误码更正为 INVALID_ARGUMENT（与重开 Mount 身份 CONFLICT 区分）；
+> - §3.1 移动语义更正：目录移动发射单条根级 DIRECTORY_MOVED，文件移动发射 FILE_MOVED；删除“原生原子 rename”表述，说明能力位仅表示后端支持原生操作，不承诺 Storage 与 SQLite 联合原子性，亦不对任意 WebDAV 服务提供原子承诺；同 Mount 无原生能力也走复制回退（已交付 Adapter 目录原生能力均为 false）；复制路径单文件受读写限额约束；更正“确认存在”为按既有实现核对可用长度/目录集合后删源；
+> - §6、§7 补充说明：代码示例均位于 suspend 函数内、假定 vfs 已创建且 targetUri 尚不存在；补齐分发器不捕获 Error 说明；关闭时序明确到期先发协作取消再等清理完成。
 
 本文档面向需要在源码工程中集成使用 Alcyone VFS 的开发者。当前版本仅支持在源码工程内直接调用，底层隐藏了 Local FS 与 WebDAV 的具体存储差异。
 
@@ -69,9 +72,9 @@ val config = VfsRuntimeConfig(
 
 ### 2.2 路径映射、约束与凭据保护边界
 - **逻辑路径到挂载相对路径**：例如逻辑 URI `alcyone://resources/docs/reports/2026.pdf`，挂载点为 `/resources/docs` 对应本地根 `/var/data/docs`，则实际对应物理文件 `/var/data/docs/reports/2026.pdf`。
-- **storageKey 归并与冲突**：配置中多个 MountConfig 允许使用相同的 `storageKey`，前提是它们指向完全相同的规范后端（归并为一个底层存储实例）；若同一 `storageKey` 指向了不同的本地物理目录或不同的 WebDAV endpoint/root，解析时直接抛出 `CONFLICT` 拒绝启动。
+- **storageKey 归并与冲突**：配置中多个 MountConfig 允许使用相同的 `storageKey`，前提是它们指向完全相同的规范后端（归并为一个底层存储实例）；若同一 `storageKey` 指向了不同的本地物理目录或不同的 WebDAV endpoint/root，配置解析直接抛出 `INVALID_ARGUMENT`（`VfsRuntimeConfig.resolve` 校验 `invalidArgument`）拒绝启动。这与重新打开已有状态库时的 Mount 身份冲突（`CONFLICT`）属于不同阶段的不同错误码。
 - **状态库位置约束**：本地挂载的物理根目录下**不能包含状态库文件**（避免扫描到底层自身状态文件）。两个目录可以相邻或位于同一父目录下。
-- **重开身份比对**：重新打开已有状态库时，已记录的挂载身份（key、后端类型、规范物理根）必须与当前配置完全匹配；远端规范目标（endpoint + root）重叠或 key 漂移将拒绝启动。
+- **重开身份比对**：重新打开已有状态库时，已记录的挂载身份（key、后端类型、规范物理根）必须与当前配置完全匹配；远端规范目标（endpoint + root）重叠或 key 漂移将拒绝启动（抛出 `CONFLICT`）。
 - **受管凭据保护**：WebDAV 密码在 `MountBackend.WebDav.toString()` 中脱敏为 `***`，身份标识串和状态库持久表中不含密码，认证失败等异常在管道日志中脱敏；系统**没有全局日志脱敏器**，EventDispatcher 会直接记录 Consumer 抛出的异常，宿主与 Consumer 自行负责自定义异常中的文本安全。
 
 ---
@@ -88,10 +91,12 @@ val config = VfsRuntimeConfig(
 | **状态查询** | `stat(uri, options)` | 查询属性。若底层物理存在但尚未在状态库登记，会触发**懒注册**（写入状态库并分配新 Node ID）。`includeStorage=false` 对已登记节点直接走逻辑库，未登记节点仍探查物理确认存在。 |
 | **节点逻辑查询**| `getNode(id)` | 纯逻辑查询，通过 Node ID 查属性。ID 不存在返回 `NOT_FOUND`，绝不扫描底层。 |
 | **目录列举** | `list(uri)` | 单层直接子项列举，不递归，不保证排序。合并物理直接子项与已配置的目录入口（同名配置入口优先）；不凭历史 Node 行列出物理已消失项，不批量登记未登记项（未登记项 `nodeId` 为 `null`）。 |
-| **文件/目录移动**| `move(source, target)`| 移动文件或目录。**保持原 Node ID 与 Metadata 连续性**。同 Mount 按 Adapter 原生能力选择（原生原子 rename），跨 Mount 执行“目标端写入/复制 -> 确认存在 -> 源端删除”编排。目录移动发射单条根级 `FILE_MOVED`/`DIRECTORY_MOVED` 事件，跨 Mount 目录移动中的单个文件读取仍受单文件读取限额约束。目标已存在直接拒绝。 |
+| **文件/目录移动**| `move(source, target)`| 移动文件或目录。**保持原 Node ID 与 Metadata 连续性**。同 Mount 按 Adapter 原生能力选择：若后端支持原生操作则调用原生移动，**无原生能力也走复制回退**（当前已交付 Adapter 的目录原生能力均为 `false`）。能力位仅表示后端支持原生操作，不承诺 Storage 与 SQLite 联合原子性，也不对任意 WebDAV 服务提供原子承诺。跨 Mount 或回退路径执行“目标端写入/复制 -> 确认存在（按实现核对可用长度/目录集合）-> 源端删除”编排。复制路径中单个文件受读/写限额约束。文件移动发射 `FILE_MOVED`；目录移动发射单条根级 `DIRECTORY_MOVED`。目标已存在直接拒绝。 |
 | **文件/目录删除**| `delete(uri, options)`| 默认非递归，目录非空返回 `DIRECTORY_NOT_EMPTY`；设置 `DeleteOptions(recursive = true)` 级联删除物理文件及相关全部已登记 Node。删除后原 Node ID 废弃；在原路径新建将分配全新 Node ID。 |
 
 ### 3.2 三种写入模式（`WriteOptions`）
+
+> **环境说明**：以下操作代码块均位于 `suspend` 函数体内，假定 `vfs` 实例已通过 `AlcyoneVfs.create(config)` 成功创建。
 
 写入操作使用 `write(uri, bytes, options)`，支持三种模式：
 
@@ -118,6 +123,8 @@ vfs.write(uri, content, WriteOptions(WriteMode.UPSERT))
 
 ## 4. Node 身份与 Metadata 机制
 
+> **环境说明**：以下代码块位于 `suspend` 函数体内，假定 `vfs` 已创建。
+
 - **Node ID**：UUIDv7 格式的全局唯一标识。与 URI 相对解耦——移动文件或重命名时，URI 改变，但 Node ID 保持不变；同路径删除后重建，会生成全新的 Node ID。
 - **Metadata 整体替换**：
   ```kotlin
@@ -138,6 +145,8 @@ vfs.write(uri, content, WriteOptions(WriteMode.UPSERT))
 ---
 
 ## 5. 大文件分块流式读取（`openStream`）
+
+> **环境说明**：以下代码块位于 `suspend` 函数体内，假定 `vfs` 已创建。
 
 对于大于内存缓冲限额（默认 16 MiB）的文件，必须使用 `openStream` 进行流式读取。流式读取不把完整文件载入内存，且不登记 Node、不发射事件。
 
@@ -175,6 +184,8 @@ VFS 支持进程内异步事件订阅。`subscribe` 函数返回 `Unit`（无取
 
 ### 6.1 等待事件的标准范式
 
+> **环境说明**：以下代码块位于 `suspend` 函数体内，假定 `vfs` 实例已创建，且前提为 `targetUri` 在底层与状态库中**尚不存在**（或传入 `WriteMode.CREATE_NEW` 确保首次新建）。
+
 在测试或协调场景中等待事件时，必须**在操作之前建立订阅**，明确区分**首次新建**（`FILE_CREATED`）与**覆盖写**（`FILE_WRITTEN`），匹配目标 URI 与类型，并设置超时边界（因为缓冲区满时可能丢弃事件）：
 
 ```kotlin
@@ -205,11 +216,11 @@ println("Received event: ${event.type} for ${event.uri}")
 
 ### 6.2 Consumer 异常分层与隔离边界
 1. **同事务后通知**：事件在 SQLite 事务持久化成功后投递；若事务回滚，绝不发射事件。
-2. **普通异常隔离**：Consumer 内部抛出的普通 `Exception` 会被内部分发循环捕获并记录日志，**不影响后续 Consumer，也不影响发起写入的调用方**。慢 Consumer 会导致分发 worker 延迟后续通知处理。
+2. **普通异常隔离**：Consumer 内部抛出的普通 `Exception` 会被内部分发循环捕获并记录日志，**不影响后续 Consumer，也不影响发起写入的调用方**。慢 Consumer 会导致分发 worker 延迟后续通知处理。分发器**不捕获 `Error`**（如 `VirtualMachineError`、`AssertionError` 等），严重系统错误将直接向上中断。
 3. **取消分层机制**：
    - 当 Consumer 抛出 `CancellationException` 时，底层的 `EventDispatcher` 会向外重抛；
    - 处于常驻运行状态的 `AsyncEventNotifier` worker 会记录该取消并继续消费处理后续队列事件（本次事件中排在后面的 Consumer 可能不再被调用）；
-   - 当分发器自身被 close 取消时，worker 协程才会正式退出。
+   - 仅当分发器自身在 VFS 关闭时被显式取消，worker 协程才会正式退出（不能推导 Error 或未受检致命错误也被隔离）。
 4. **有界队列与背压**：事件分发器内置固定容量（默认 256）的有界缓冲区。当突发事件撑满队列时，新产生的通知可能被丢弃（记录 WARN 日志）。丢通知不代表删除已持久化的事件记录。系统首版**不承诺可靠重试、消息 ACK、持久化重放或死信队列**。
 
 ---
@@ -229,10 +240,11 @@ try {
 
 ### 关闭时序与边界说明
 1. **停止接纳**：调用 `close()` 后，实例状态立即置为 closing，后续任何新操作均直接拒绝并抛出 `VfsErrorCode.CLOSED`。
-2. **在途等待（inFlight.done）**：
+2. **在途等待（inFlight.done）与超时取消**：
    - 宽限期 `closeGracePeriod` 等待的是**在途发起的操作任务（inFlight.done）**，**不等待**已经交出给调用方的遗留流自行读完；
    - 若当前没有任何在途操作，`close()` 会立即继续往下执行，**不会无故空等 30 秒**；
-   - 在途操作全部完成（或超时协作取消）后，Runtime 会**主动关闭所有尚未关闭的遗留流**；
+   - 若宽限期到期仍有在途操作未完，Runtime 会**先向未完成的在途任务发送协作取消信号**，**然后再等待清理收尾完成**（并非发出取消即刻释放资源）；
+   - 在途操作全部完成（或超时协作取消清理完毕）后，Runtime 会**主动关闭所有尚未关闭的遗留流**；
    - 最后按序关闭后台事件分发器、各个 Storage Adapter、释放单连接 SQLite 驱动，并释放文件独占锁。
 3. **方案④约束（重要）**：
    - `closeGracePeriod` 仅为在途协程协作取消的宽限期，**不是**底层原生网络/IO 请求的最长耗时上限。
