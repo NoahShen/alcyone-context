@@ -20,12 +20,19 @@ import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
+import org.slf4j.ILoggerFactory
 import org.slf4j.LoggerFactory
+import org.slf4j.event.Level
+import org.slf4j.helpers.AbstractLogger
+import org.slf4j.helpers.BasicMarkerFactory
+import org.slf4j.helpers.NOPMDCAdapter
+import org.slf4j.spi.SLF4JServiceProvider
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -249,43 +256,138 @@ class WebDavRealServerTest {
             val secretToken = "t28-secret-token-do-not-leak"
             val operationContext = "alcyone://resources/remote/t28-auth-logging-probe.txt"
 
-            // 1) 配置受管 WebDAV MountBackend.WebDav，使用独特标记的测试密码
-            val customConfig = config(password = secretToken)
+            // 1) 在测试范围安装真正的记录型 SLF4J Provider，捕获实际产生的日志输出
+            data class CapturedLog(
+                val level: Level,
+                val message: String,
+                val throwable: Throwable?,
+            )
 
-            // 2) 对公开 Vfs 执行操作触发真实 WebDAV 认证失败，捕获到真实 VfsException
-            val authFailure =
-                assertFailsWith<VfsException> {
-                    withVfs(customConfig) { vfs ->
-                        withTimeout(30_000) { vfs.read(uri("/t28-auth-logging-probe.txt")) }
+            val capturedLogs = mutableListOf<CapturedLog>()
+            val recordingLogger =
+                object : AbstractLogger() {
+                    override fun getFullyQualifiedCallerName(): String? = null
+
+                    override fun handleNormalizedLoggingCall(
+                        level: Level,
+                        marker: org.slf4j.Marker?,
+                        pattern: String?,
+                        arguments: Array<out Any>?,
+                        throwable: Throwable?,
+                    ) {
+                        val formatted =
+                            org.slf4j.helpers.MessageFormatter
+                                .arrayFormat(pattern, arguments, throwable)
+                                .message
+                        capturedLogs.add(CapturedLog(level, formatted, throwable))
+                    }
+
+                    override fun isTraceEnabled() = true
+
+                    override fun isTraceEnabled(marker: org.slf4j.Marker?) = true
+
+                    override fun isDebugEnabled() = true
+
+                    override fun isDebugEnabled(marker: org.slf4j.Marker?) = true
+
+                    override fun isInfoEnabled() = true
+
+                    override fun isInfoEnabled(marker: org.slf4j.Marker?) = true
+
+                    override fun isWarnEnabled() = true
+
+                    override fun isWarnEnabled(marker: org.slf4j.Marker?) = true
+
+                    override fun isErrorEnabled() = true
+
+                    override fun isErrorEnabled(marker: org.slf4j.Marker?) = true
+                }
+
+            val testProvider =
+                object : SLF4JServiceProvider {
+                    private val factory = ILoggerFactory { recordingLogger }
+
+                    override fun getLoggerFactory() = factory
+
+                    override fun getMarkerFactory() = BasicMarkerFactory()
+
+                    override fun getMDCAdapter() = NOPMDCAdapter()
+
+                    override fun getRequestedApiVersion() = "2.0.99"
+
+                    override fun initialize() {}
+                }
+
+            val stateField = LoggerFactory::class.java.getDeclaredField("INITIALIZATION_STATE")
+            stateField.isAccessible = true
+            val origState = stateField.get(null)
+
+            val providerField = LoggerFactory::class.java.getDeclaredField("PROVIDER")
+            providerField.isAccessible = true
+            val origProvider = providerField.get(null)
+
+            var stateModified = false
+            var providerModified = false
+
+            try {
+                stateField.set(null, 3)
+                stateModified = true
+                providerField.set(null, testProvider)
+                providerModified = true
+
+                // 2) 配置受管 WebDAV MountBackend.WebDav，使用独特标记的测试密码
+                val customConfig = config(password = secretToken)
+
+                // 3) 对公开 Vfs 执行操作触发真实 WebDAV 认证失败，捕获到真实 VfsException（未经手工剥离）
+                val authFailure =
+                    assertFailsWith<VfsException> {
+                        withVfs(customConfig) { vfs ->
+                            withTimeout(30_000) { vfs.read(uri("/t28-auth-logging-probe.txt")) }
+                        }
+                    }
+                assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, authFailure.code)
+
+                // 4) 将该真实异常未经任何剥离送入真实日志输出链路
+                val logger = LoggerFactory.getLogger(WebDavRealServerTest::class.java)
+                val logMessagePattern = "WebDAV operation failed for URI: {}"
+                logger.warn(logMessagePattern, operationContext, authFailure)
+
+                // 5) 正向断言：测试捕获器实际接收到了这条 WARN 日志记录与原生异常对象
+                assertEquals(1, capturedLogs.size, "Logger must have actually captured 1 log entry")
+                val record = capturedLogs.single()
+                assertEquals(Level.WARN, record.level)
+                assertTrue(
+                    record.message.contains(operationContext),
+                    "Actual captured log message must contain operation context",
+                )
+                assertSame(
+                    authFailure,
+                    record.throwable,
+                    "Actual captured log must receive the authentic auth failure exception",
+                )
+
+                // 6) 断言实际捕获到的日志消息文本及该异常的完整堆栈文本绝对不含配置的测试密码标记
+                assertFalse(
+                    record.message.contains(secretToken),
+                    "Actual captured log message must not contain secret token",
+                )
+                val fullFailureChainText = describeChain(authFailure)
+                assertFalse(
+                    fullFailureChainText.contains(secretToken),
+                    "Failure chain full text (message, toString, cause, suppressed, stackTraceToString) must not contain secret token: $fullFailureChainText",
+                )
+            } finally {
+                // 可靠恢复 SLF4J 静态字段
+                try {
+                    if (providerModified) {
+                        providerField.set(null, origProvider)
+                    }
+                } finally {
+                    if (stateModified) {
+                        stateField.set(null, origState)
                     }
                 }
-            assertEquals(VfsErrorCode.STORAGE_ACCESS_DENIED, authFailure.code)
-
-            // 3) 将该真实异常未经任何剥离传递给日志记录器进行 WARN 输出
-            val logger = LoggerFactory.getLogger(WebDavRealServerTest::class.java)
-            val logMessagePattern = "WebDAV operation failed for URI: {}"
-            val formattedLog =
-                org.slf4j.helpers.MessageFormatter
-                    .format(logMessagePattern, operationContext)
-                    .message
-            logger.warn(logMessagePattern, operationContext, authFailure)
-
-            // 4) 正向断言：日志包含操作上下文
-            assertTrue(
-                formattedLog.contains(operationContext),
-                "Log formatted message must contain operation context",
-            )
-
-            // 5) 断言日志格式化消息以及该异常的完整文本（message, toString, cause, suppressed, stackTraceToString）不含该凭据
-            assertFalse(
-                formattedLog.contains(secretToken),
-                "Log formatted message must not contain secret token",
-            )
-            val fullFailureChainText = describeChain(authFailure)
-            assertFalse(
-                fullFailureChainText.contains(secretToken),
-                "Failure chain full text (message, toString, cause, suppressed, stackTraceToString) must not contain secret token: $fullFailureChainText",
-            )
+            }
         }
 
     /** A06：正常关闭之后同一个状态库能再开，读写的事实还在（释放顺序沿用 T18）。 */

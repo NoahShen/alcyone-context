@@ -11,6 +11,47 @@ import java.io.File
  * 保证测试真正执行被测的实际构建逻辑；当修改 build.gradle.kts 逻辑时测试即时反馈。
  */
 class OpendalClassifierSelectionTest {
+    private fun runProcessWithTimeout(
+        command: List<String>,
+        directory: File,
+        timeoutSeconds: Long,
+    ): Result<String> {
+        val tempFile = File.createTempFile("opendal-proc", ".log")
+        return try {
+            val process =
+                ProcessBuilder(command)
+                    .directory(directory)
+                    .redirectOutput(tempFile)
+                    .redirectErrorStream(true)
+                    .start()
+
+            val finished =
+                try {
+                    process.waitFor(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (t: Throwable) {
+                    process.destroyForcibly()
+                    process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+                    throw t
+                }
+
+            if (!finished) {
+                process.destroyForcibly()
+                process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+                error("Process timed out after ${timeoutSeconds}s: ${command.joinToString(" ")}")
+            }
+
+            val output = tempFile.readText()
+            val exitCode = process.exitValue()
+            if (exitCode == 0) {
+                Result.success(output)
+            } else {
+                Result.failure(IllegalStateException(output))
+            }
+        } finally {
+            tempFile.delete()
+        }
+    }
+
     private fun resolveClassifierViaBuild(
         osName: String,
         osArch: String,
@@ -21,45 +62,24 @@ class OpendalClassifierSelectionTest {
                 ?: error("Could not find project root directory containing gradlew")
 
         val devScript = File(rootDir, "scripts/dev").canonicalPath
-        val process =
-            ProcessBuilder(
+        val command =
+            listOf(
                 devScript,
                 "gradle",
                 "-q",
                 ":vfs:storage:resolveOpendalClassifier",
                 "-PtargetOs=$osName",
                 "-PtargetArch=$osArch",
-            ).directory(rootDir)
-                .redirectErrorStream(true)
-                .start()
+            )
 
-        val output =
-            try {
-                val reader = process.inputStream.bufferedReader()
-                val text = reader.readText()
-                val finished = process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
-                if (!finished) {
-                    process.destroyForcibly()
-                    error("Gradle classifier resolution timed out for os='$osName', arch='$osArch'")
-                }
-                text
-            } catch (t: Throwable) {
-                process.destroyForcibly()
-                throw t
-            }
-        val exitCode = process.exitValue()
-
-        return if (exitCode == 0) {
-            val classifier =
-                output
-                    .lineSequence()
-                    .firstOrNull { it.startsWith("classifier=") }
-                    ?.substringAfter("classifier=")
-                    ?.trim()
-                    ?: error("classifier output not found in:\n$output")
-            Result.success(classifier)
-        } else {
-            Result.failure(IllegalStateException(output))
+        val runResult = runProcessWithTimeout(command, rootDir, 30)
+        return runResult.mapCatching { output ->
+            output
+                .lineSequence()
+                .firstOrNull { it.startsWith("classifier=") }
+                ?.substringAfter("classifier=")
+                ?.trim()
+                ?: error("classifier output not found in:\n$output")
         }
     }
 
@@ -96,5 +116,19 @@ class OpendalClassifierSelectionTest {
                 "Output should contain expected error message, but was:\n$message",
             )
         }
+    }
+
+    @Test
+    fun `subprocess timeout forcibly terminates hanging child process and reports timeout failure`() {
+        val rootDir = File(".").canonicalFile
+        val hungCommand = listOf("sh", "-c", "echo hanging-process-started; sleep 10")
+        val err =
+            org.junit.jupiter.api.assertThrows<IllegalStateException> {
+                runProcessWithTimeout(hungCommand, rootDir, timeoutSeconds = 1).getOrThrow()
+            }
+        assertTrue(
+            err.message?.contains("Process timed out after 1s") == true,
+            "Error message must indicate timeout: ${err.message}",
+        )
     }
 }

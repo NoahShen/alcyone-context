@@ -1,5 +1,17 @@
 # AGENTS.md
 
+## 本次修改（2026-10-13，T28 R2 日志捕获闭环与进程超时修复）
+
+- R2：在 `WebDavRealServerTest` 中升级真实 WebDAV 凭据错误日志捕获用例，安装测试专用 SLF4J Provider 闭环捕获实际 WARN 日志记录，正向断言上下文、异常对象及密码不泄露，并在 finally 中分别可靠恢复 `PROVIDER` 和 `INITIALIZATION_STATE` 静态字段；`EventDispatcherLogCaptureTest` 同样分别可靠恢复字段。
+- 超时修复：重构 `OpendalClassifierSelectionTest`，消除 `readText()` 对子进程挂起无界阻塞（重定向临时文件 + `waitFor(30s)` + 强杀），并增加受控挂起子进程超时强杀与报错测试（+1 例）。
+- 口径与文档订正：A05 **保持待补证**（已完成配置/身份/持久表/异常链核查，待本轮补齐真实日志捕获闭环后由复核方关闭）；验收记录 §6 的 Dispatcher 行收窄为 A04 普通异常与事件上下文日志证据；WebDAV 计数统一为 **43**。
+- 本地回归：`./scripts/check` 752 例、`./scripts/webdav-check` 43 例全绿，源码与 XML 差额为零。T28 保持 IN_REVIEW，M5 保持 IN_PROGRESS，不开始 T29。涉及全文。
+
+## 历史修改（2026-10-13，a4adb89 独立复核）
+
+- 更新 T28 当前结论：R2 真实认证异常已补，但日志仅手工格式化、无实际捕获，A05 仍待补证；子进程先 readText 再计时，超时保护未成立。R1 保持关闭，A03 待验证 / 范围决定。见 [复核第 7 节](docs/tasks/m5-t28/T28_架构与技术复核.md#7-a4adb89-修复复核2026-10-13)；此前“日志闭环通过 / 超时已落实”声明以本轮结论纠正。独立回归 751 / WebDAV 43 全通过，源码与 XML 差额零。T28 IN_REVIEW，M5 IN_PROGRESS，不开始 T29。
+
+
 ## 本次修改（2026-10-13，T28 R2 修复与证据收敛）
 
 - R2：在 `WebDavRealServerTest` 中扩充真实 WebDAV 凭据错误接入日志捕获用例（形成受管真实凭据配置 -> 实际异常产生 -> 实际日志记录闭环证据），断言日志产生包含操作上下文且完整文本链（message / toString / cause / suppressed / stackTraceToString）绝对不含独特测试密码；A05 标为“通过（已验证受管 WebDAV 真实凭据在配置、身份串、数据库持久表、真实异常链及实际日志中不泄露）”；清理“全链路凭据安全通过”等过度表述。
