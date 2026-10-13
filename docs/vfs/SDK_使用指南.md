@@ -1,5 +1,9 @@
 # Alcyone VFS SDK 使用指南
 
+## 本次修改（2026-10-13，复核方措辞收尾）
+
+- §2.2 分开配置重叠 INVALID_ARGUMENT 与重开身份 CONFLICT；§6.2 删除 worker 仅能因关闭退出的绝对表述，限定取消分支。
+
 > 本次修改（2026-10-13，T30 复核第 6 节修复收尾）：
 > - §2.2 配置解析冲突错误码更正为 INVALID_ARGUMENT（与重开 Mount 身份 CONFLICT 区分）；
 > - §3.1 移动语义更正：目录移动发射单条根级 DIRECTORY_MOVED，文件移动发射 FILE_MOVED；删除“原生原子 rename”表述，说明能力位仅表示后端支持原生操作，不承诺 Storage 与 SQLite 联合原子性，亦不对任意 WebDAV 服务提供原子承诺；同 Mount 无原生能力也走复制回退（已交付 Adapter 目录原生能力均为 false）；复制路径单文件受读写限额约束；更正“确认存在”为按既有实现核对可用长度/目录集合后删源；
@@ -74,7 +78,7 @@ val config = VfsRuntimeConfig(
 - **逻辑路径到挂载相对路径**：例如逻辑 URI `alcyone://resources/docs/reports/2026.pdf`，挂载点为 `/resources/docs` 对应本地根 `/var/data/docs`，则实际对应物理文件 `/var/data/docs/reports/2026.pdf`。
 - **storageKey 归并与冲突**：配置中多个 MountConfig 允许使用相同的 `storageKey`，前提是它们指向完全相同的规范后端（归并为一个底层存储实例）；若同一 `storageKey` 指向了不同的本地物理目录或不同的 WebDAV endpoint/root，配置解析直接抛出 `INVALID_ARGUMENT`（`VfsRuntimeConfig.resolve` 校验 `invalidArgument`）拒绝启动。这与重新打开已有状态库时的 Mount 身份冲突（`CONFLICT`）属于不同阶段的不同错误码。
 - **状态库位置约束**：本地挂载的物理根目录下**不能包含状态库文件**（避免扫描到底层自身状态文件）。两个目录可以相邻或位于同一父目录下。
-- **重开身份比对**：重新打开已有状态库时，已记录的挂载身份（key、后端类型、规范物理根）必须与当前配置完全匹配；远端规范目标（endpoint + root）重叠或 key 漂移将拒绝启动（抛出 `CONFLICT`）。
+- **重开身份比对**：重新打开已有状态库时，已记录的挂载身份（key、后端类型、规范物理根）必须与当前配置完全匹配；已有挂载身份不匹配时报 `CONFLICT`；同份配置中的远端规范目标（endpoint + root）重叠在配置校验阶段报 `INVALID_ARGUMENT`。
 - **受管凭据保护**：WebDAV 密码在 `MountBackend.WebDav.toString()` 中脱敏为 `***`，身份标识串和状态库持久表中不含密码，认证失败等异常在管道日志中脱敏；系统**没有全局日志脱敏器**，EventDispatcher 会直接记录 Consumer 抛出的异常，宿主与 Consumer 自行负责自定义异常中的文本安全。
 
 ---
@@ -220,7 +224,7 @@ println("Received event: ${event.type} for ${event.uri}")
 3. **取消分层机制**：
    - 当 Consumer 抛出 `CancellationException` 时，底层的 `EventDispatcher` 会向外重抛；
    - 处于常驻运行状态的 `AsyncEventNotifier` worker 会记录该取消并继续消费处理后续队列事件（本次事件中排在后面的 Consumer 可能不再被调用）；
-   - 仅当分发器自身在 VFS 关闭时被显式取消，worker 协程才会正式退出（不能推导 Error 或未受检致命错误也被隔离）。
+   - 在上述取消处理中，分发器自身因 VFS 关闭而被取消时，worker 会退出；这不排除未捕获的 Error 等异常使 worker 终止。
 4. **有界队列与背压**：事件分发器内置固定容量（默认 256）的有界缓冲区。当突发事件撑满队列时，新产生的通知可能被丢弃（记录 WARN 日志）。丢通知不代表删除已持久化的事件记录。系统首版**不承诺可靠重试、消息 ACK、持久化重放或死信队列**。
 
 ---
