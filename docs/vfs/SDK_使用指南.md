@@ -1,6 +1,12 @@
 # Alcyone VFS SDK 使用指南
 
-## 本次修改（2026-10-13，T31 SDK 打包与本地消费开发及验收）
+## 本次修改（2026-10-13，T31 复核修复 R1/R2）
+
+- §独立工程接入坐标与仓库配置：完善仓库排他配置（在 `mavenCentral` 中排除 SDK 命名空间 `com.github.noahshen.alcyone`），确保 SDK 产物仅从专属本地仓库解析；
+- 明确标注：Mac 发布产物的 native classifier 固定为 `osx-aarch_64`，不随消费主机自动切换；
+- 说明本任务发布命令仅发布至项目内目录 `.local/sdk-repository`，不写入全局 `~/.m2`。
+
+## 历史修改（2026-10-13，T31 SDK 打包与本地消费开发及验收）
 
 - 更新接入现状说明：从“仅源码工程内调用”更新为“已在 macOS arm64 上完成项目内本地仓库产物（0.1.0-SNAPSHOT）消费验证，尚未公开发布”；
 - 明确独立 JVM 消费工程的依赖坐标、本地仓库配置及 JDK 21 要求，给出最小 Gradle 消费声明范例。
@@ -31,7 +37,12 @@ repositories {
             includeGroup("com.github.noahshen.alcyone")
         }
     }
-    mavenCentral()
+    mavenCentral {
+        content {
+            // 排除 SDK group，保证仅从专属本地仓库解析 SDK 坐标
+            excludeGroup("com.github.noahshen.alcyone")
+        }
+    }
 }
 
 dependencies {
@@ -43,7 +54,8 @@ dependencies {
 
 #### 3. 运行环境与 Native 说明
 - **JDK/JVM 版本**：Java 21（推荐使用 Adoptium Temurin 21）；
-- **Native 平台**：当前阶段产物在 **macOS arm64** 环境下完成本地发布与闭环验证，包含 OpenDAL `osx-aarch_64` native 与 SQLite native；Linux 平台配置已保留但当前未实测，不作通用跨平台保证。
+- **Native 平台**：Mac 发布产物的 native classifier 固定为 `osx-aarch_64`，不随消费主机自动切换；SQLite native 在消费进程实测通过；Linux 平台构建逻辑已保留但本轮未实测，不作通用跨平台保证。
+- **发布目标范围**：本任务提供的发布命令仅发布至项目目录 `.local/sdk-repository`，不向全局 `~/.m2` 写入产物。
 
 ---
 

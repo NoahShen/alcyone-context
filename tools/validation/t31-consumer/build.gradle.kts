@@ -3,6 +3,11 @@ plugins {
     application
 }
 
+// Kotlin daemon 发现文件与临时状态限定在项目内
+System.setProperty("kotlin.daemon.options", "runFilesPath=${rootDir.resolve("../../../.local/tmp/kotlin-daemon")}")
+
+val versionCatalog = extensions.getByType<VersionCatalogsExtension>().named("libs")
+
 repositories {
     maven {
         name = "projectLocal"
@@ -11,17 +16,26 @@ repositories {
             includeGroup("com.github.noahshen.alcyone")
         }
     }
-    mavenCentral()
+    mavenCentral {
+        content {
+            excludeGroup("com.github.noahshen.alcyone")
+        }
+    }
 }
 
 kotlin {
     jvmToolchain(21)
+    @OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
+    kotlinDaemonJvmArgs = listOf(
+        "-Xmx1g",
+        "-Djava.io.tmpdir=${rootDir.resolve("../../../.local/tmp")}",
+    )
 }
 
 dependencies {
     implementation("com.github.noahshen.alcyone:alcyone-vfs-runtime:0.1.0-SNAPSHOT")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-    runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
+    implementation(versionCatalog.findLibrary("coroutines").get())
+    runtimeOnly("org.slf4j:slf4j-simple:${versionCatalog.findVersion("slf4j").get().requiredVersion}")
 }
 
 application {

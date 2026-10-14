@@ -1,5 +1,16 @@
 # AGENTS.md
 
+## 本次修改（2026-10-13，T31 复核修复 R1/R2）
+
+- 落实 R1 工具链隔离：为独立消费工程配置 `gradle.properties`（禁用 auto-detect / auto-download，受控 JVM 策略）、限定 Kotlin daemon runFilesPath 在 `.local/tmp/kotlin-daemon`，`run-consumer.sh` 引入 `install.sha256` 完整校验；
+- 落实 R2 SDK 仓库排他与依赖版本单一来源：消费工程通过 Version Catalog 读取第三方版本（协程、SLF4J），`mavenCentral` 排除 SDK group；
+- 落实建议优化：`ConsumerMain.kt` 补充流 SHA-256 哈希校验、移动事件目标 URI 断言与临时目录清理返回值检查；收窄发布目标表述为“本任务命令仅发布至项目目录”；明确 Mac 发布产物 native classifier 固定说明；
+- 状态保持 **IN_REVIEW**，双套套件 752 / 43 及消费工程端到端全绿，不开始 T32。
+
+## 历史修改（2026-10-13，T31 独立复核）
+
+- 4374785 发布与独立消费实跑通过，六模块元数据/产物来源核对正确；R1 消费工具链隔离、R2 SDK 仓库排他与第三方版本来源待修，详见 T31 架构与技术复核。T31 保持 IN_REVIEW，不开始 T32；涉及当前任务状态与验收结论。
+
 ## 本次修改（2026-10-13，T31 开发完成，状态 IN_REVIEW）
 
 - 完成 [T31 SDK 打包与本地消费开发及验收](docs/tasks/m6-t31/T31_SDK打包与本地消费开发及验收.md)：为 6 个必要模块配置 Maven 本地发布（`.local/sdk-repository/`，版本 `0.1.0-SNAPSHOT`），排除测试与根聚合；建立独立最小 JVM 消费工程（`tools/validation/t31-consumer`），仅通过坐标依赖闭环验证公开 Runtime 完整生命周期及重开一致性；新增 `./scripts/t31-consumer-check`；更新 README.md 与 SDK 使用指南；主工程常规 752 例、WebDAV 43 例全绿，源码与 XML 差额为零。T31 转为 **IN_REVIEW**，M6 保持 IN_PROGRESS，不开始 T32。
@@ -704,7 +715,7 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 33. [T29 完整用例回归与架构审查](docs/tasks/m6-t29/T29_完整用例回归与架构审查开发及验收.md)：**DONE**，a4e8af6 链条独立复核 R1～R3 关闭，沿用 752 / 43 通过证据，见 T29 复核第 7 节；不开始 T30 / T31。
 
 34. [T30 README 与 SDK 使用及运维文档开发及验收](docs/tasks/m6-t30/T30_README与SDK使用及运维文档开发及验收.md)：**DONE**，交付根 README、SDK 使用指南、运行维护说明及任务验收记录；样例与备份步骤以真实公共入口验证，不提前做 T31 发布配置，独立复核通过，见 T30 复核第 7 节。
-35. [T31 SDK 打包与本地消费开发及验收](docs/tasks/m6-t31/T31_SDK打包与本地消费开发及验收.md)：**TODO（已安排）**，项目内本地仓库与独立 JVM 产物消费，核对 native、传递依赖及公开流程；不远端发布，不开始 T32。
+35. [T31 SDK 打包与本地消费开发及验收](docs/tasks/m6-t31/T31_SDK打包与本地消费开发及验收.md)：**IN_REVIEW**，项目内本地仓库与独立 JVM 产物消费，核对 native、传递依赖及公开流程；不远端发布，不开始 T32。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 

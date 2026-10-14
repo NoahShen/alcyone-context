@@ -1,6 +1,13 @@
 # T31 SDK 打包与本地消费开发及验收
 
-## 本次修改（2026-10-13，T31 开发完成）
+## 本次修改（2026-10-13，T31 复核修复 R1/R2）
+
+- 补齐消费工程工具链隔离：增加 `gradle.properties`（禁用 auto-detect / auto-download，配置受控 JVM 参数）、限定 Kotlin daemon runFilesPath 在 `.local/tmp/kotlin-daemon`，并在 `run-consumer.sh` 中复用 `install.sha256` 清单校验；
+- 落实 SDK 仓库排他与依赖版本单一来源：消费工程通过 Version Catalog 读取第三方库版本，`mavenCentral` 排除 SDK group；
+- 补充分块 openStream 的 SHA-256 哈希比对、移动事件目标 URI 断言与临时目录清理返回值检查；
+- 明确标注 Mac 发布产物 native classifier 为 `osx-aarch_64` 固定，收窄发布目标为“本任务命令仅发布至项目目录”。
+
+## 历史修改（2026-10-13，T31 开发完成）
 
 - 完成六个必要模块（common、vfs/api、vfs/core、vfs/storage、vfs/persistence、vfs/runtime）的 Maven 发布配置，目标限定于项目内本地仓库 `.local/sdk-repository/`；
 - 建立独立最小 JVM 消费工程（`tools/validation/t31-consumer`），通过 Maven 坐标依赖成功执行公开 Runtime 完整生命周期及重开一致性验证；

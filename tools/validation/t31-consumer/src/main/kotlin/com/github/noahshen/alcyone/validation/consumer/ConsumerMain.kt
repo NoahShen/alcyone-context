@@ -16,9 +16,7 @@ import com.github.noahshen.alcyone.context.vfs.runtime.VfsRuntimeConfig
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import java.io.File
 import java.nio.file.Files
-import java.nio.file.Path
 import java.security.MessageDigest
 
 fun main() = runBlocking {
@@ -37,9 +35,9 @@ fun main() = runBlocking {
                 MountConfig(
                     vfsPath = VfsPath.parse("/workspace/files"),
                     storageKey = "local-storage",
-                    backend = MountBackend.LocalFs(storageRoot)
-                )
-            )
+                    backend = MountBackend.LocalFs(storageRoot),
+                ),
+            ),
         )
 
         val persistentFileUri = VfsUri.parse("alcyone://workspace/files/reopen-target.txt")
@@ -49,6 +47,9 @@ fun main() = runBlocking {
         val persistentExpectedContent = "persistent data across reopen 2026".toByteArray(Charsets.UTF_8)
         val persistentMetadata = NodeMetadata(setOf("doc", "persistent"), "Reopen Retention Note")
         var persistentNodeId: com.github.noahshen.alcyone.context.vfs.NodeId? = null
+
+        val ephemeralExpectedContent = "ephemeral initial content".toByteArray(Charsets.UTF_8)
+        val expectedEphemeralHash = MessageDigest.getInstance("SHA-256").digest(ephemeralExpectedContent)
 
         // --- PHASE 1: 首次启动与生命周期完整覆盖 ---
         println("[t31-consumer] Phase 1: create Runtime and walk full lifecycle...")
@@ -70,7 +71,7 @@ fun main() = runBlocking {
             val persistentRecord = vfs1.write(
                 uri = persistentFileUri,
                 content = persistentExpectedContent,
-                options = WriteOptions(mode = WriteMode.CREATE_NEW)
+                options = WriteOptions(mode = WriteMode.CREATE_NEW),
             )
             persistentNodeId = persistentRecord.id
             vfs1.setMetadata(persistentRecord.id, persistentMetadata)
@@ -79,8 +80,8 @@ fun main() = runBlocking {
             // write (CREATE_NEW) 临时节点
             val ephemeralRecord = vfs1.write(
                 uri = ephemeralFileUri,
-                content = "ephemeral initial content".toByteArray(Charsets.UTF_8),
-                options = WriteOptions(mode = WriteMode.CREATE_NEW)
+                content = ephemeralExpectedContent,
+                options = WriteOptions(mode = WriteMode.CREATE_NEW),
             )
             val writtenEvent = withTimeout(10_000) { writeDeferred.await() }
             check(writtenEvent.nodeId == ephemeralRecord.id) {
@@ -123,11 +124,15 @@ fun main() = runBlocking {
                     totalStreamed += readBytes
                 }
             }
-            check(totalStreamed == "ephemeral initial content".toByteArray(Charsets.UTF_8).size.toLong()) {
+            check(totalStreamed == ephemeralExpectedContent.size.toLong()) {
                 "Streamed total bytes mismatch"
             }
+            val actualStreamHash = digest.digest()
+            check(actualStreamHash.contentEquals(expectedEphemeralHash)) {
+                "Streamed SHA-256 mismatch against expected content hash"
+            }
 
-            // 8. move (验证 Node ID 与 Metadata 保持)
+            // 8. move (验证 Node ID、Metadata 保持与事件目标)
             val moveResult = vfs1.move(source = ephemeralFileUri, target = movedFileUri)
             check(moveResult.id == ephemeralRecord.id) { "Move did not preserve Node ID" }
             val movedStat = vfs1.stat(movedFileUri)
@@ -139,6 +144,9 @@ fun main() = runBlocking {
 
             val movedEvent = withTimeout(10_000) { moveDeferred.await() }
             check(movedEvent.nodeId == ephemeralRecord.id) { "Move event Node ID mismatch" }
+            check(movedEvent.uri == movedFileUri) {
+                "Move event target URI mismatch: expected $movedFileUri, got ${movedEvent.uri}"
+            }
 
             // 9. delete
             vfs1.delete(movedFileUri)
@@ -184,6 +192,9 @@ fun main() = runBlocking {
 
         println("[t31-consumer] ALL VERIFICATION ASSERTIONS PASSED SUCCESSFULLY!")
     } finally {
-        tempDir.toFile().deleteRecursively()
+        val deleted = tempDir.toFile().deleteRecursively()
+        if (!deleted) {
+            println("[t31-consumer] WARNING: Temporary directory clean-up failed for: $tempDir")
+        }
     }
 }
