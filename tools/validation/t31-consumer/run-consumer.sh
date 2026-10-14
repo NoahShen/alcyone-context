@@ -7,7 +7,7 @@ CONSUMER_DIR="$ROOT/tools/validation/t31-consumer"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
-# Verified targets: macOS arm64, Linux x64, Linux arm64.
+# Recognizable toolchain platforms: macOS arm64, Linux x64, Linux arm64 (verified on macOS arm64).
 PLATFORM="$(uname -s)/$(uname -m)"
 case "$PLATFORM" in
     Darwin/arm64) JDK_OS=mac; JDK_ARCH=arm64 ;;

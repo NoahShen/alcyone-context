@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## 本次修改（2026-10-14，T31 修复独立复核）
+
+- e9c54ff / d0bbf0a：R1 工具链隔离关闭，R2 仓库排他与库版本来源已落实，仅消费工程 Kotlin 插件仍硬编码 2.2.21 待修。独立一键消费与 clean 编译/运行通过；详见 T31 架构与技术复核第 6 节。T31 IN_REVIEW，不开始 T32；涉及当前结论与任务入口。
+
 ## 本次修改（2026-10-13，T31 复核修复 R1/R2）
 
 - 落实 R1 工具链隔离：为独立消费工程配置 `gradle.properties`（禁用 auto-detect / auto-download，受控 JVM 策略）、限定 Kotlin daemon runFilesPath 在 `.local/tmp/kotlin-daemon`，`run-consumer.sh` 引入 `install.sha256` 完整校验；
