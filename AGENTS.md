@@ -1,6 +1,12 @@
 # AGENTS.md
 
-## 本次修改（2026-10-14，安排 T32）
+## 本次修改（2026-10-14，T32 开发完成，状态 IN_REVIEW）
+
+- 完成 [T32 首版交付记录与后续需求整理及验收](docs/tasks/m6-t32/T32_首版交付记录与后续需求整理及验收.md)：交付面向接入者的《首版交付记录》（`docs/vfs/首版交付记录.md`）与面向演进规划的《后续需求清单》（`docs/vfs/后续需求清单.md`）；更新 AGENTS 当前工程指引与状态；归档 A01～A08 及 M0～M6 完成证据核对表。
+- 依次实跑并通过常规 752 例（`./scripts/check`）、真实 WebDAV 43 例（`./scripts/webdav-check`）及独立最小 JVM 消费工程（`./scripts/t31-consumer-check`），源码 @Test 与 XML 差额严格为零；生产代码与测试代码零变更。
+- T32 转为 **IN_REVIEW**，M6 保持 **IN_PROGRESS**，等待独立复核；不自动启动扩展任务，不进行公开发布。
+
+## 历史修改（2026-10-14，安排 T32）
 
 - 新增 T32 首版交付记录与后续需求整理任务，明确交付范围、证据归档、AGENTS 当前指引更新及 A01～A08。T31 DONE，T32 TODO（已安排），M6 IN_PROGRESS，基线 752 / WebDAV 43；本轮仅准备文档。涉及任务入口与当前安排，不自动启动扩展或公开发布。
 
@@ -729,14 +735,14 @@ Alcyone Context 是 Personal Agent Framework 的长期 Context 基础设施，�
 34. [T30 README 与 SDK 使用及运维文档开发及验收](docs/tasks/m6-t30/T30_README与SDK使用及运维文档开发及验收.md)：**DONE**，交付根 README、SDK 使用指南、运行维护说明及任务验收记录；样例与备份步骤以真实公共入口验证，不提前做 T31 发布配置，独立复核通过，见 T30 复核第 7 节。
 35. [T31 SDK 打包与本地消费开发及验收](docs/tasks/m6-t31/T31_SDK打包与本地消费开发及验收.md)：**DONE**，项目内本地仓库与独立 JVM 产物消费，核对 native、传递依赖及公开流程；不远端发布，T32 已按用户要求安排。
 
-36. [T32 首版交付记录与后续需求整理及验收](docs/tasks/m6-t32/T32_首版交付记录与后续需求整理及验收.md)：**TODO（已安排）**，整理首版本地交付、验证证据、已接受限制及后续需求，更新当前工程指引；独立复核通过后收口 M6，不自动启动扩展或远端发布。
+36. [T32 首版交付记录与后续需求整理及验收](docs/tasks/m6-t32/T32_首版交付记录与后续需求整理及验收.md)：当前 **IN_REVIEW**，交付首版交付记录与后续需求清单，更新工程指引并归档 M0～M6 里程碑核对表；双套测试 752/43 及独立消费全绿，等待独立复核闭环。
 
 开发任务与进度统一记录在 [开发计划与进度](docs/开发计划与进度.md)。开始开发前核实任务依赖；完成后更新状态、负责人和验收证据。计划中的待定决策与建议不代表已冻结契约。
 
 
 处理文档差异时：
 
-- 工程结构采用搭建说明中的 `vfs/api`、`vfs/core` 等划分，技术设计已同步；独立发布策略尚未确定。
+- 工程结构采用 `common`、`vfs/api`、`vfs/core`、`vfs/storage`、`vfs/persistence`、`vfs/runtime` 六模块划分，已落实本地 Maven 发布（`.local/sdk-repository/`）与独立 JVM 消费验证闭环；正式远端发布（Maven Central）策略作为后续工程候选 E09，首版尚未公开发布。
 - VFS 公共接口以已通过的 T01 为设计基线；其明确交给后续任务的细节仍未冻结。T02 具体操作规则也已通过审阅，优先于早期总体文档中未展开的示意；T03 简化后的事务与失败报告规则也已确认，操作恢复和可靠消费延后。
 - T01 第三轮已确认：VFS API 仅接收文件操作参数；Context System 负责 Agent 目录分配与访问范围。保留 VfsEntry / NodeInfo；详细接口见已审阅通过的 [公共契约基线](docs/vfs/VFS_公共契约草案_v0.1.md)。
 - `docs/memory(旧文档-Alcyone仅作为memory系统的设计)/` 是旧 Memory-only 系统的历史资料。其 TypeScript 技术栈、HTTP API、Memory ID、写入顺序及 SQLite 可重建等规则，不适用于当前 VFS。
@@ -790,7 +796,7 @@ OpenDAL 以 JVM 依赖嵌入运行，无需独立服务；构建发布时需处�
 
 ### 路径、身份与目录
 
-- `memory` / `resources` 是顶级命名空间示例，不是 API 白名单。VfsUri / VfsPath 仅校验路径语法，保留所有路径段的大小写；命名空间由后续 Runtime 配置提供。
+- `memory` / `resources` 是顶级命名空间示例，不是 API 白名单。VfsUri / VfsPath 仅校验路径语法，保留所有路径段的大小写；命名空间由 Runtime 挂载配置（`VfsMountConfig`）提供。
 - 区分 `VfsUri`、`VfsPath` 和 `StoragePath`。例如 `alcyone://resources/medical/ct/a.dcm` 对应逻辑路径 `/resources/medical/ct/a.dcm`；挂载 `/resources/medical/` 后，Storage Path 为 `ct/a.dcm`。
 - URI 表示位置，Node ID 表示身份。移动、重命名和跨 Mount 移动均保持同一个 Node ID。
 - 挂载路由按已解码的完整路径段做最长前缀匹配（T09）：逻辑路径无法经路由逃出挂载相对路径，但这不代表已抵御真实文件系统的符号链接或外部并发替换。
