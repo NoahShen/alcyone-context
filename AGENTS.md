@@ -1,5 +1,16 @@
 # AGENTS.md
 
+## 本次修改（2026-10-14，T32 复核修复 R1～R3）
+
+- 落实 T32 独立复核意见 R1～R3 及建议优化：
+  - R1：删除不存在的 `VfsMountConfig`，纠正为 `VfsRuntimeConfig.namespaces` 与 `mounts: List<MountConfig>`，挂载路由为最长完整路径段匹配；
+  - R3：更新“开发与验证”末段过期指引，彻底删除 227/461 例及“Runtime 编排与 SDK 入口尚未实现，不得声称 SDK 文件操作已验收”历史残留，更新为 M0～M6 全量开发已完成、常规 752 / WebDAV 43 全绿、六模块本地打包发布与独立 JVM 消费已闭环验证，提供 check、webdav-check、t31-consumer-check 三个有效验证入口；
+- 涉及当前工程指引与语义说明，生产代码与正式测试零改动。
+
+## 历史修改（2026-10-14，0ee2b37 独立复核）
+
+- 本轮独立常规 752 / WebDAV 43 与本地消费验证通过，源码/XML 差额零；R1 接口与保证范围、R2 环境/证据归档、R3 当前工程指引待修。详见 T32 架构与技术复核第 2 节；T32 IN_REVIEW，M6 IN_PROGRESS，不启动扩展或公开发布。涉及当前结论与验收入口，生产代码未改动。
+
 ## 本次修改（2026-10-14，T32 开发完成，状态 IN_REVIEW）
 
 - 完成 [T32 首版交付记录与后续需求整理及验收](docs/tasks/m6-t32/T32_首版交付记录与后续需求整理及验收.md)：交付面向接入者的《首版交付记录》（`docs/vfs/首版交付记录.md`）与面向演进规划的《后续需求清单》（`docs/vfs/后续需求清单.md`）；更新 AGENTS 当前工程指引与状态；归档 A01～A08 及 M0～M6 完成证据核对表。
@@ -796,7 +807,7 @@ OpenDAL 以 JVM 依赖嵌入运行，无需独立服务；构建发布时需处�
 
 ### 路径、身份与目录
 
-- `memory` / `resources` 是顶级命名空间示例，不是 API 白名单。VfsUri / VfsPath 仅校验路径语法，保留所有路径段的大小写；命名空间由 Runtime 挂载配置（`VfsMountConfig`）提供。
+- `memory` / `resources` 是顶级命名空间示例，不是 API 白名单。VfsUri / VfsPath 仅校验路径语法，保留所有路径段的大小写；命名空间由 Runtime 配置（`VfsRuntimeConfig.namespaces`）定义，各挂载项由 `mounts: List<MountConfig>` 提供。
 - 区分 `VfsUri`、`VfsPath` 和 `StoragePath`。例如 `alcyone://resources/medical/ct/a.dcm` 对应逻辑路径 `/resources/medical/ct/a.dcm`；挂载 `/resources/medical/` 后，Storage Path 为 `ct/a.dcm`。
 - URI 表示位置，Node ID 表示身份。移动、重命名和跨 Mount 移动均保持同一个 Node ID。
 - 挂载路由按已解码的完整路径段做最长前缀匹配（T09）：逻辑路径无法经路由逃出挂载相对路径，但这不代表已抵御真实文件系统的符号链接或外部并发替换。
@@ -866,4 +877,4 @@ VfsUri / 参数校验 → VfsPath → Mount / StoragePath → 存储约束检查
 - 正常关闭后重启可读取已提交的 SQLite 状态，不要求修复中断操作，事件对应成功变更，Consumer 失败不影响已完成操作。
 - 通过 Runtime 组合真实 SQLite 与 Local FS / WebDAV 的集成行为。
 
-T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。当前 `common` / `vfs/api` / `vfs/core` / `vfs/persistence` 共 227 个单元测试通过（T11 交付后，180 → 227，其中 `vfs/persistence` 47 个）；T06 的 R1～R5 边界复核与完整构建均通过。状态库已实现并用真实 SQLite 验证；Local FS Adapter 已独立验收通过（T12 DONE，38394d1，R1～R7 全部关闭），storage 136 个正式测试，T12 基线 363；T13 Registry 已验收；T14 250c0bd 独立复核通过，DONE，R1～R4 全部关闭。当前正式测试 461（common 10、api 65、core 182、persistence 47、storage 136、integration-tests 21），独立 scripts/check 全绿；T15 前置已满足。Runtime 编排与 SDK 入口尚未实现，不得声称 SDK 文件操作已验收。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。
+T05 构建骨架已复核通过：使用 `./scripts/dev bootstrap` 准备项目工具链，`./scripts/dev gradle clean build --console=plain` 构建；完整命令及证据见 T05 使用说明与验收记录。历史阶段基线（T11: 227 例，T12: 363 例，T13: 419 例，T14: 461 例）均已在各任务复核记录中归档。当前 M0～M6 全量核心开发已完成，常规回归套件 `./scripts/check`（752 例）与真实 WebDAV 集成套件 `./scripts/webdav-check`（43 例）持续全绿，六模块本地打包发布（`0.1.0-SNAPSHOT` 至 `.local/sdk-repository/`）与独立最小 JVM 消费工程（`./scripts/t31-consumer-check`，退出码 0）已闭环端到端验证。仅修改文档时检查路径引用与设计一致性即可；交付时说明修改内容、验证结果及未验证事项。
