@@ -8,10 +8,13 @@ uuid = "6.1.1"
 coroutines = "1.10.2"
 serialization = "1.9.0"
 slf4j = "2.0.17"
+cron-utils = "9.2.1"
 junit = "5.11.4"
 
 [libraries]
+cron-utils = { module = "com.cronutils:cron-utils", version.ref = "cron-utils" }
 coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 uuid = { module = "com.github.f4b6a3:uuid-creator", version.ref = "uuid" }
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }

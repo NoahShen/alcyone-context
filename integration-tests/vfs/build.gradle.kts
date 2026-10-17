@@ -9,6 +9,7 @@ dependencies {
     testImplementation(project(":vfs:core"))
     testImplementation(project(":vfs:persistence"))
     testImplementation(project(":vfs:storage"))
+    testImplementation(project(":vfs:git-backup"))
     testImplementation(libs.slf4j.api)
     testImplementation(libs.kotlin.test)
     testImplementation(platform(libs.junit.bom))

@@ -81,6 +81,7 @@ subprojects {
         ":vfs:storage" to "alcyone-vfs-storage",
         ":vfs:persistence" to "alcyone-vfs-persistence",
         ":vfs:runtime" to "alcyone-vfs-runtime",
+        ":vfs:git-backup" to "alcyone-vfs-git-backup",
     )
 
     val artifactName = publishableArtifacts[path]
