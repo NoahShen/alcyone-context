@@ -1,0 +1,42 @@
+{
+  "evaluationVersion": "cm2-extraction-v1",
+  "prompt": {
+    "version": "v1",
+    "resource": "context/core/src/main/resources/prompts/extraction-v1.md",
+    "sha256": "56d3278f4613499170d0cde9a06fb757ae45637b9579040c521289715849b2c8"
+  },
+  "schema": {
+    "version": "v1",
+    "resource": "context/core/src/main/resources/prompts/extraction-schema-v1.json",
+    "sha256": "041e7916957c75f8128ca7f2e2d049322945a0051b68236d7b86ffb680d563b0"
+  },
+  "profile": {
+    "name": "extraction",
+    "model": "<offline-fake>",
+    "jsonMode": "JSON_OBJECT",
+    "contextWindowTokens": 64000,
+    "apiKey": "<redacted>"
+  },
+  "task": {
+    "task": "EXTRACTION",
+    "maxInputTokens": 12000,
+    "maxOutputTokens": 3000
+  },
+  "samples": {
+    "file": "extraction.jsonl",
+    "version": "samples-v1",
+    "count": 4,
+    "synthetic": true,
+    "containsPersonalData": false
+  },
+  "fakeResults": {
+    "file": "results-fake-v1.json",
+    "kind": "offline-fake",
+    "semanticQualityEvaluated": false
+  },
+  "realModelResults": {
+    "file": "results-real-model.md",
+    "status": "not-run",
+    "reason": "CT12 未获授权真实模型/付费评测；不得以 Fake 结果冒充"
+  }
+}

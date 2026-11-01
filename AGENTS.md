@@ -1,5 +1,402 @@
 # AGENTS.md
 
+## 本次修改（2026-10-30，CT12 DONE，CM2 全部完成）
+
+- Architect 复核 CT12 B1+B2：**CT12 APPROVED / DONE；CM2（CT08～CT12）全部 DONE；CT13 不启动**。方案 A 测试级 `vfs.runtime` 依赖获批准（生产 compileClasspath vfs 0）。
+- 证据保持：core 43 / runtime 307 / persistence 176 / server 30 / integration-context 18 / 其他 VFS 模块合计 **1441=1441**，`./scripts/check` exit 0（131 tasks）、81 基线 all OK、vfs diff 空、Core 无 Ktor、Schema 未变；B1 三例端到端与 B2 合成样本/版本归档、Fake 与真实模型结果分离（真实模型 not-run）。
+- CT13（Organization，CM3）不启动；B2 评测基线为 Fake，真实模型语义质量待后续授权里程碑；仍无 git 写操作与发布。
+
+## 本次修改（2026-10-30，CT12 B1/B2 初验通过，提交 Architect 裁定）
+
+- CT12 B1 Worker 新增 3 文件：`integration-tests/context/build.gradle.kts` 仅加测试级 `vfs.runtime`（方案 A，生产 compileClasspath vfs 0）、`ExtractionHttpStub.kt`、`ExtractionEndToEndTest.kt`；3 例真实 Runtime/SQLite + Fake LLM 端到端（失败后 Trigger 继续、窗口外 Pending 不变、零记忆）。
+- Lead 独立全量：`./scripts/check` exit 0（131 tasks，2m5s）、14 模块 1441=1441、81 基线 all OK、vfs diff 空、Core 无 Ktor、Schema 未变；B2 完成 4 条合成脱敏样本、Prompt/Schema/Profile/样本版本与 Fake/真实模型结果分离归档（真实模型明确 not-run）。
+- 已提交 Architect 裁定 CT12 DONE；CT13 未启动；无 git 操作与发布。详见 `docs/context/tasks/cm2-ct12/B1_Lead初验.md`、`B2_评估基线与版本归档.md`。
+
+## 本次修改（2026-10-30，CT11 DONE，CT12 B1 集成测试派发）
+
+- Architect 复核 CT11 B3/生产接线：APPROVED / DONE；`./scripts/check` 131 tasks、14 模块 1438=1438、81 基线、Core/schema 通过；CT12 放行。
+- 落 `docs/context/milestones/cm2/CT12_任务书.md` 与 `docs/context/tasks/cm2-ct12/B1_委派单.md`，派发 Worker `10264b13`（message `66c51976`）：CT12 B1 只新增 `integration-tests/context` 的 Fake LLM HTTP stub + 端到端测试（失败后 Trigger 继续、窗口外 Pending 不变、零记忆），真实 Runtime/SQLite；不改生产/现有测试/SQL/依赖；不启动 CT13。
+- CT12 未标 DONE；无 git 操作与发布。样本/版本归档（B2）待 B1 通过后由 Lead 完成。
+- CT12 B1 首次因 `integration-tests/context` testCompileClasspath 无 VFS 类型、公共 Factory 无法编译而停下；Lead 授权方案 A：仅在该模块增加一行 `testImplementation(projects.vfs.runtime)`（测试级、仓库内模块、生产依赖图不变），已重新派发（message `67ae9693`）。待 Architect 复核确认该测试级依赖。
+
+## 本次修改（2026-10-30，CT11 B3 初验通过，提交 Architect 裁定）
+
+- B3 按 Architect 确认的“合法 extraction 绑定才建 pipeline”口径完成：有 EXTRACTION Task + Profile + JSON_SCHEMA/JSON_OBJECT 时构造真实 Runner/Pipeline；无 LLM/非法绑定保留 LLM client 生命周期（CT08 PROMPT_ONLY 4/4 通过）。
+- Lead 独立复跑 `./scripts/check` exit 0（131 tasks）、14 模块 1438=1438、81 基线 all OK、vfs diff 空、Core 无 Ktor、schema 探针 1/1；wiring 7 例（合法绑定真实提交、非法响应 pending/RUNNING、wakeup、无 LLM 零 pipeline、PROMPT_ONLY/无 Task 兼容、maxWindowIterations）。
+- 已提交 Architect 裁定 CT11 是否 DONE；CT12/CT13 未启动；无 git 操作与发布。详见 `docs/context/tasks/cm2-ct11/B3_Lead初验.md`。
+
+## 本次修改（2026-10-30，CT11 B2 DONE，B3 生产接线派发）
+
+- Architect 复核 B2：APPROVED / DONE（core 43、runtime 300、persistence 176、server 30；窗口一致性/单Turn/错误分类/唤醒/l上限通过）。
+- B3 按 D3/D14.3 只做公共 Factory/Impl 生产接线与全量验收：有合法 `context.llm` 时构造真实 Runner（Builder/LLM/Validator/Committer、maxWindowIterations=initialWindowTurns、OrganizationWakeup 注入）接 CT09 Pipeline；无 LLM 不建 pipeline；公共 create 签名不变。全量 `./scripts/check`、14 模块、81 基线、Core 无 Ktor、schema、日志/错误消费确认；不改 B1/B2/CT10/CT09 语义。
+- CT11 未标 DONE；CT12/CT13 未启动；无 git 操作与发布。
+- B3 首次接线因 CT08 `LlmRuntimeLifecycleTest`（PROMPT_ONLY + start 成功）与 Builder PROMPT_ONLY fail-fast 冲突而暂停回退；Architect 未授权改 CT08 测试。Lead 采用“合法 extraction 绑定（EXTRACTION Task + Profile + JSON_SCHEMA/JSON_OBJECT）才建 pipeline，否则保留通用 LLM 生命周期”口径，已重新派发 B3（message `59d06ecf`），并要求 wiring 测试覆盖 PROMPT_ONLY/无 Task 零 pipeline 与 CT08 全绿；待 Architect 复核确认该边界。
+- B3 Worker 首次派发（message `30cd71d5`）：公共 Factory/Impl 生产接线（有 llm 建真实 Runner/Pipeline，无 llm 不建；maxWindowIterations=initialWindowTurns；OrganizationWakeup 注入）+ 真实 SQLite/HTTP stub wiring 测试 + `./scripts/check`/14 模块/81 基线/Core/schema 全量验收。
+
+## 本次修改（2026-10-30，CT11 B2 初验通过，提交 Architect）
+
+- B2 Worker 交付 3 文件：Builder 仅新增 internal `requestFor`、internal `DefaultExtractionRunner`、12 例真实 SQLite+Fake LLM 测试；BuilderTest 未改；B1/CT10/CT09/Schema 未变。
+- Lead 独立初验：core 43/43、runtime 300/300（288+12）、persistence 176、server 30，差额 0；Runner 测试单独重复 3 次 12/12；窗口一致性、单 Turn 行数、FixedOverhead、非法响应/LLM 错误 0 写、wakeup 失败吞掉、防御上限、CE、NoPending 均通过。
+- 已提交 Architect 复核；B3 未启动；CT12/CT13 未启动；无 git 操作与发布。详见 `docs/context/tasks/cm2-ct11/B2_Lead初验.md`。
+
+## 本次修改（2026-10-30，CT11 B1 DONE，B2 Runner 派发）
+
+- Architect 复核 B1：APPROVED / DONE（core 43/43、runtime 288/288、persistence 176、server 30；Validator/Committer/JSON 规则通过）。
+- 落 `docs/context/tasks/cm2-ct11/B2_委派单.md` 并派发 Worker `10264b13`（message `7cde7149`）：B2 新增 internal `DefaultExtractionRunner`，串联 Builder/LLM/B1 Validator/Committer；Builder 仅新增 internal `requestFor`；单 Turn 循环+防御上限、FixedOverhead 配置错误、LLM/非法响应 0 写、wakeup raw>0/失败吞掉、CE；真实 SQLite+Fake LLM 测试；不改 CT10 build/CT09/Factory/依赖；不启动 B3。
+- CT12/CT13 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT11 B1 初验通过，提交 Architect）
+
+- B1 Worker 新增 7 文件（Core DTO/Validator/Committer + Runtime JSON Validator + 3 测试）；CT10/CT09/SQL/Schema SHA 未变；Core 无 serialization。
+- Lead 独立初验：core 43/43（34+9）、runtime 288/288（275+13）、persistence 176、server 30，差额 0；Validator 严格性/来源映射/原子提交/ID 碰撞/空 memories/Target 变化回滚/JSON 19 类非法载荷均通过。
+- 已提交 Architect 复核；B2 未启动；CT12/CT13 未启动；无 git 操作与发布。详见 `docs/context/tasks/cm2-ct11/B1_Lead初验.md`。
+
+## 本次修改（2026-10-30，CT11 D1～D14 裁定，B1 派发）
+
+- CT10 收口后 Architect 授权 CT11；完成只读核对并获 D1～D14 裁定（Core DTO/规则 + Runtime JSON、无 OrganizationNotifier Port、CT11 生产接线、Builder internal requestFor、单 Turn 循环上限、Validator 严格、原子事务逐个 TxOps、ID 碰撞预检重试≤3、通知失败吞掉、错误分类、Raw 字段、空 memories、CE、B1～B3 分批）。
+- 已同步 `docs/context/milestones/cm2/CT11_任务书.md`、`docs/context/tasks/cm2-ct11/CT11_方案核对与待裁定.md`，落 `B1_委派单.md` 并派发 Worker `10264b13`（message `47adc158`）：B1 只做 Core DTO/Validator/Committer + Runtime JSON Validator 与真实 SQLite 提交测试；不改 CT10/CT09/SQL/依赖；不启动 B2。
+- CT12/CT13 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT10 B3 初验通过，提交 Architect 裁定）
+
+- B3 Worker 只读验收：`./scripts/check` exit 0（131 tasks，2m1s）、14 模块 1397=1397、81 基线 all OK、vfs/integration-tests/vfs 无 diff、Core 无 Ktor、schema 未变；A01～A08 映射齐全；未改任何代码/测试/构建/文档。
+- Lead 独立复跑：check exit 0（131 tasks，2m）、14 模块 1397=1397 差额 0、81 基线 all OK、vfs diff 空、Core 无 Ktor；Lead schema 临时库探针 1/1（user_version=1、6 表、5 索引）；已同步任务书 §5 证据/状态、方案核对、B3 委派单；提交 Architect 裁定 CT10 是否 DONE。
+- CT10 未自标 DONE；CT11/CT12 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT10 B2 收口，B3 全量验收派发）
+
+- Architect 放行 B3；B2 收口：Builder + 10 例真实 SQLite 测试，runtime 275/275、core 34/34、persistence 176、server 30，差额 0。
+- B3 按 D13 只做集成证据/全量回归/文档：`./scripts/check` clean、14 模块 @Test=XML、81 基线、vfs diff、Core 无 Ktor、schema 未变、A01～A08 映射；不新增生产/测试代码，不接 pipeline。
+- CT10 未标 DONE；CT11/CT12 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT10 B2 初验通过，提交 Architect）
+
+- B2 Worker 新增 `DefaultPreExtractionContextBuilder` 与 10 例真实 SQLite 测试；B1/CT09 SHA 未变。
+- Lead 独立初验：core 34/34、runtime 275/275（265+10）、persistence 176/176、server 30/30，差额 0；Builder 测试单独重复 3 次 10/10；锚点/连续窗口/History/实际 K 折半/单 Turn 不写状态/固定开销/快照并发补录/预算等号/JSON 模式/构造 fail-fast 均通过。
+- 已提交 Architect 复核；B3 未启动；CT11/CT12 未启动；无 git 操作与发布。详见 `docs/context/tasks/cm2-ct10/B2_Lead初验.md`。
+
+## 本次修改（2026-10-30，CT10 B1 收口，B2 Builder 派发）
+
+- Architect 放行 B2；B1（含 R1）收口：core 34/34、runtime 265/265、persistence 176、server 30，差额 0；Prompt 六原则 R1 关闭。
+- 落 `docs/context/tasks/cm2-ct10/B2_委派单.md` 并派发 Worker `10264b13`（message `8537934d`）：新增 internal `DefaultPreExtractionContextBuilder`，同一真实 SQLite ReadContext 内锚点/连续窗口/完整请求估算/按实际 K 折半；构造期缺 LLM/EXTRACTION Task/Profile/PROMPT_ONLY fail-fast；单 Turn/固定开销/无 Pending 结果；不写 failed、不调 LLM、不接 pipeline；真实 SQLite + 受控 estimator + 快照并发补录测试。
+- B3 未放行；CT11/CT12 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT10 B1（含 R1）初验通过，提交 Architect）
+
+- B1 Worker 交付 13 文件；Lead 初验发现 Prompt v1 六原则覆盖不足（B1-R1），退回 Worker 仅改 Prompt 资源与测试；修复后 Lead 重新独立验证。
+- 初验结果：core 34/34、runtime 265/265、persistence 176/176、server 30/30，差额 0；3 项 Lead 探针全绿（六原则/时间/target、Context 防御性快照、预算边界/折半）；B1-R1 关闭。
+- 记录：一次全量运行中 CT09 既有 `ExtractionPipelineLifecycleTest > disabling idle...` 10s 超时一次；单独重跑及连续全量均绿、Lead 5/5 通过，暂列时序敏感性观察，B1 未改 CT09。
+- 已提交 Architect 复核；B2 未启动；CT11/CT12 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT10 B1 初验发现 R1，定点修复派发）
+
+- CT10 B1 交付 13 文件；Lead 独立初验：core 34/34、runtime 265/265、persistence 176、server 30，差额 0；但发现 **B1-R1**：`extraction-v1.md` 六原则覆盖不足（缺完整原子化的原因/条件/时间、关注重要变化、批内去冗余），现有测试只数编号。
+- 已落 `docs/context/tasks/cm2-ct10/B1_R1修复委派单.md` 并派发 Worker `10264b13`（message `8995cbe0`）：仅改 Prompt 资源与 `ExtractionPromptTest`，补齐六原则内容并逐条断言；不新增用例数、不改其他文件、不启动 B2。
+- 另记录：Worker 一次全量运行中 CT09 既有 `ExtractionPipelineLifecycleTest > disabling idle...` 10s 超时失败一次，单独重跑与连续 3 次全量均绿；Lead 单独重跑该类 5/5 通过，暂记为时序敏感性观察，待后续复核。
+- CT11/CT12 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT10 D1～D13 裁定，B1 派发）
+
+- CT09 DONE 后 Architect 授权 CT10；完成只读方案核对并获 D1～D13 裁定（sealed `ExtractionBuildResult`、`StoredConversationTurn`、CT10 拥有 Prompt v1/Schema/Renderer、`context.extraction.initialWindowTurns` 默认 32/1..1024、纯 `LlmBudget.estimate` 分类、按实际 K 折半、单 ReadContext、Builder 不写 failed、Core public/Runtime internal、构造期配置 fail-fast、仅 JSON_SCHEMA/JSON_OBJECT、v1 渲染格式、B1～B3 分批）。
+- 已同步 `docs/context/milestones/cm2/CT10_任务书.md` 与 `docs/context/tasks/cm2-ct10/CT10_方案核对与待裁定.md`，落 `B1_委派单.md` 并派发 Worker `10264b13`（message `42965c28`）：B1 只做配置/Core 结果/Context/Prompt Renderer/资源/纯预算分类；不实现 Builder/DB、不接 pipeline、不启动 B2。
+- CT11/CT12 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT09 收口）
+
+- CT09 独立全量复核通过：`./scripts/check` exit 0（130/130）、14 模块 1365=1365、81 基线 all OK、VFS tracked diff 为空、Core 无 Ktor、schema `user_version=1`/6 表/5 索引。B1～B4 与 B1-R1/B2-R1/B3-R1 全部关闭，CT09 **DONE**，见 `docs/context/tasks/cm2-ct09/架构与技术复核.md` §7。
+- 公共 Factory 仍不接 Runner、不启用生产提取；真实 Runner 待 CT11 接入。CT10+ 未启动；无 git 写操作/发布。
+
+## 本次修改（2026-10-30，CT09 B3 收口与 B4 放行）
+
+- B3-R1 独立通过：Pipeline 准入门在 Context 状态锁内同步封闭，STOPPING 窗口新 Idle tick 与排队项均不再启动 Runner；两个 Architect 探针 2/2、五模块 498/498 与格式通过。B3 DONE，见 `docs/context/tasks/cm2-ct09/架构与技术复核.md` §6。
+- 授权现有 Lead→Worker 推进 B4 全量验收与证据收口；仅文档/证据，不在 B4 修复生产代码。CT09 最终 DONE 待 Architect 复核；无 git 写操作/发布。
+
+## 本次修改（2026-10-30，CT09 B3 首次独立复核）
+
+- 4 文件 SHA 一致，独立五模块 496/496 与格式通过；但两个 STOPPING 窗口探针 2/2 失败，确认 Context 停止已开始后新 Idle tick/排队任务仍能启动 Runner。B3-R1 阻断，见 `docs/context/tasks/cm2-ct09/架构与技术复核.md` §5。
+- 授权现有 Lead→Worker 定点修复状态感知准入/关闭门，补新 tick 与已排队项的中间窗口回归。B1/B2 DONE 保持，B4 不放行；无 git 写操作/发布。
+
+## 本次修改（2026-10-30，CT09 B2 收口与 B3 放行）
+
+- B2-R1 独立通过：原失败探针 1/1、四模块 468/468、Runtime 格式全绿；持续调度失败具备 1 秒可取消退避，关闭不再卡在 CLOSING。B2 DONE，见 `docs/context/tasks/cm2-ct09/架构与技术复核.md` §4。
+- 授权现有 Lead→Worker 推进 B3 Pipeline 与 Runtime 生命周期接线；公共 create 仍不启用生产提取，内部 Runner 仅测试/后续 CT11 接入。B4 全量验收待 B3 通过；无 git 写操作/发布。
+
+## 本次修改（2026-10-30，CT09 B2 首次独立复核）
+
+- 7 新文件 SHA 与 B1 五项基线一致；独立四模块 464/464、Runtime 格式通过。默认 tick 极端 Clock 探针确认持续调度异常形成紧凑循环且不响应取消，close 卡在 CLOSING；B2-R1 阻断，见 `docs/context/tasks/cm2-ct09/架构与技术复核.md` §3。
+- 授权现有 Lead→Worker 仅修 IdleCron 与其测试，增加取消检查及固定 1 秒可取消错误退避。B1 DONE 保持，B3 不放行；无 git 写操作/发布。
+
+## 本次修改（2026-10-30，CT09 B1 收口与 B2 放行）
+
+- R1 独立通过：真实子任务 join、唯一清理与共享失败；Architect 探针 2/2、协程边界对照 3/3、五模块正式 454/454 与格式通过。探针身份比较移入 timeout 内，保留同实例要求。B1 DONE，见 `docs/context/tasks/cm2-ct09/架构与技术复核.md` §2。
+- 授权现有 Lead→Worker 推进 B2 Count/Idle/Cron，先委派单与基线后实现；B3 Runtime 接线待 B2 独立通过。CT10+、git 写操作、发布未授权。
+
+## 本次修改（2026-10-30，CT09 B1 首次独立复核）
+
+- 9 文件 SHA 一致，独立五模块 451/451 与 Core/Runtime 格式通过；两个独立探针失败，确认非关闭 CE 提前发布成功 closeOutcome，导致 closeAsync 不等真实子 Job 且跳过清理失败。B1 IN_REVIEW / R1 待修，B2 不放行。
+- 见 `docs/context/tasks/cm2-ct09/架构与技术复核.md` §1；授权现有 Lead→Paseo Worker 定点修 Scheduler 与正式回归，生产修改仍仅 Worker。CT08 DONE、无 git 写操作/发布保持。
+
+## 本次修改（2026-10-30，B4 初验通过，提交 Architect 裁定 CT09）
+
+- B4 Worker 只读验收：`./scripts/check` exit 0（130 tasks，2m4s）、14 模块 1365=1365、81 基线 all OK、vfs/integration-tests/vfs 无 diff、Core 无 Ktor、schema 未变；A01～A08 映射齐全；未改任何代码/测试/构建/文档。
+- Lead 独立复跑：`./scripts/check` exit 0（2m7s，130 tasks）、14 模块 1365=1365 差额 0、81 基线 all OK、vfs diff 空、Core 无 Ktor 三类证据；Lead schema 临时库探针独立验证 `user_version=1`、6 表、5 索引。已同步任务书 §5 证据/状态、方案核对状态、B4 委派单；提交 Architect 裁定 CT09 是否 DONE。
+- CT09 未自标 DONE；CT10+ 未启动；无 git 操作与发布。
+- **2026-10-30 B4 提交受阻**：B4 复核请求（message `611283bc`）在 Architect 侧因 429 Too Many Requests 中断；未获 CT09 最终裁定，B4 待复核，等待配额恢复后重提。
+
+## 本次修改（2026-10-30，B3 DONE，B4 全量验收派发）
+
+- Architect 复核 B3-R1 收口：B3 APPROVED / DONE；两 STOPPING 探针 2/2、五模块 498/498、Runtime spotless 通过。
+- 按 §6.2 落 `docs/context/tasks/cm2-ct09/B4_委派单.md` 并派发 Worker `10264b13`（message `ccf67184`）：B4 只做全量验收/证据/映射，不改生产/测试/文档；要求 `./scripts/check` clean exit0、14 模块行首 @Test=XML、vfs/integration-tests/vfs 无 tracked diff、81 基线 all OK、Core 无 Ktor/无新依赖、无新表/索引/user_version，并整理 A01～A08 映射。
+- 若回归暴露缺陷立即停止单独报告，不得隐蔽修复；CT09 DONE 由 Architect 最终裁定。B4 未完成前不启动 CT10+；无 git 操作与发布。
+
+## 本次修改（2026-10-30，B3-R1 修复完成，待复核）
+
+- Worker 修复 B3-R1（仅 `ExtractionPipeline.kt`、`AlcyoneContextImpl.kt`、`ExtractionPipelineLifecycleTest.kt`）：Pipeline 增加 admissionLock/closing 关闭门（beginClosing 短同步；Idle/Count 请求门；包装 Runner 在 activation 后检查；closeAsync 开头封闭）；shutdown 首次状态锁内 RUNNING→STOPPING 同步 beginClosing；Factory/B1/B2 组件未变。
+- Lead 独立初验：五模块 core 19/runtime 258（256+2）/persistence 176/server 30/integration 15，合计 498/498 差额 0；**Architect 两探针 2/2 转绿**（STOPPING 新 Idle tick、已排队项均 0 新 Runner）。已提交 Architect 复核；B4 未启动。详见 `docs/context/tasks/cm2-ct09/B3_R1_Lead初验.md`。
+- 无 git 操作与发布；CT10+ 未授权。
+
+## 本次修改（2026-10-30，B3-R1 定点修复派发）
+
+- Architect 首次复核 B3 未通过：shutdown 在 RUNNING→STOPPING 释放锁后、releaseResources(pipeline) 之前，IdleCron/Scheduler 仍运行，新 Idle tick 或已排队项可启动 Runner；两个真实探针 2/2 FAIL（Runner 进入时 status=STOPPING）。B4 不放行。
+- Lead 已建立 `docs/context/tasks/cm2-ct09/B3_R1修复委派单.md` 并派发 Worker `10264b13`（message `d7f39a95`）：仅改 `ExtractionPipeline.kt`/`AlcyoneContextImpl.kt`/`ExtractionPipelineLifecycleTest.kt`；Pipeline 增加状态感知关闭门（beginClosing 非挂起；Idle/Count 请求与包装 Runner 在 activation 后检查），shutdown 首次状态锁内 RUNNING→STOPPING 同步调用 beginClosing；补 STOPPING 窗口新 tick/已排队项 0 新 Runner 回归；Architect 探针必须 2/2。
+- 不改 Factory/B1/B2 组件/协议；B4 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，B3 初验通过，提交 Architect）
+
+- B3 Worker 交付 4 文件（`ExtractionPipeline.kt`、`AlcyoneContextImpl.kt`、`AlcyoneContextFactory.kt`、`ExtractionPipelineLifecycleTest.kt`）；B1/B2 十二个组件/测试 SHA 未变。
+- Lead 独立初验通过：runtime 243→256、core 19/persistence 176/server 30 差额 0；2 项 Lead 探针全绿（RUNNING 前 Runner 零执行/激活后一次；公共 create 零 pipeline）。公共零 pipeline、无 Runner 不建、Count/Idle 触发、idle=false 只关 Cron、关闭取消在途并等 finally、释放顺序 pipeline→llm→vfs→executor、pipeline 失败继续释放、start/close 竞争、启动失败逆序清理、Runner/Idle 回调具名拒绝、关闭后 0 触发、并发 close 共享失败均有用例。
+- 已提交 Architect 复核；B4 未启动；无 git 操作与发布；CT10+ 未授权。详见 `docs/context/tasks/cm2-ct09/B3_Lead初验.md`。
+
+## 本次修改（2026-10-30，B2 DONE，B3 Pipeline/Runtime 接线派发）
+
+- Architect 复核 B2-R1 收口：B2 APPROVED / DONE；独立四模块 468/468、Runtime spotless 通过；原失败探针 1/1 PASS。
+- 按 §4.2 落 `docs/context/tasks/cm2-ct09/B3_委派单.md` 并派发 Worker `10264b13`（message `d0fabb31`）：新增 internal `ExtractionPipeline` 与 `ExtractionPipelineLifecycleTest`，修改 `AlcyoneContextImpl`/`AlcyoneContextFactory`；公共 create 零 pipeline/零后台副作用，内部注入 Runner/可控 Idle tick；performStart executor→vfs→llm→pipeline，RUNNING 发布后才激活 Runner；关闭顺序通知收尾→pipeline→llm→vfs→executor；Runner/扫描回调内关闭具名拒绝；真实 SQLite+Fake Runner 覆盖竞争/失败/顺序/并发 close。
+- 不改 B1/B2 组件；若集成暴露组件缺陷先单独报告。B4 未启动；无 git 操作与发布；CT10+ 未授权。
+
+## 本次修改（2026-10-30，B2-R1 修复完成，待复核）
+
+- Worker 修复 B2-R1（仅 `IdleCron.kt` + `IdleCronTest.kt`）：`runTicks` 每轮 `ensureActive`；普通调度失败 WARN + 内部固定 1s 可取消退避后重算严格未来 tick；退避非 tick、不扫描/不补跑；CE 传播、close 立即响应；新增 4 例（持续失败可关闭、失败间隔、退避中关闭、恢复后自然 tick 不补跑）。
+- Lead 独立初验：正式 core 19/runtime 243（239+4）/persistence 176/server 30 差额 0；**Architect 探针 1/1 转绿**（原 1/1 FAIL）；Lead 2 项探针通过（快速关闭零扫描、恢复不提前扫描/不补跑）。已提交 Architect 复核；B3 未启动。详见 `docs/context/tasks/cm2-ct09/B2_R1_Lead初验.md`。
+- 无 git 操作与发布；CT10+ 未授权。
+
+## 本次修改（2026-10-30，B2-R1 定点修复派发）
+
+- Architect 首次独立复核 B2 未通过：`IdleCron.runTicks` 在默认 tick 源持续异常时只 WARN+continue，无可取消等待/取消检查；close 取消 loop 后卡在 NonCancellable join。探针（默认 tick + 极端 Clock）1/1 失败：500ms 内 clockReads 243→504578、state=CLOSING。B3 不放行。
+- Lead 已建立 `docs/context/tasks/cm2-ct09/B2_R1修复委派单.md` 并派发 Worker `10264b13`（message `02d16ab5`）：仅改 `IdleCron.kt` + `IdleCronTest.kt`；每轮 tick 前 ensureActive；普通调度失败固定 1s 可取消退避（不加配置）后重算严格未来 tick；退避非 tick、不扫描/不补跑；CE 传播、close 不等满退避；补持续失败及时关闭、失败间隔、退避中取消、恢复后自然 tick 不补跑测试；Architect 探针必须转绿。
+- B3 未启动；无 git 操作与发布。
+
+## 本次修改（2026-10-30，B2 初验通过，提交 Architect）
+
+- B2 Worker 交付 7 个新增文件（CountTrigger/IdleTrigger/IdleCron + 测试辅助 + 3 个测试）；B1 五文件 SHA 不变；未接线 Context/Factory、未改 SQL/索引/依赖。
+- Lead 独立初验通过：runtime 214→239、core 19/persistence 176/server 30 差额 0；4 项 Lead 探针全绿（Count 4/5 阈值、极长 Duration 受控失败后恢复、Idle 真实重叠 skip、Cron 扫描中 tick 真实 skip）；Count CREATED/DUPLICATE 契约、Idle created_at 等号边界、Cron 严格未来/不补跑/关闭 join 均有真实 SQLite/注入 tick 用例。
+- 非阻断观察：IdleCron 持续调度异常可能紧凑重试（正常系统时钟不可达），建议 B3/B4 加固；B3 未启动。详见 `docs/context/tasks/cm2-ct09/B2_Lead初验.md`。
+- 无 git 操作与发布；CT10+ 未授权。
+- **2026-10-30 提交受阻**：B2 复核请求（message `05c96dab`）在 Architect 侧因 429 Too Many Requests 中断，未获裁定；B2 保持 IN_REVIEW、B3 未启动，等待配额恢复后重提。
+
+## 本次修改（2026-10-30，B1 DONE，B2 Count/Idle/Cron 派发）
+
+- Architect 复核 B1 R1 收口：**B1 APPROVED / DONE**（探针边界裁定见 `架构与技术复核.md` §2）；独立五模块 454/454、格式通过；正式 XML 已恢复；两文件 SHA 一致。
+- 按 §2.4 落 `docs/context/tasks/cm2-ct09/B2_委派单.md` 并派发 Worker `10264b13`（message `c4c3873d`）：仅 Count Trigger、Idle Trigger、IdleCron、真实 SQLite/注入 tick 测试；不接线 Context/Factory、不改 B1/配置/SQL/索引/依赖。要求真实重叠 skip、极大 Duration/Instant 受控失败不短窗口、Count 查 pending、CREATED/DUPLICATE 契约不变。
+- B3/B4 未放行；CT10+、git 写操作、发布未授权。
+
+## 本次修改（2026-10-30，CT09 B1 R1 修复完成，探针二待裁定）
+
+- Worker 修复 R1（仅 `ExtractionScheduler.kt` 与 `ExtractionSchedulerCloseTest.kt`）：非关闭 CE 不再提前发布，改由独立 cleanup scope 的唯一 owner 取消 Worker、`queue.cancel`、真实 `join`（含结构化子任务）、执行清理钩子、释放 workerParent/scope 后再 CLOSED/发布共享结果；新增真实子任务屏障、清理失败共享、并发唯一清理 3 例。
+- Lead 独立初验：正式 runtime 211→214，core 19/persistence 176/server 30 差额 0；Architect 探针一 FAIL→**PASS**；探针二仍 FAIL，但根因为探针 `withTimeout` 协程边界复制异常导致 `assertSame` 不可能成立（Lead 独立 3/3：无边界同一实例、边界 `cause === unique`、通用 `withTimeout` 复制对照）。已提交 Architect 裁定探针写法；B1 暂不 DONE，B2 未启动。详见 `docs/context/tasks/cm2-ct09/B1_R1_Lead初验.md`。
+- 无 git 操作与发布。
+
+## 本次修改（2026-10-30，CT09 B1 R1 定点修复派发）
+
+- Architect 首次独立复核 CT09 B1 未通过：R1 为非关闭 CE 时 Worker 自行置 CLOSED 并提前发布 `closeOutcome`，外部 `closeAsync()` 绕过真实 join/清理；两个真实探针（子任务 finally 屏障未结束即 close 返回；`closeActionForTesting` 清理失败被跳过）2/2 失败。B2 不放行。
+- Lead 已建立 `docs/context/tasks/cm2-ct09/B1_R1修复委派单.md` 并派发 Worker `10264b13`（message `2b643c3b`）：仅改 `ExtractionScheduler.kt` 与两个 Scheduler 正式测试；唯一清理 owner（非失败 Worker）真实 join Worker/子任务、释放 scope parent Job 与队列后发布共享结果；补子任务屏障、清理失败、并发 close 唯一清理回归；必须重跑 Architect 两个探针 2/2。
+- 无 git 操作与发布；B2 未启动。
+
+## 本次修改（2026-10-30，CT09 方案裁定与 B1 放行）
+
+- CT08 DONE 保持；CT09 D1～D8 已裁定，见 `docs/context/tasks/cm2-ct09/Architect_裁定.md`。采用 context.extraction、固定上海五字段 Cron、查库 Count、单 Worker 触发计数；CT09 仅内部注入 Runner 验证接线，公共生产提取待 CT11。
+- 关闭先封闭准入、取消并 join 真实后台任务，再释放 llm/vfs/executor；shutdownTimeout 仍只观察。CT09 分 B1 配置与 Scheduler、B2 Trigger/Cron、B3 生命周期、B4 全量验收；仅 B1 已授权，仍走现有 Paseo Lead→Worker→独立复核。
+- Lead 已同步 `CT09_任务书.md` 正文/验收映射、修正配置示例引用（核心数据流 §7.3；技术实现设计 §7.3 是 Memory Map，不是 extraction 示例），并落 `docs/context/tasks/cm2-ct09/B1_委派单.md` 派发 Worker `10264b13`（message `bf469bbd`）。B1 仅配置/Loader/Runner Port/Scheduler 与关闭测试，不做 Trigger DB/Cron/Context 接线。
+- B1 Worker 已交付 9 文件（Runner Port、ExtractionConfig/Loader、internal Scheduler、3 个测试、KDoc 订正）；Lead 独立初验通过：runtime 189→211、core 19/persistence 176/server 30/integration-context 15 差额 0，3 项 Lead 探针（cron cause、timezone 未知键、非关闭 CE）全绿；已提交 Architect 复核。详见 `docs/context/tasks/cm2-ct09/B1_Lead初验.md`。B2 未启动。
+- 本轮无 git 写操作与发布；CT10+ 未授权。
+
+## 本次修改（2026-10-29，CT08 DONE，放行 CT09）
+
+- Architect 独立复核 B5（记录见 `docs/context/tasks/cm2-ct08/架构与技术复核.md` §11）：5 个交付文件 SHA 一致；统计 `calls=successes+failures`、attempts 实际求和、无 usage 样本 token 为 null、取消/CLOSED 不计不记、并发不丢计数；日志仅白名单字段、不传 Throwable、Key/Prompt/schema/body/URL 标记零泄漏；302 不追随且第二 host 0 请求；独立 `./scripts/check` 130/130、全模块 1296=1296、VFS 81 基线 all OK、Core 无 Ktor、3 项探针 3/3。**B5 APPROVED / DONE，CT08 DONE**。
+- CT08 最终状态：B1～B5 全部通过 Architect 独立复核，A01～A08 闭环。**CT09 可按任务书流程启动**，仍须 Lead 先出方案/委派单并由 Worker 实施，未经 Architect 逐批复核不得继续后续任务。
+- 仍未授权 `git add/commit`、远端推送或公开发布；CM2 后续任务按里程碑顺序推进。
+
+## 本次修改（2026-10-29，CT08 DONE，CT09 只读方案核对完成待裁定）
+
+- Architect 复核 B5 APPROVED / DONE，并裁定 **CT08 DONE、CT09 放行**（记录见 `docs/context/tasks/cm2-ct08/架构与技术复核.md` §11）；B5 探针 3/3、`./scripts/check` 130/130、全模块 1296=1296、VFS 81 基线 all OK。
+- 按指令完成 CT09 **只读**方案核对：建立 `docs/context/milestones/cm2/CT09_任务书.md`（草案）与 `docs/context/tasks/cm2-ct09/CT09_方案核对与待裁定.md`。已核实 Count 通知 Port、`findIdleSessions`、pending 索引、cron-utils、Runtime 生命周期与 `context.extraction` 尚未消费等事实。
+- 待 Architect 裁定 C1（配置分区 `context.extraction` vs 顶层 `extraction`）、C2（时区固定 vs 可配置）、C3/D3（无 CT11 Runner 时的生产接线策略）及 D1～D8 细节；**未派发 Worker、未实现代码**，CT10+ 不启动。
+
+## 本次修改（2026-10-29，B5 初验通过，提交 Architect 裁定 CT08）
+
+- B5（最终证据与回归）Worker 交付 5 个文件：`LlmCallDiagnostics.kt`（internal 诊断 + 按 task/profile 最小统计）、`KtorLlmClient.kt`（成功 INFO / 失败 WARN 各一条、统计接线）、`KtorLlmClientDiagnosticsTest`、`KtorLlmClientRedirectTest`、测试辅助 `Slf4jCapture`；未新增公开 API/`ContextStatus` 字段/落库记录。
+- Lead 独立初验通过：`./scripts/check` **exit 0**（130 tasks，1m48s）；全模块源码 `@Test` 与 XML **1296=1296** 差额 0、0 失败/错误/跳过（runtime 176→189）；`vfs` 81 基线 **all OK**、`git status --porcelain vfs integration-tests/vfs` 为空；Core 无 Ktor 的 build 文本 + 主源码 import + compileClasspath + `CoreSkeletonTest`/`KtorBoundaryTest` 四重证据；302 不追随（第二 host 0 请求）；统计/日志脱敏与字段白名单由正式用例 + 3 项 Lead 独立探针覆盖。
+- 已提交 Architect 独立复核；**CT08 是否 DONE 由 Architect 裁定**，未自标 DONE，CT09 未启动；仍无 `git add/commit` 与远端发布。详见 `docs/context/tasks/cm2-ct08/B5_Lead初验.md`。
+
+## 本次修改（2026-10-29，B4 APPROVED / DONE，放行 B5）
+
+- Architect 独立复核 B4（记录见 `docs/context/tasks/cm2-ct08/架构与技术复核.md` §10）：8 个交付文件 SHA 一致；准入先于校验/HTTP、`invokeOnCompletion` 移除、owner `NonCancellable`、共享失败发布/重抛、等待者取消、在途取消不转 `CLOSED`、Runtime 构造/释放顺序全部通过；独立实跑 core 19 / runtime 176 / persistence 176 / server 30 全零、spotless 通过、6 项 Lead 探针 6/6。**B4 APPROVED / DONE**。
+- **B5 已获放行**：范围锁定为 CT08 方案 §j B5——最小内部统计（调用/成功/失败/Attempts/Usage）、脱敏日志捕获、重定向证据、`vfs` diff/81 基线、源码 `@Test`=XML、全量 `./scripts/check`；不新增公开 `ContextStatus` 字段，不启动 CT09。
+- Lead 须先落 `B5_委派单.md` 再派发现有 Worker `10264b13-4fd6-4e6d-b699-b8095efd6ab6`；B5 未通过前 CT08 不 DONE。仍无 `git add/commit` 与远端发布。
+
+## 本次修改（2026-10-29，B3 APPROVED / DONE，启动 B4）
+
+- Architect 独立复核 B3（记录见 `docs/context/tasks/cm2-ct08/架构与技术复核.md` §9）：6 个交付文件 SHA 一致；总期限/remaining 重算、HttpTimeout 逐 Profile、429 三支与额度优先、Retry-After 五条规则、退避 ±20% 且 ≤10s、取消不包装全部通过；独立实跑 core 19 / runtime 166 / persistence 176 / server 30 全零、spotless 通过、8 项探针 8/8。**B3 APPROVED / DONE**。
+- 按 Architect 指令启动 **B4（取消与关闭协议 + Runtime 生命周期接线）**，范围与验收锁定在 `docs/context/tasks/cm2-ct08/B4_委派单.md`：`KtorLlmClient` 的 `RUNNING/CLOSING/CLOSED` + `inFlight` + 共享 `closeOutcome`（结构化 LAZY 子任务、`invokeOnCompletion` 移除、owner `NonCancellable`、等待者可取消、失败发布/重抛、`close()`→`closeAsync()` 重命名），`AlcyoneContextImpl` 的 `executor→vfs→llm` 构造与 `llm→vfs→executor` 释放；A06 五类 + A01 完整 + A08 关闭后新调用。
+- B4 不做 B5 日志/统计/重定向/全量 A08；B4 未通过前不启动 B5。仍无 `git add/commit` 与远端发布。
+- **B4 Lead 初验通过（2026-10-29）**：8 文件（`KtorLlmClient.kt` 关闭协议、`AlcyoneContextImpl.kt` 接线、2 个新测试、`KtorLlmClientResponseTest` 定点调整、3 个测试机械重命名）；四模块 core 19 / runtime 176 / persistence 176 / server 30 差额 0；6 项 Lead 独立探针全绿（准入优先、并发关闭共享失败、在途取消后仍可用、并发关闭后新调用 0 HTTP、释放顺序 LLM→VFS→EXECUTOR、启动失败逆序清理）。已提交 Architect 复核，B5 未启动。详见 `docs/context/tasks/cm2-ct08/B4_Lead初验.md`。
+
+## 本次修改（2026-10-29，B2 APPROVED / DONE，启动 B3）
+
+- Architect 独立复核 B2（记录见 `docs/context/tasks/cm2-ct08/架构与技术复核.md` §8）：7 个交付文件 SHA 一致、core 只追加 `LlmRequest.schema`、协议/路由/预算/响应分类/异常链不泄漏全部通过；独立实跑 core 19 / runtime 147 / persistence 176 / server 30 全零、spotless 通过、Lead 6 项探针 6/6、core 编译类路径无 Ktor。**B2 APPROVED / DONE**（第 1 轮 R1 安全缺陷已在第 2 轮关闭）。
+- 按 Architect 指令启动 **B3（总期限、有限重试、Retry-After、退避与取消传播）**，范围与验收锁定在 `docs/context/tasks/cm2-ct08/B3_委派单.md`：新增 `LlmRetryPolicy`、`KtorLlmClient` 期限/重试循环、`HttpTimeout` 逐 Profile、A05 脚本化测试；允许对 `KtorLlmClientResponseTest` 做 2 处最小定点修改（分类/传输用例设 `maxAttempts=1`）。
+- B3 不做 B4 关闭协议/生命周期、B5 日志统计；B3 未通过前不启动 B4。仍无 `git add/commit` 与远端发布。
+- **B3 Lead 初验通过（2026-10-29）**：仅 6 文件变化（`LlmRetryPolicy.kt`、`KtorLlmClient.kt`、3 个新测试/stub、`KtorLlmClientResponseTest` 两例仅加 `maxAttempts=1`）；四模块 core 19 / runtime 166 / persistence 176 / server 30 差额 0，8 项 Lead 独立探针全绿（重试、attempts、Retry-After 超预算、额度优先、精确等待、退避中取消、总期限非取消、注入 client 无 HttpTimeout）。已提交 Architect 复核，B4 未启动。详见 `docs/context/tasks/cm2-ct08/B3_Lead初验.md`。
+
+## 本次修改（2026-10-29，B1 APPROVED / DONE，启动 B2）
+
+- Architect 独立复核 N3 修复（记录见 `docs/context/tasks/cm2-ct08/架构与技术复核.md` §7）：两文件 SHA 一致，core/runtime 负值双入口均 `INVALID_REQUEST`、不 clamp、`0` 合法、饱和与分类正确；独立实跑 core 19 / runtime 119 / persistence 176 / server 30 全零、spotless 通过、原反例探针 2/2 转绿。**B1 APPROVED / DONE**。
+- 按 Architect 指令启动 **B2（LLM Adapter 与路由）**，范围与验收锁定在 `docs/context/tasks/cm2-ct08/B2_委派单.md`：`LlmRequest.schema`、`KtorLlmClient`（单次调用，无期限/重试）、content 本身 JSON 校验与围栏拒绝、最小释放路径，验收 A03/A04/A07 响应侧/A08 core 无 Ktor。
+- B2 不做 B3 期限重试、B4 关闭协议与生命周期接线、B5 日志与统计；B2 未通过前不启动 B3。仍无 `git add/commit` 与远端发布。
+- **B2 两轮初验**：第 1 轮功能主路径与 26 例新增测试通过，但 R1 阻断——schema/content 解析失败的原始 `SerializationException` 作为 `cause`，其消息含输入原文，经 `stackTraceToString()` 泄漏请求 schema 与响应 content。Worker 修复后第 2 轮通过：仅 3 文件变化（`KtorLlmClient.kt` + 两个测试文件），解析/传输异常不再链接原始异常链，新增 2 例泄漏回归；四模块 core 19 / runtime 147 / persistence 176 / server 30 差额 0，6 项独立探针全绿。详见 `docs/context/tasks/cm2-ct08/B2_Lead初验.md` §5、§8；已提交 Architect 复核，B3 未启动。
+
+## 本次修改（2026-10-29，CT08 B1 N3 修复完成 Lead 初验，提交 Architect）
+
+- B1 因阻断缺陷 N3（`LlmBudget` 未校验 Estimator 返回非负，负数可绕过预算）被 Architect 判未通过；原 Worker `d7695b22` 归档后，按 Architect 指示由新 Paseo Worker `10264b13-4fd6-4e6d-b699-b8095efd6ab6`（配置 `worker`）执行修复，范围仅 `LlmBudget.kt` 与 `LlmBudgetTest.kt`。
+- 修复：`estimate()` 在算术前校验 `estimatePrompt`/`estimateSchema` 非负，负值 fail closed 抛 `INVALID_REQUEST`（不 clamp、不回显请求/Schema/Key/URL），`0` 合法，`Int.MAX_VALUE×2` 仍饱和为正并 `LOCAL_BUDGET_EXCEEDED`；新增 5 例正式回归（`LlmBudgetTest` 9→14）。
+- Lead 独立初验通过：两文件 SHA 与 Worker 一致（`f1887e2a…`、`924f1064…`），core 19 / runtime 119 / persistence 176 / server 30，源码与 XML 差额全 0、0 失败/错误/跳过；Architect 反例探针由 2/2 失败转为 2/2 通过，Lead 自建双入口探针 2/2 通过。详见 `docs/context/tasks/cm2-ct08/B1_N3_Lead初验.md`。
+- Lead 独立初验通过并已提交 Architect；**Architect 复核裁定 B1 APPROVED / DONE**（`架构与技术复核.md` §7），N3 关闭。
+- B2 已按指令启动，范围见 `docs/context/tasks/cm2-ct08/B2_委派单.md`；B2 未通过前 B3 不启动；仍未授权 `git add/commit` 与远端推送。
+
+## 本次修改（2026-10-29，CM1 全面复查通过，放行 CM2）
+
+- **CM1 全面复查 CLOSED**：F1、P1、P4、F2、F3、P2、P3、F1-R1 八项逐项 APPROVED（Lead 初验 + Architect 独立复核，独立批次未合并），F4 入口文档归位完成；历史验收记录保留。
+- **整体回归通过**（Architect 独立执行）：`./scripts/check` exit 0（130 tasks，常规 **1188=1188**，14 个模块源码 `@Test` 与 XML 差额全 0）；`vfs/`、`common`、`integration-tests/vfs` tracked diff 为空（81 VFS 基线 mismatch=0，VFS 生产零侵入）；`./scripts/t31-consumer-check` exit 0。
+- **CM1 DONE（含全面复查）**；按用户条件授权启动 **CM2**，首个任务 **CT08 Memory Extraction 纵向骨架**（范围与 Q1～Q8 裁定见 `docs/context/milestones/cm2/CM2_范围与依赖方案.md`）。CM3～CM6 未启动。
+- 仍未授权：`git add/commit`、远端推送、公开发布。详见 `docs/context/milestones/cm1/CM1_全面复查.md`。
+
+## 本次修改（2026-10-29，CM1 全面复查 F4：入口状态归位）
+
+- 当前真实状态：**CM1 历史验收已通过**（CT01～CT07 全部 DONE；整体初验常规 1142=1142、138 项源码清单、81 VFS 基线、独立 VFS Runtime 消费与 `t31-consumer-check` 通过，历史证据保留），但用户要求的**全面复查仍有开放项**（F4 文档入口与整体回归），不得表述为“复查通过”。
+- 复查已关闭项（逐项 Lead 初验 + Architect 独立复核 APPROVED，未合并）：F1 通知关闭真实等待与重入拒绝；P1 连接所有权与关闭轮次内有限重试；P4 单语句失败不 poison（与事务终结失败明确区分）；F2 非法 UTF-8 固定 400 且零落库、限额先于解码；F3 配置/注册三入口统一校验且重复 runtimeId/Key 不静默覆盖；P2 分页参数在 SQL 前校验（`IllegalArgumentException`，不新增 API 枚举）；P3 `updated_at` 全局水位仍为调用方契约、不新增 CAS；F1-R1 由 Architect 实跑发现的 `notificationJobs.toList()` 快照竞态。
+- 本轮 Architect 独立实跑：persistence 176、runtime 89、server 30、core 11，0 失败/错误/跳过，源码 `@Test` 与 XML 差额 0；`runtime`/`server` 连续 5 次重复跑无竞态复现。整体回归（`./scripts/check` + `t31-consumer-check`）待执行。
+- **CM2 条件授权**：上述闭环与整体回归通过后**直接启动 `CT08`**，无需再次请示；当前 CM2 未启动。未 `git add/commit`、未公开发布。详见 `docs/context/milestones/cm1/CM1_全面复查.md` 与 `docs/context/tasks/cm1-full-rereview/`。
+
+## 本次修改（2026-10-29，CT07-B1首次复核）
+
+- B1独立9/69/155及格式通过，8项SHA与81基线匹配；但静态审查确认Instant无法校验冻结的输入offset、fire-and-forget通知失败被空吞且close直接取消。B1 IN_REVIEW，B2不放行。见CT07复核第1节。
+
+## 本次修改（2026-10-29，CT06整体收口与CT07启动）
+
+- CT06独立完整常规1097/1097、格式、原VFS Runtime消费、81基线/118清单及契约复核通过，B1/B2及整体集成均关闭；CT06 DONE。见CT06复核第7节。
+- 授权原Paseo Lead按Lead→Paseo worker推进CT07 Ingestion与最小HTTP，先方案后实现、逐批初验和独立复核；CM1完成6/7，CM2不启动。
+
+## 本次修改（2026-10-29，CT06-B2 收口与整体验收）
+
+- B2配置快照修复与并发测试判据经Architect独立49例、格式、两组真实探针验证通过，81基线匹配；B1/B2均APPROVED。见CT06复核第6节。
+- 授权原Paseo Lead组织CT06整体集成初验并提交Architect；CT06尚未DONE，CM1仍5/7，CT07待前置，CM2不启动。
+
+## 本次修改（2026-10-29，CT06-B1 收口与 B2 放行）
+
+- B1 R1/R2 经 Architect 独立 22 例、格式及三条真实路径探针验证关闭，81 基线匹配，B1 APPROVED。详见 CT06 架构与技术复核第3节。
+- 原 Paseo Lead 复用现有 Worker 推进 B2 Runtime 生命周期与集成，保持逐批初验和独立复核；CT06 IN_PROGRESS，CM1 5/7，CT07 待前置，CM2 不启动。
+
+## 本次修改（2026-10-28，CT05整体收口与CT06启动）
+
+- CT05独立常规1050/1050及格式通过，81基线/104项清单匹配，B1～B3均通过；CT05 DONE。见CT05复核第8节。
+- 授权原Paseo Lead按Lead→Paseo worker推进CT06配置与Runtime，先方案后实现、逐批初验和独立复核；CM1完成5/7，CT07待前置，CM2不启动。
+
+
+## 本次修改（2026-10-28，CT04整体收口与CT05启动）
+
+- CT04独立常规973/973、格式及原VFS Runtime消费验证通过，81基线/87项清单匹配，F1/F2/F3均关闭；CT04 DONE。见CT04复核第20节。
+- 授权原Paseo Lead按Lead→Paseo worker推进CT05 Repository，先方案后实现、逐任务初验和独立复核；CT06/CT07待前置，CM2不启动。CM1完成4/7。
+
+
+## 本次修改（2026-10-28，F3独立收口）
+
+- F3 rev5独立91例、格式与三组探针通过，第18节问题关闭；F1/F2/F3均APPROVED。授权原Paseo Lead组织CT04整体集成验收并提交Architect；CT04仍IN_REVIEW，CT05未放行。详见CT04架构与技术复核第19节。生产修复仍仅由Paseo worker承担。
+
+## 本次修改（2026-10-28，F3 rev2复核与方案重审）
+
+- 独立83例通过，但真实反例仍确认JDBC重载绕过、手动提交使失败业务落库、普通read异常被覆盖、注释Savepoint绕过；正式测试未增加。F3 rev2未通过，详见CT04复核第14节。
+- 原Lead先修订接口边界/事务状态与回归映射方案，Architect审阅后继续Worker编码。F1/F2保持通过；CT04 IN_REVIEW，CT05未放行。
+
+## 本次修改（2026-10-28，CT04-F3 首次独立复核）
+
+- 独立83例/格式通过，但真实探针确认旧驱动复活、物理连接逃逸、prepared跨次回归、事务失败后仍复用、读原异常覆盖与nullable写返回回归。F3未通过，详见CT04复核第13节，交原Paseo Lead修复。
+- F1/F2保持已通过；CT04 IN_REVIEW，CT05未放行。
+
+## 本次修改（2026-10-28，CT04-F2 独立收口与F3放行）
+
+- F2 APPROVED：生产中断清理/回调守卫反例通过，A04测试尾项关闭；本轮定向A04及格式通过，沿用此前独立70例，生产哈希/81基线不变。见CT04复核第12节。
+- 授权原Paseo Lead按Lead→Paseo Worker推进F3事务失败与作用域边界，先方案后实现。F1/F2已通过；CT04仍IN_REVIEW，CT05未放行。
+
+## 本次修改（2026-10-28，CT04-F2 首次独立复核）
+
+- 独立67例与格式检查通过，但真实反例确认同步关闭中断后连接未释放、queryRaw回调内关闭死锁；新增测试A03提前兜底关闭、A04等待判据不足需修正。详见CT04架构与技术复核第8节。
+- F2退回原Paseo Lead组织Worker修复，F1保持APPROVED；CT04 IN_REVIEW，F3/CT05未放行。
+
+## 本次修改（2026-10-27，CT04-F1 独立收口与F2放行）
+
+- F1文件保护及测试尾项通过Architect独立复核：强制60例与格式检查通过，最终12项交付哈希/81基线一致。详见CT04架构与技术复核第7节。
+- 授权当前Paseo Lead `6f547b7e-4ced-4f1b-92a7-e665b2d008db` 按Lead→Worker推进F2资源所有权与关闭协议，先方案后实现；只能使用Paseo worker配置委派。CT04仍IN_REVIEW，F3/CT05未放行，CT01～CT03 DONE保持。
+
+## 本次修改（2026-10-27，按用户要求重建Paseo Lead）
+
+- 用户明确Lead和Worker必须使用Paseo中对应的`lead`/`worker`配置，不得用其他角色配置或自行选模型替代。本次重新读取配置后，创建Lead `6f547b7e-4ced-4f1b-92a7-e665b2d008db`（server `srv_rWwNLOnyU5IK`；lead配置：pi / my_magpie/group/worker，high）；旧Codex Lead `989b31a6-dfdb-43a1-9e4b-489f6e7b588a`已归档，历史保留。
+- 新Lead只能通过Paseo的worker配置委派实现，先与现F1 Worker `720e6ddc-e9f8-414c-a8ae-ffe7414f0bab`交接写入权，再继续正式回归覆盖、文档与参数校验顺序收尾；最终源码需重新独立初验并交Architect。首轮核心11探针通过不是F1最终验收，F2/F3/CT05仍未放行。
+
+## 本次修改（2026-10-27，CM1 Lead 故障恢复交接）
+
+- 原Lead `7af1005e-bca3-4ed1-bb34-6ea8f288740c` 连续模型错误/上游超时，重试与同Agent模型切换均未恢复。已通过Paseo创建接任Lead `989b31a6-dfdb-43a1-9e4b-489f6e7b588a`（Codex，依据已配置architect模型参数承担Lead职责），同一CM1、同一工作区，保留历史，不重置代码。
+- 接任Lead先完成Worker写入权交接，再只推进CT04-F1；仍按Architect→Lead→Worker及F1/F2/F3逐批复核，CT05不放行。原Lead不再继续委派，用户无需重新授权开发范围。
+
+## 本次修改（2026-10-27，CT04二次复核与公共改名收口）
+
+- 公共类型`SequenceIdGenerator`/`TimeCodec.format/parse`改名独立验证通过（受影响79例与common-only消费）。CT04二次复核仍未通过，原五项核心反例仍成立；按F1文件保护、F2资源关闭、F3事务/作用域三批修复并逐批复核，CT05未放行。详见CT04架构与技术复核第4节。
+
+## 本次修改（2026-10-26，用户授权公共类型命名调整）
+
+- 用户要求公共类型去掉 Shanghai 前缀：采用 `SequenceIdGenerator` 与 `TimeCodec`，时间方法采用 `format` / `parse`；保持现有时区、格式和算法行为，不新增时区配置或兼容别名。已交原 Lead 协调 Worker 同步引用并提交独立复核，当前待完成。
+- CT03 既有行为验收保持；此次命名调整单独复核。CT04 R1～R6 修复继续，CT05 未放行。历史证据中的旧名保留，当前接入说明随实现同步。
+
+## 本次修改（2026-10-26，CT04 首次独立复核）
+
+- 独立常规 929/929 通过，但故障/竞争探针确认连接泄漏、关闭与作用域绕过、建库保护失效、失败事务提交及异常泄漏；R1～R6 待修。CT04 IN_REVIEW，CT05 未放行，详见 `docs/context/tasks/cm1-ct04/架构与技术复核.md`。CT01～CT03 DONE 保持。
+
+## 本次修改（2026-10-26，公共能力迁移独立验收通过）
+
+- CT03 含 common 公共能力迁移独立复核通过，884/884 常规回归及 common-only Java 消费成功；CT03 DONE，授权原 Lead 恢复 CT04，仍须逐任务复核。81 个既有基线文件不变，common 新增文件为用户授权范围。详见 `docs/context/tasks/cm1-ct03/架构与技术复核.md` 第 5 节。
+
+
+## 本次修改（2026-10-26，用户授权公共能力迁移）
+
+- 用户要求将 Context Core 时间编解码和 ID 生成算法迁入 common，抽象可复用公共能力。授权新增 common 工具/测试及 Core 依赖和薄适配；本次覆盖此前 common 零修改限制，既有 VFS 不变。
+- CT03 重新进入增量开发，历史880例验收结论保留；迁移须 Lead 初验与 Architect 独立复核，CT04 等待迁移通过后继续，保留其已产生工作。
+
+## 本次修改（2026-10-26，Context CT03 收口）
+
+- CT03 R1～R3 关闭，独立常规880/880与Java copy反例修复验证通过，CT03 DONE；原Lead获授权启动CT04 Schema/连接/生命周期。VFS/common基线81文件不变；见 `docs/context/tasks/cm1-ct03/架构与技术复核.md` 第4节。
+
+## 本次修改（2026-10-25，Context CT02 收口）
+
+- CT02 独立常规 840/840、依赖封装修复定向验证通过，CT02 DONE；原 Lead 获授权启动 CT03 模型、Port、时间/ID，仍须逐任务复核。VFS/common 基线 81 文件不变；见 `docs/context/tasks/cm1-ct02/架构与技术复核.md` 第 4 节。
+
+## 本次修改（2026-10-25，Context CT01 收口）
+
+- CT01 独立兼容性探针全通过、契约 R1～R4 关闭，CT01 DONE；原 CM1 Lead 获授权启动 CT02 工程骨架，CT03～CT07 仍须逐任务复核。见 `docs/context/tasks/cm1-ct01/架构与技术复核.md` 第 5 节；VFS 生产代码不变。
+
+## 本次修改（2026-10-25，用户授权启动 Context CM1）
+
+- 用户授权 CM1（CT01～CT07）连续开发，Architect 经 Paseo 按 Lead → Worker 委派，每项 Lead 初验后立即由 Architect 独立复核，通过后继续；CM1 全部完成再向用户汇报，不启动 CM2。
+- Context 当前设计、任务、复核与进度统一放 `docs/context/`，入口见 `docs/context/README.md`、`docs/context/milestones/cm1/CM1_任务与验收.md`；原“不要创建 Context 模块”等旧阶段限制不适用于已授权 CM1。
+- 用户已确认 Context Runtime 解析 YAML 的 vfs 分区并构造既有 VfsRuntimeConfig，不增加 VFS Loader、不修改 VFS。CM1 保持既有 VFS 生产代码与行为不变；Map 安全替换/大备份发布仅记录后续方案，不阻塞 CM1、不提前实施扩展。
+
 ## 本次修改（2026-10-17，T36与E1独立验收通过）
 
 - Architect独立常规828/828、WebDAV43/43、原Runtime消费、插件消费全部通过；文档示例原样提取编译通过，原Runtime依赖图不含插件，既有六模块Diff为零。T33～T36及E1 **DONE**，仅本地交付，不公开发布或自动启动新扩展。详见 `docs/tasks/e1-t36/T36_架构与技术复核.md` 第12节；历史状态以本条为准。

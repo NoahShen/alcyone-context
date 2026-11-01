@@ -1,0 +1,27 @@
+{
+  "kind": "offline-fake",
+  "evaluationVersion": "cm2-extraction-v1",
+  "promptVersion": "v1",
+  "schemaVersion": "v1",
+  "sampleVersion": "samples-v1",
+  "systemUnderTest": "CT12 B1: 真实 Runtime + 真实 SQLite + Fake LLM HTTP",
+  "semanticQualityEvaluated": false,
+  "runs": [
+    {
+      "test": "ExtractionEndToEndTest.a failed extraction does not stop later triggers",
+      "status": "pass",
+      "scope": "failure continuation, protocol/atomic commit"
+    },
+    {
+      "test": "ExtractionEndToEndTest.pending turns outside the initial window stay pending",
+      "status": "pass",
+      "scope": "fixed snapshot/window boundary"
+    },
+    {
+      "test": "ExtractionEndToEndTest.an empty memory batch completes every target without raw rows",
+      "status": "pass",
+      "scope": "zero-result success/atomic target completion"
+    }
+  ],
+  "note": "这些结果是离线 Fake LLM 的协议/事务验收，不代表真实模型语义质量，也不对应固定样本的精确输出。"
+}

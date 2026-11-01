@@ -1,0 +1,83 @@
+-- Context 权威状态库的六张业务表与五个显式索引。
+--
+-- 本文件是结构事实来源：`ContextDatabaseSqlite.Schema.version` 与 SQLite 的
+-- `PRAGMA user_version` 一一对应为 1。禁止在普通打开路径调用 Schema.create / migrate，
+-- 只有显式初始化入口（ContextDatabaseInitializer）才建库；升级流程属 CM6。
+--
+-- 时间列统一存上海本地时间文本 `uuuu-MM-dd'T'HH:mm:ss.SSS+08:00`
+-- （见 common 的 TimeCodec）；不使用 SQLite CURRENT_TIMESTAMP。
+
+-- 会话轮次：标准 Turn 与 Extraction 状态。id 是 SQLite 内部自增主键（Dreaming 水位），
+-- 与外部 session_turn_id 无关；四元业务键唯一，重复报文幂等由 Core 结合本约束判定。
+CREATE TABLE conversation_turn (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    runtime_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    session_turn_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    messages_json TEXT NOT NULL CHECK (json_valid(messages_json) AND json_type(messages_json) = 'array'),
+    extraction_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (extraction_status IN ('pending', 'complete', 'failed')),
+    UNIQUE (runtime_id, agent_id, session_id, session_turn_id)
+);
+
+-- Raw Memory：不可变记忆证据，无更新与删除业务 API。
+CREATE TABLE raw_memory (
+    id TEXT NOT NULL PRIMARY KEY,
+    content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+    generated_by TEXT NOT NULL CHECK (generated_by IN ('EXTRACTION', 'DREAMING')),
+    sources_json TEXT NOT NULL CHECK (json_valid(sources_json) AND json_type(sources_json) = 'array'),
+    created_at TEXT NOT NULL
+);
+
+-- 尚未治理完成的 Raw ID 集合；外键 RESTRICT 保证有 Pending 时不能删 Raw。
+CREATE TABLE organization_pending (
+    raw_memory_id TEXT NOT NULL PRIMARY KEY
+        REFERENCES raw_memory(id) ON DELETE RESTRICT
+);
+
+-- Organized Memory：当前有效认知；updated_at 兼作 Map 单调水位。
+CREATE TABLE organized_memory (
+    id TEXT NOT NULL PRIMARY KEY,
+    content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+    domains_json TEXT NOT NULL CHECK (json_valid(domains_json) AND json_type(domains_json) = 'array'),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Organized 与 Raw 的权威证据关联（多对多）；不另立 Repository。
+CREATE TABLE organized_memory_source (
+    organized_memory_id TEXT NOT NULL
+        REFERENCES organized_memory(id) ON DELETE RESTRICT,
+    raw_memory_id TEXT NOT NULL
+        REFERENCES raw_memory(id) ON DELETE RESTRICT,
+    PRIMARY KEY (organized_memory_id, raw_memory_id)
+);
+
+-- Dreaming 已完整处理的内部 Turn ID 连续水位；全表固定只有 id = 1 这一行。
+CREATE TABLE dreaming_checkpoint (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_processed_turn_id INTEGER NOT NULL DEFAULT 0
+        CHECK (last_processed_turn_id >= 0)
+);
+
+INSERT INTO dreaming_checkpoint (id, last_processed_turn_id) VALUES (1, 0);
+
+-- 五个显式业务索引（主键与 UNIQUE 索引由 SQLite 自动生成，不计入）。
+CREATE INDEX idx_turn_session_time
+  ON conversation_turn (runtime_id, agent_id, session_id, timestamp DESC, id DESC);
+
+CREATE INDEX idx_turn_pending_session_time
+  ON conversation_turn (runtime_id, agent_id, session_id, timestamp DESC, id DESC)
+  WHERE extraction_status = 'pending';
+
+CREATE INDEX idx_turn_session_created_at
+  ON conversation_turn (runtime_id, agent_id, session_id, created_at DESC);
+
+CREATE INDEX idx_organized_updated_at
+  ON organized_memory (updated_at);
+
+CREATE INDEX idx_source_raw
+  ON organized_memory_source (raw_memory_id);

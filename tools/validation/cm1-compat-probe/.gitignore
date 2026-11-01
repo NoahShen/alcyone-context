@@ -1,0 +1,6 @@
+# Scope: this directory only (tools/validation/cm1-compat-probe/).
+# Probe-local Gradle/Kotlin caches and build output must not enter the repository.
+/.gradle/
+/.kotlin/
+/build/
+/.local/
