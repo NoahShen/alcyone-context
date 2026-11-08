@@ -1,0 +1,27 @@
+{
+  "title": "OrganizationGovernanceOutputV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["NEW", "MERGE", "UPDATE"]
+    },
+    "targetMemoryId": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "content": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "domains": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

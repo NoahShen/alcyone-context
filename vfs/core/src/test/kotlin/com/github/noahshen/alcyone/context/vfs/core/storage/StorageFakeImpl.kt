@@ -29,6 +29,7 @@ class StorageFakeImpl(
         var onStat: VfsException? = null
         var onList: VfsException? = null
         var onWrite: VfsException? = null
+        var onSafeReplace: VfsException? = null
         var onCreateDirectory: VfsException? = null
         var onMove: VfsException? = null
         var onDelete: VfsException? = null
@@ -43,6 +44,9 @@ class StorageFakeImpl(
     /** 故障注入开关。 */
     val failures = Failures()
 
+    /** 在 safeReplace 真正改内容前执行的挂起点；Core 取消测试用它稳定停在提交前。 */
+    var onSafeReplace: (suspend (StoragePath, ByteArray) -> Unit)? = null
+
     /** 调用记录，形如 `read:notes/a.txt`，供测试断言 Storage 先于事务被调用。 */
     val calls: MutableList<String> = mutableListOf()
 
@@ -54,6 +58,7 @@ class StorageFakeImpl(
         failures.onStat = failure
         failures.onList = failure
         failures.onWrite = failure
+        failures.onSafeReplace = failure
         failures.onCreateDirectory = failure
         failures.onMove = failure
         failures.onDelete = failure
@@ -242,6 +247,27 @@ class StorageFakeImpl(
             StorageWriteMode.UPSERT -> {}
         }
 
+        val now = Instant.now()
+        nodes[key] = Node.File(content.copyOf(), now)
+        return StorageAttributes(NodeType.FILE, content.size.toLong(), now)
+    }
+
+    override suspend fun safeReplace(
+        path: StoragePath,
+        content: ByteArray,
+    ): StorageAttributes {
+        calls += "safeReplace:${path.toRelativeString()}"
+        failures.onSafeReplace?.let { throw it }
+        onSafeReplace?.invoke(path, content)
+        if (path.isRoot) throw VfsException(VfsErrorCode.TYPE_MISMATCH, "Cannot safeReplace root directory")
+        val key = path.toRelativeString()
+        val parentNode = nodes[path.parent.toRelativeString()]
+        if (parentNode is Node.File) {
+            throw VfsException(VfsErrorCode.TYPE_MISMATCH, "Parent path is an existing file: ${path.parent.toRelativeString()}")
+        }
+        if (nodes[key] is Node.Directory) {
+            throw VfsException(VfsErrorCode.TYPE_MISMATCH, "Target already exists as a directory: $key")
+        }
         val now = Instant.now()
         nodes[key] = Node.File(content.copyOf(), now)
         return StorageAttributes(NodeType.FILE, content.size.toLong(), now)

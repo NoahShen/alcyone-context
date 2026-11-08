@@ -815,6 +815,8 @@ class OrganizationPendingReadOpsImpl(
     override fun hasAnyPending(): Boolean = reader.hasAnyPending()
 
     override fun nextByRawCreatedAt(): String? = reader.nextByRawCreatedAt()
+
+    override fun listAllByRawCreatedAt(): List<String> = reader.listAllByRawCreatedAt()
 }
 
 /** Pending 写 Ops：入队幂等、出队返回真实行数。 */
@@ -828,6 +830,8 @@ class OrganizationPendingTxOpsImpl(
     override fun hasAnyPending(): Boolean = reader.hasAnyPending()
 
     override fun nextByRawCreatedAt(): String? = reader.nextByRawCreatedAt()
+
+    override fun listAllByRawCreatedAt(): List<String> = reader.listAllByRawCreatedAt()
 
     /** `INSERT OR IGNORE`：已存在时返回 0。 */
     override fun enqueue(rawId: String): Int = scope.updatePrepared(ContextSqlQueries.ENQUEUE_PENDING) { it.bindString(0, rawId) }.toInt()
@@ -851,6 +855,15 @@ internal class OrganizationPendingReader(
     fun nextByRawCreatedAt(): String? =
         queries.queryPrepared(ContextSqlQueries.SELECT_NEXT_PENDING_BY_RAW_CREATED_AT, {}) { cursor ->
             if (cursor.next().value) cursor.getString(0) else null
+        }
+
+    fun listAllByRawCreatedAt(): List<String> =
+        queries.queryPrepared(ContextSqlQueries.SELECT_ALL_PENDING_BY_RAW_CREATED_AT, {}) { cursor ->
+            val ids = mutableListOf<String>()
+            while (cursor.next().value) {
+                ids += cursor.getString(0) ?: throw persistenceUnavailable("organization pending row is missing a raw id")
+            }
+            ids
         }
 }
 

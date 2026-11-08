@@ -58,6 +58,34 @@ class ContextOrganizationPendingRealDbTest {
         }
 
     @Test
+    fun `listAllByRawCreatedAt returns an empty list when no raw is pending`() =
+        ConversationFixtures.withDatabase { executor ->
+            assertEquals(emptyList(), OrganizationPendingRepositoryImpl(executor).listAllByRawCreatedAt())
+        }
+
+    @Test
+    fun `listAllByRawCreatedAt returns every pending id in stable raw order without truncation`() =
+        ConversationFixtures.withDatabase { executor ->
+            val late = B2Fixtures.raw("raw-z-late", createdAt = B2Fixtures.T0.plusSeconds(10))
+            val sameA = B2Fixtures.raw("raw-a", createdAt = B2Fixtures.T0)
+            val sameB = B2Fixtures.raw("raw-b", createdAt = B2Fixtures.T0)
+            val bulk =
+                (0 until 30).map { index ->
+                    B2Fixtures.raw("raw-bulk-${index.toString().padStart(2, '0')}", createdAt = B2Fixtures.T0.plusMillis(index + 1L))
+                }
+            B2Fixtures.insertRaw(executor, late, sameA, sameB, *bulk.toTypedArray())
+
+            // 入队顺序与查询顺序相反，确保排序只由 raw.created_at, raw.id 决定。
+            B2Fixtures.enqueue(executor, late.id)
+            bulk.asReversed().forEach { raw -> B2Fixtures.enqueue(executor, raw.id) }
+            B2Fixtures.enqueue(executor, sameB.id)
+            B2Fixtures.enqueue(executor, sameA.id)
+
+            val expected = listOf(sameA.id, sameB.id) + bulk.map { it.id } + late.id
+            assertEquals(expected, OrganizationPendingRepositoryImpl(executor).listAllByRawCreatedAt())
+        }
+
+    @Test
     fun `enqueue of a missing raw fails the foreign key`() =
         ConversationFixtures.withDatabase { executor ->
             assertFailsWith<ContextPersistenceException> { B2Fixtures.enqueue(executor, "missing") }

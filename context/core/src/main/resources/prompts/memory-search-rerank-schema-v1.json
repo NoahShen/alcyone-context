@@ -1,0 +1,15 @@
+{
+  "title": "MemorySearchRerankOutputV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["memory_ids"],
+  "properties": {
+    "memory_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

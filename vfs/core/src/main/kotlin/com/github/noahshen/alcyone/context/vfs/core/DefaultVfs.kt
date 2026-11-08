@@ -354,6 +354,75 @@ class DefaultVfs(
         return boundary.withLock { writeInsideBoundary(uri, content, options.mode) }
     }
 
+    /**
+     * 安全发布一个文件：能力预检、目标事实确认、补父目录、Storage 原子替换和 Node/Event 提交都在同一个状态边界内。
+     *
+     * 目标不存在时创建，存在时完整替换；事件按替换前的**实际物理存在性**选择 `FILE_CREATED` / `FILE_WRITTEN`。
+     * 已登记 Node 保留 ID、Metadata 与 `registeredAt`，只推进 `updatedAt`。物理替换成功但状态提交失败时，
+     * 保留完整新文件并返回 `STATE_ERROR + PARTIAL`，不尝试跨 SQLite / 文件系统伪回滚。
+     */
+    override suspend fun safeReplace(
+        uri: VfsUri,
+        content: ByteArray,
+    ): NodeInfo {
+        val path = uri.path
+        if (content.size.toLong() > limits.defaultWriteMaxBytes) {
+            throw VfsException(
+                VfsErrorCode.LIMIT_EXCEEDED,
+                "Content of ${content.size} bytes exceeds the configured write limit of ${limits.defaultWriteMaxBytes} bytes",
+                uri,
+            )
+        }
+        return boundary.withLock { safeReplaceInsideBoundary(uri, content) }
+    }
+
+    private suspend fun safeReplaceInsideBoundary(
+        uri: VfsUri,
+        content: ByteArray,
+    ): NodeInfo {
+        val target = OperationGuard.check(OperationIntent.write(uri.path, WriteMode.UPSERT), router, capabilities).target!!
+        if (!capabilitiesOf(target).atomicReplace) {
+            throw VfsException(
+                VfsErrorCode.UNSUPPORTED_OPERATION,
+                "Cannot safeReplace '${uri.path}': the backing storage does not provide atomic replacement",
+                uri,
+            )
+        }
+        val storage = storageFor(target)
+        val existedBefore = confirmWriteTarget(uri, storage, target, WriteMode.UPSERT)
+        nodes.findByPath(uri.path)?.let { recorded ->
+            if (recorded.type != NodeType.FILE) {
+                throw VfsException(
+                    VfsErrorCode.CONFLICT,
+                    "Registered node at '${uri.path}' is ${recorded.type} but a file is being safely replaced; " +
+                        "safeReplace does not change stored node records",
+                    uri,
+                )
+            }
+        }
+
+        val createdDirectories = createMissingParents(uri, storage, target)
+        val replaced =
+            try {
+                storage.safeReplace(target.relativePath, content)
+            } catch (failure: VfsException) {
+                throw failure.withKnownChanges(createdDirectories)
+            }
+        return try {
+            pipeline.commitInsideBoundary { scope -> commitWrite(scope, uri, existedBefore, replaced) }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The file was atomically replaced in storage but the node state and event could not be committed: " +
+                    "${failure.message ?: failure::class.java.simpleName}",
+                uri,
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+    }
+
     private suspend fun writeInsideBoundary(
         uri: VfsUri,
         content: ByteArray,

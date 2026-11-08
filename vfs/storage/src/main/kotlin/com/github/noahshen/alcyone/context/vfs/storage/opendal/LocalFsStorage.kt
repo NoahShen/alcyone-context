@@ -11,14 +11,24 @@ import com.github.noahshen.alcyone.context.vfs.core.storage.StorageEntry
 import com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageStream
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import org.apache.opendal.Metadata
 import org.apache.opendal.OpenDALException
 import org.apache.opendal.Operator
 import org.apache.opendal.ServiceConfig
 import org.apache.opendal.WriteOptions
 import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -52,6 +62,13 @@ class LocalFsStorage private constructor(
     private val statFactory: (String) -> Metadata = { path -> operator.stat(path) },
     /** 测试用的观察点，每次进入 [storageCall] 会被叫一次。生产恒为 `null`。 */
     private val onNativeCall: ((String) -> Unit)?,
+    /** 同目录临时文件创建、完整写入确认、真实原子移动与清理的测试缝隙；生产都使用本文件内的实现。 */
+    private val tempFileFactory: (Path) -> Path,
+    private val tempWriter: (Path, ByteArray) -> Unit,
+    private val tempConfirmer: (Path, ByteArray) -> Unit,
+    private val atomicMover: (Path, Path) -> Unit,
+    private val tempCleaner: (Path) -> Unit,
+    private val beforeAtomicMove: (suspend (Path, Path) -> Unit)?,
 ) : StorageAdapter {
     /**
      * 防止「一边操作一边关闭」。
@@ -82,7 +99,13 @@ class LocalFsStorage private constructor(
     /** 已经打开、但还没关闭的文件流。关闭存储时要把它们都关掉。 */
     private val liveReaders = ConcurrentHashMap.newKeySet<ReaderHandle>()
 
+    /** 正在 safeReplace 的同目录临时文件；list 看到这些确切路径时不得把它们暴露成 VFS 条目。 */
+    private val activeTempFiles = ConcurrentHashMap.newKeySet<Path>()
+
     companion object {
+        internal const val SAFE_REPLACE_TEMP_PREFIX = ".alcyone-safe-replace-"
+        internal const val SAFE_REPLACE_TEMP_SUFFIX = ".tmp"
+
         /**
          * 打开一个本地磁盘存储。挂载根必须已经存在且是个目录，否则报 `INVALID_ARGUMENT`。
          *
@@ -104,6 +127,14 @@ class LocalFsStorage private constructor(
             readerFactory: (Operator) -> (String) -> InputStream = { operator -> { path -> operator.createInputStream(path) } },
             statFactory: (Operator) -> (String) -> Metadata = { operator -> { path -> operator.stat(path) } },
             onNativeCall: ((String) -> Unit)? = null,
+            tempFileFactory: (
+                Path,
+            ) -> Path = { parent -> Files.createTempFile(parent, SAFE_REPLACE_TEMP_PREFIX, SAFE_REPLACE_TEMP_SUFFIX) },
+            tempWriter: (Path, ByteArray) -> Unit = ::writeTempFile,
+            tempConfirmer: (Path, ByteArray) -> Unit = ::confirmTempFile,
+            atomicMover: (Path, Path) -> Unit = ::atomicReplaceFile,
+            tempCleaner: (Path) -> Unit = { path -> Files.deleteIfExists(path) },
+            beforeAtomicMove: (suspend (Path, Path) -> Unit)? = null,
         ): LocalFsStorage {
             var opened: Operator? = null
             return handoffOrRelease(release = { opened?.close() }) {
@@ -117,10 +148,16 @@ class LocalFsStorage private constructor(
                             operator,
                             realRoot,
                             options,
-                            capabilitiesOf(operator),
+                            capabilitiesOf(operator, realRoot),
                             readerFactory(operator),
                             statFactory(operator),
                             onNativeCall,
+                            tempFileFactory,
+                            tempWriter,
+                            tempConfirmer,
+                            atomicMover,
+                            tempCleaner,
+                            beforeAtomicMove,
                         )
                     } catch (e: Throwable) {
                         opened = null
@@ -151,7 +188,10 @@ class LocalFsStorage private constructor(
          * `nativeDirectoryMove` 恒为 `false`：后端改目录名会返回 `IsADirectory`。
          * `readOnly` 恒为 `false`：权限随时可能变，写失败时自然会给调用方报错。
          */
-        private fun capabilitiesOf(operator: Operator): StorageCapabilities {
+        private fun capabilitiesOf(
+            operator: Operator,
+            root: Path,
+        ): StorageCapabilities {
             val capability = operator.info.capability
             return StorageCapabilities(
                 nativeFileMove = capability.rename && capability.stat,
@@ -159,7 +199,60 @@ class LocalFsStorage private constructor(
                 createDirectory = capability.createDir,
                 boundedRead = capability.read,
                 readOnly = false,
+                atomicReplace = atomicReplaceAvailable(root),
             )
+        }
+
+        /** 在真实挂载根上验证当前 JVM / 文件系统能否原子替换一个既有目标，而不是只相信参数名。 */
+        private fun atomicReplaceAvailable(root: Path): Boolean {
+            var source: Path? = null
+            var target: Path? = null
+            return try {
+                source = Files.createTempFile(root, SAFE_REPLACE_TEMP_PREFIX, SAFE_REPLACE_TEMP_SUFFIX)
+                target = Files.createTempFile(root, SAFE_REPLACE_TEMP_PREFIX, SAFE_REPLACE_TEMP_SUFFIX)
+                val expected = byteArrayOf(0x41, 0x54, 0x4f, 0x4d, 0x49, 0x43)
+                Files.write(source, expected)
+                Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                Files.readAllBytes(target).contentEquals(expected)
+            } catch (_: AtomicMoveNotSupportedException) {
+                false
+            } catch (_: Exception) {
+                false
+            } finally {
+                runCatching { source?.let { Files.deleteIfExists(it) } }
+                runCatching { target?.let { Files.deleteIfExists(it) } }
+            }
+        }
+
+        /** 写入同目录临时文件并刷盘。 */
+        private fun writeTempFile(
+            temp: Path,
+            content: ByteArray,
+        ) {
+            FileChannel.open(temp, StandardOpenOption.WRITE).use { channel ->
+                val buffer = ByteBuffer.wrap(content)
+                while (buffer.hasRemaining()) channel.write(buffer)
+                channel.force(true)
+            }
+        }
+
+        /** 按实际文件属性确认临时文件类型和完整长度。 */
+        private fun confirmTempFile(
+            temp: Path,
+            content: ByteArray,
+        ) {
+            val attributes = Files.readAttributes(temp, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            if (!attributes.isRegularFile || attributes.size() != content.size.toLong()) {
+                throw VfsException(VfsErrorCode.STORAGE_ERROR, "safeReplace temporary file was not written completely")
+            }
+        }
+
+        /** 真实同文件系统原子替换；不支持时由 [safeReplace] 映射为 UNSUPPORTED_OPERATION。 */
+        private fun atomicReplaceFile(
+            temp: Path,
+            target: Path,
+        ) {
+            Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         }
     }
 
@@ -329,6 +422,91 @@ class LocalFsStorage private constructor(
             afterChange { lifetime.call { statOrFail(plain(path), "write", VfsEffect.PARTIAL) } }
         }
     }
+
+    /**
+     * 同目录临时文件完整写入并确认后，用真实 `ATOMIC_MOVE + REPLACE_EXISTING` 替换目标。
+     *
+     * 提交前任何失败都保留旧目标；不支持原子替换时明确报 `UNSUPPORTED_OPERATION`，绝不回退普通 move、覆盖或
+     * 先删后移。临时文件在成功、失败和取消后都尽力清理，清理失败不覆盖主异常，并把 effect 至少提升到 `PARTIAL`。
+     */
+    override suspend fun safeReplace(
+        path: StoragePath,
+        content: ByteArray,
+    ): StorageAttributes {
+        if (path.isRoot) throw VfsException(VfsErrorCode.TYPE_MISMATCH, "cannot safeReplace the mount root")
+        if (content.size.toLong() > options.defaultWriteLimitBytes) {
+            throw VfsException(
+                VfsErrorCode.LIMIT_EXCEEDED,
+                "safeReplace of ${content.size} bytes exceeds the configured limit of ${options.defaultWriteLimitBytes} bytes",
+            )
+        }
+
+        var prepared: PreparedSafeReplace? = null
+        try {
+            val ready =
+                call("safeReplace prepare", VfsEffect.NONE) {
+                    lifetime.call {
+                        val target = LocalPath.resolve(root, path.segments)
+                        requireExistingParentDirectory(path)
+                        val existing = metadataOrNull(plain(path))
+                        if (existing != null && typeOf(existing) == NodeType.DIRECTORY) {
+                            throw VfsException(VfsErrorCode.TYPE_MISMATCH, "safeReplace target already exists as a directory")
+                        }
+                        val temp = tempFileFactory(target.parent)
+                        val candidate = PreparedSafeReplace(target, temp)
+                        prepared = candidate
+                        activeTempFiles.add(temp)
+                        tempWriter(candidate.temp, content)
+                        tempConfirmer(candidate.temp, content)
+                        candidate
+                    }
+                }
+            prepared = ready
+
+            beforeAtomicMove?.invoke(ready.target, ready.temp)
+            currentCoroutineContext().ensureActive()
+
+            call("safeReplace atomic replace", VfsEffect.UNKNOWN) {
+                lifetime.call {
+                    try {
+                        atomicMover(ready.temp, ready.target)
+                    } catch (unsupported: AtomicMoveNotSupportedException) {
+                        throw VfsException(
+                            VfsErrorCode.UNSUPPORTED_OPERATION,
+                            "local storage cannot atomically replace the target",
+                        ).apply { initCause(unsupported) }
+                    }
+                }
+            }
+
+            return call("safeReplace attributes", VfsEffect.PARTIAL) {
+                lifetime.call {
+                    val attributes = statOrFail(plain(path), "safeReplace", VfsEffect.PARTIAL)
+                    if (attributes.type != NodeType.FILE) {
+                        throw VfsException(
+                            VfsErrorCode.TYPE_MISMATCH,
+                            "safeReplace target is not a file after atomic replacement",
+                            effect = VfsEffect.PARTIAL,
+                        )
+                    }
+                    attributes
+                }
+            }
+        } catch (failure: Throwable) {
+            val cleanupFailure = prepared?.let { cleanupTempAfterFailure(it.temp) }
+            throw failure.withSafeReplaceCleanupFailure(cleanupFailure)
+        } finally {
+            prepared?.let { activeTempFiles.remove(it.temp) }
+        }
+    }
+
+    private fun cleanupTempAfterFailure(temp: Path): Throwable? =
+        try {
+            tempCleaner(temp)
+            null
+        } catch (cleanup: Throwable) {
+            cleanup
+        }
 
     /**
      * 建目录。已经存在就算成功；上级目录不存在时后端会一层层补出来。
@@ -575,10 +753,13 @@ class LocalFsStorage private constructor(
             if (name.isEmpty() || '/' in name) {
                 throw VfsException(VfsErrorCode.STORAGE_ERROR, "local storage returned an entry outside the requested directory")
             }
+            val childPath = path.resolve(name)
+            val physicalChild = childPath.segments.fold(root) { current, segment -> current.resolve(segment) }
+            if (physicalChild in activeTempFiles) continue
             reported += name
             if (refuseSymbolicLinks) {
                 // 列出来的符号链接也不跟过去。
-                LocalPath.resolve(root, path.resolve(name).segments)
+                LocalPath.resolve(root, childPath.segments)
             }
             val attributes = attributesOf(entry.metadata)
             children += StorageEntry(name, attributes.type, attributes)
@@ -601,6 +782,7 @@ class LocalFsStorage private constructor(
         Files.newDirectoryStream(physical).use { stream ->
             for (child in stream) {
                 val name = child.fileName.toString()
+                if (child in activeTempFiles) continue
                 if (name in reported) continue
                 if (!refuseSymbolicLinks) {
                     // 非递归删除只需要知道「是否为空」，所以看不到的条目一律算非空。
@@ -664,4 +846,38 @@ class LocalFsStorage private constructor(
             mapStorageErrors("close read stream") { handle.release() }
         }
     }
+}
+
+/** 一次 safeReplace 已经准备好的同目录临时文件与最终目标。 */
+private data class PreparedSafeReplace(
+    val target: Path,
+    val temp: Path,
+)
+
+/**
+ * 临时文件清理失败不能覆盖主异常：取消原样传播，只挂 suppressed；VfsException 保留 code / message / cause，
+ * 并把仍为 NONE 的 effect 提升为 PARTIAL，表示临时文件可能残留。
+ */
+private fun Throwable.withSafeReplaceCleanupFailure(cleanupFailure: Throwable?): Throwable {
+    if (cleanupFailure == null) return this
+    if (this is CancellationException) {
+        addSuppressed(cleanupFailure)
+        return this
+    }
+    if (this !is VfsException) {
+        addSuppressed(cleanupFailure)
+        return this
+    }
+    val elevated =
+        VfsException(
+            code = code,
+            message = message ?: code.name,
+            uri = uri,
+            operationId = operationId,
+            effect = if (effect == VfsEffect.NONE) VfsEffect.PARTIAL else effect,
+        )
+    cause?.let(elevated::initCause)
+    suppressed.forEach(elevated::addSuppressed)
+    elevated.addSuppressed(cleanupFailure)
+    return elevated
 }

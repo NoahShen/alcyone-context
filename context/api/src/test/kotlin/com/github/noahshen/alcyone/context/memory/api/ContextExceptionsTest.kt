@@ -12,12 +12,15 @@ class ContextExceptionsTest {
         val lifecycleEx = ContextLifecycleException(ContextLifecycleErrorCode.CLOSED, "already closed")
         val persistenceEx = ContextPersistenceException(ContextPersistenceErrorCode.DATABASE_NOT_INITIALIZED, "missing db")
         val ingestionEx = ContextIngestionException(ContextIngestionErrorCode.TURN_CONFLICT, "content conflict")
+        val resourceEx = ContextResourceException(ContextResourceErrorCode.NOT_FOUND, "resource missing")
 
         assertTrue(configEx is ContextException)
         assertTrue(configEx is RuntimeException)
         assertTrue(lifecycleEx is ContextException)
         assertTrue(persistenceEx is ContextException)
         assertTrue(ingestionEx is ContextException)
+        assertTrue(resourceEx is ContextException)
+        assertTrue(resourceEx is RuntimeException)
     }
 
     @Test
@@ -70,6 +73,17 @@ class ContextExceptionsTest {
         ContextIngestionErrorCode.entries.forEach { code ->
             val e = ContextIngestionException(code, "test")
             assertSame(code, e.errorCode)
+        }
+    }
+
+    @Test
+    fun `ContextResourceException 只暴露安全错误码且没有 cause`() {
+        ContextResourceErrorCode.entries.forEach { code ->
+            val exception = ContextResourceException(code, "safe resource failure")
+            assertSame(code, exception.errorCode)
+            assertTrue(exception.message!!.contains(code.name))
+            assertTrue(exception.message!!.contains("safe resource failure"))
+            assertNull(exception.cause)
         }
     }
 }

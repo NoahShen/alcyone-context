@@ -161,6 +161,11 @@ internal object ContextSqlQueries {
         "SELECT p.raw_memory_id FROM organization_pending p JOIN raw_memory r ON r.id = p.raw_memory_id " +
             "ORDER BY r.created_at ASC, r.id ASC LIMIT 1"
 
+    /** 一次性取得全部 Pending，按 Raw 创建时间与 id 稳定排序；不得附加 limit。 */
+    const val SELECT_ALL_PENDING_BY_RAW_CREATED_AT =
+        "SELECT p.raw_memory_id FROM organization_pending p JOIN raw_memory r ON r.id = p.raw_memory_id " +
+            "ORDER BY r.created_at ASC, r.id ASC"
+
     /** 重复入队幂等：已存在时影响行数为 0。 */
     const val ENQUEUE_PENDING = "INSERT OR IGNORE INTO organization_pending (raw_memory_id) VALUES (?)"
 

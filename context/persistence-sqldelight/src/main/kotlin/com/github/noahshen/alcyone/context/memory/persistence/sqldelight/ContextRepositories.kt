@@ -64,6 +64,9 @@ class OrganizationPendingRepositoryImpl(
 
     override suspend fun nextByRawCreatedAt(): String? =
         executor.read { scope -> OrganizationPendingReadOpsImpl(scope).nextByRawCreatedAt() }
+
+    override suspend fun listAllByRawCreatedAt(): List<String> =
+        executor.read { scope -> OrganizationPendingReadOpsImpl(scope).listAllByRawCreatedAt() }
 }
 
 /** Dreaming Checkpoint 读取。 */

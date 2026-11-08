@@ -1,0 +1,23 @@
+{
+  "title": "MemoryMapOutputV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["overview", "navigation", "domains"],
+  "properties": {
+    "overview": {
+      "type": "string",
+      "minLength": 1
+    },
+    "navigation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "domains": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

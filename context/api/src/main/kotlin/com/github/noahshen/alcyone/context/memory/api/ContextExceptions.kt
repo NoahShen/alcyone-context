@@ -69,3 +69,23 @@ class ContextIngestionException(
     message: String,
     cause: Throwable? = null,
 ) : ContextException("[$errorCode] $message", cause)
+
+/** Resource 只读访问的安全错误码。 */
+enum class ContextResourceErrorCode {
+    INVALID_URI,
+    OUT_OF_SCOPE,
+    NOT_FOUND,
+    TYPE_MISMATCH,
+    LIMIT_EXCEEDED,
+    UNAVAILABLE,
+}
+
+/**
+ * Resource 读取失败。
+ *
+ * 不携带 cause：VFS/OpenDAL 异常链可能包含物理路径、凭据或后端原文，由 Runtime 在边界脱敏。
+ */
+class ContextResourceException(
+    val errorCode: ContextResourceErrorCode,
+    message: String,
+) : ContextException("[$errorCode] $message")

@@ -1,15 +1,26 @@
 package com.github.noahshen.alcyone.context.memory.runtime
 
 import com.github.noahshen.alcyone.context.memory.api.AlcyoneContext
+import com.github.noahshen.alcyone.context.memory.api.BootstrapContext
+import com.github.noahshen.alcyone.context.memory.api.ContextConfigErrorCode
+import com.github.noahshen.alcyone.context.memory.api.ContextConfigException
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleErrorCode
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleState
+import com.github.noahshen.alcyone.context.memory.api.ContextRetrievalErrorCode
+import com.github.noahshen.alcyone.context.memory.api.ContextRetrievalException
 import com.github.noahshen.alcyone.context.memory.api.ContextStatus
 import com.github.noahshen.alcyone.context.memory.api.ConversationTurn
 import com.github.noahshen.alcyone.context.memory.api.IngestResult
 import com.github.noahshen.alcyone.context.memory.api.IngestStatus
+import com.github.noahshen.alcyone.context.memory.api.MapStatus
+import com.github.noahshen.alcyone.context.memory.api.OrganizedMemory
+import com.github.noahshen.alcyone.context.memory.api.RawMemory
+import com.github.noahshen.alcyone.context.memory.api.ResourceMetadata
 import com.github.noahshen.alcyone.context.memory.api.SessionKey
 import com.github.noahshen.alcyone.context.memory.api.StorageStatus
+import com.github.noahshen.alcyone.context.memory.api.WorkerState
+import com.github.noahshen.alcyone.context.memory.api.WorkerStatus
 import com.github.noahshen.alcyone.context.memory.core.extraction.ExtractionCommitter
 import com.github.noahshen.alcyone.context.memory.core.extraction.ExtractionRunner
 import com.github.noahshen.alcyone.context.memory.core.id.MemoryIdGeneratorImpl
@@ -21,6 +32,7 @@ import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionServic
 import com.github.noahshen.alcyone.context.memory.core.llm.ConservativeTokenEstimator
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmResponseFormat
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmTask
+import com.github.noahshen.alcyone.context.memory.core.organization.OrganizationCommitter
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseExecutor
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseFactory
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseImpl
@@ -34,6 +46,29 @@ import com.github.noahshen.alcyone.context.memory.runtime.extraction.JsonExtract
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.OrganizationWakeup
 import com.github.noahshen.alcyone.context.memory.runtime.llm.KtorLlmClient
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmConfig
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapConfig
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapGenerator
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapGeneratorPort
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapPeriodicTickSource
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapPipeline
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapPublisher
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapService
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapWorkerStatus
+import com.github.noahshen.alcyone.context.memory.runtime.organization.DefaultOrganizationWorker
+import com.github.noahshen.alcyone.context.memory.runtime.organization.LlmCandidateRetriever
+import com.github.noahshen.alcyone.context.memory.runtime.organization.LlmGovernanceService
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationCommitOperation
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationConfig
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationGovernanceDecider
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationMapWakeup
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationPeriodicTickSource
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationPipeline
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationRoundRunner
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationSourceGuard
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationWorkerStatus
+import com.github.noahshen.alcyone.context.memory.runtime.resource.ContextResourceAccess
+import com.github.noahshen.alcyone.context.memory.runtime.retrieval.MemorySearchService
+import com.github.noahshen.alcyone.context.memory.runtime.retrieval.RetrievalConfig
 import com.github.noahshen.alcyone.context.vfs.runtime.AlcyoneVfs
 import com.github.noahshen.alcyone.context.vfs.runtime.VfsRuntimeConfig
 import kotlinx.coroutines.CancellationException
@@ -44,9 +79,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ThreadContextElement
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -54,14 +93,15 @@ import java.nio.file.Path
 import java.time.Clock
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.CoroutineContext
 import kotlin.time.Duration
 
 /**
  * [AlcyoneContext] 的唯一实现（CT06-B2）。
  *
- * 资源所有权：`start` 内按 `executor → vfs → llm → extraction pipeline` 顺序创建（未配置 `context.llm`
- * 时跳过 llm；未注入 Extraction Runner 时不建 pipeline），全部成功后才发布 `RUNNING`；成功后由本实例持有，
- * 关闭时按「pipeline → llm → vfs → executor」逆序释放。
+ * 资源所有权：`start` 内按 `executor → vfs → llm → organization → memory map → extraction`
+ * 顺序创建，全部成功后才发布 `RUNNING`；成功后由本实例持有，关闭时按
+ * 「extraction → organization → memory map → llm → vfs → executor」顺序释放。
  * `ContextDatabaseImpl` 无常驻资源，只随执行器释放。`HttpClient` 只在 `start()` 内创建，
  * `create()` 仍零副作用。
  *
@@ -92,7 +132,7 @@ internal class AlcyoneContextImpl(
     /**
      * `context.llm` 的实例自有快照；`null` = 未配置（保持 ingestion-only）。
      *
-     * `start()` 内据此创建 [KtorLlmClient]（受管资源），关闭时最先释放。
+     * `start()` 内据此创建 [KtorLlmClient]（受管资源），关闭时在三条 pipeline 之后释放。
      */
     internal val llmConfig: LlmConfig? = null,
     /** `context.extraction` 的实例自有快照（CT09-B3）；默认值已由 `ExtractionConfig` 自校验。 */
@@ -103,8 +143,28 @@ internal class AlcyoneContextImpl(
     internal val extractionIdleTickSource: IdleTickSource? = null,
     /** 内部测试用：pipeline 构造后、`start()` 前设置接缝。 */
     internal val extractionPipelineConfigurator: ((ExtractionPipeline) -> Unit)? = null,
-    /** Organization 唤醒（B3 默认 no-op；CT13 接真实 Trigger；仅 internal 注入）。 */
-    internal val organizationWakeup: OrganizationWakeup = OrganizationWakeup { },
+    /** 显式测试注入的 Extraction → Organization wakeup；null 时使用真实 OrganizationPipeline.wakeup。 */
+    internal val organizationWakeup: OrganizationWakeup? = null,
+    /** `context.organization` 配置快照；null 表示不创建 Organization pipeline。 */
+    internal val organizationConfig: OrganizationConfig? = null,
+    /** 内部测试用：Periodic Cron tick 来源。 */
+    internal val organizationTickSource: OrganizationPeriodicTickSource? = null,
+    /** 内部测试用：Organization pipeline 构造后、start 前接缝。 */
+    internal val organizationPipelineConfigurator: ((OrganizationPipeline) -> Unit)? = null,
+    /** 测试可替换 Map 通知；null 时使用当前 MemoryMapPipeline 的生产刷新闭包。 */
+    internal val organizationMapWakeup: OrganizationMapWakeup? = null,
+    /** 内部测试用：替换真实 Organization Worker，Scheduler/Cron/Pipeline 仍为生产实现。 */
+    internal val organizationRunner: OrganizationRoundRunner? = null,
+    /** `context.memoryMap` 配置快照；null 表示不创建 Map pipeline。 */
+    internal val memoryMapConfig: MemoryMapConfig? = null,
+    /** 内部测试用：替换真实 Memory Map Generator；null 时使用生产 Generator。 */
+    internal val memoryMapGenerator: MemoryMapGeneratorPort? = null,
+    /** 内部测试用：Periodic Map Cron tick 来源。 */
+    internal val memoryMapTickSource: MemoryMapPeriodicTickSource? = null,
+    /** 内部测试用：Memory Map pipeline 构造后、start 前接缝。 */
+    internal val memoryMapPipelineConfigurator: ((MemoryMapPipeline) -> Unit)? = null,
+    /** `context.retrieval` 配置快照（CT20-B2）。 */
+    internal val retrievalConfig: RetrievalConfig = RetrievalConfig(),
     /** 服务端 `created_at` 时钟；生产为系统 UTC，测试可注入固定时钟。 */
     private val clock: Clock = Clock.systemUTC(),
     /** Count Trigger 通知替身；生产默认 no-op，测试可注入记录替身。 */
@@ -163,6 +223,9 @@ internal class AlcyoneContextImpl(
 
     private var vfs: AlcyoneVfs? = null
 
+    /** RUNNING 时绑定当前 VFS；关闭开始后立即清空，冷 Flow 不会继续取得旧引用。 */
+    private var resourceAccess: ContextResourceAccess? = null
+
     private var ingestion: DelegatingIngestionService? = null
 
     /** `start()` 内创建的受管 LLM client（未配置 llm 时为 null）。 */
@@ -170,6 +233,16 @@ internal class AlcyoneContextImpl(
 
     /** `start()` 内组装的 Extraction pipeline（未注入 Runner 时为 null）。 */
     private var extractionPipeline: ExtractionPipeline? = null
+
+    /** `start()` 内组装的 Organization pipeline（未配置 organization 时为 null）。 */
+    private var organizationPipeline: OrganizationPipeline? = null
+
+    /** `start()` 内组装的 Memory Map pipeline（未配置 memoryMap 时为 null）。 */
+    private var memoryMapPipeline: MemoryMapPipeline? = null
+
+    /** 生产默认 Map wakeup：仅在当前实例持有 pipeline 时合并一次刷新信号。 */
+    private val effectiveOrganizationMapWakeup: OrganizationMapWakeup =
+        organizationMapWakeup ?: OrganizationMapWakeup { currentMemoryMapPipeline()?.requestRefresh() }
 
     private val startWaiters = AtomicInteger()
 
@@ -212,6 +285,8 @@ internal class AlcyoneContextImpl(
         var acquiredExecutor: ContextDatabaseExecutor? = null
         var acquiredVfs: AlcyoneVfs? = null
         var acquiredLlm: KtorLlmClient? = null
+        var acquiredOrganizationPipeline: OrganizationPipeline? = null
+        var acquiredMemoryMapPipeline: MemoryMapPipeline? = null
         var acquiredPipeline: ExtractionPipeline? = null
         var published = false
         var failureToThrow: Throwable? = null
@@ -222,8 +297,16 @@ internal class AlcyoneContextImpl(
             acquiredVfs = AlcyoneVfs.create(vfsConfig)
             // HttpClient（含引擎）只在这里创建：create() 保持零副作用。
             acquiredLlm = llmConfig?.let { KtorLlmClient(it) }
+            acquiredOrganizationPipeline =
+                defaultOrganizationPipeline(assembledDatabase, acquiredLlm)
+                    ?.also { pipeline -> organizationPipelineConfigurator?.invoke(pipeline) }
+            acquiredMemoryMapPipeline =
+                defaultMemoryMapPipeline(assembledDatabase, acquiredLlm, acquiredVfs)
+                    ?.also { pipeline -> memoryMapPipelineConfigurator?.invoke(pipeline) }
+            val organizationWakeup =
+                organizationWakeup ?: acquiredOrganizationPipeline?.wakeup ?: OrganizationWakeup { }
             // pipeline 只使用已取得的 DB/配置/时钟；Runner 被激活门挡住，RUNNING 发布前不会执行。
-            val pipelineRunner = extractionRunner ?: defaultExtractionRunner(assembledDatabase, acquiredLlm)
+            val pipelineRunner = extractionRunner ?: defaultExtractionRunner(assembledDatabase, acquiredLlm, organizationWakeup)
             acquiredPipeline =
                 pipelineRunner?.let { runner ->
                     ExtractionPipeline(
@@ -236,6 +319,8 @@ internal class AlcyoneContextImpl(
                         reporter = ingestionReporter,
                     ).also { pipeline -> extractionPipelineConfigurator?.invoke(pipeline) }
                 }
+            acquiredOrganizationPipeline?.start()
+            acquiredMemoryMapPipeline?.start()
             acquiredPipeline?.start()
             startProbe.afterResourcesAcquired()
             published =
@@ -246,7 +331,10 @@ internal class AlcyoneContextImpl(
                         executor = acquiredExecutor
                         database = assembledDatabase
                         vfs = acquiredVfs
+                        resourceAccess = acquiredVfs?.let(::ContextResourceAccess)
                         llm = acquiredLlm
+                        organizationPipeline = acquiredOrganizationPipeline
+                        memoryMapPipeline = acquiredMemoryMapPipeline
                         extractionPipeline = acquiredPipeline
                         ingestion =
                             createIngestionService(
@@ -262,7 +350,15 @@ internal class AlcyoneContextImpl(
                 // close 已获胜：不发布 RUNNING，自行逆序释放已取得资源；close 会等这次 start 结束。
                 startAbortedByClose = true
                 val rejected = closed("context was closed while starting")
-                val cleanupFailure = releaseResources(acquiredPipeline, acquiredLlm, acquiredVfs, acquiredExecutor)
+                val cleanupFailure =
+                    releaseResources(
+                        acquiredPipeline,
+                        acquiredOrganizationPipeline,
+                        acquiredMemoryMapPipeline,
+                        acquiredLlm,
+                        acquiredVfs,
+                        acquiredExecutor,
+                    )
                 val failure = cleanupFailure ?: rejected
                 if (cleanupFailure != null) {
                     // 实际清理失败必须成为共享失败，close 与后续等待者都要观察到它。
@@ -274,14 +370,24 @@ internal class AlcyoneContextImpl(
                 failureToThrow = failure
             } else {
                 // RUNNING 已发布：先放行 Runner，再通知 start 等待者。
+                acquiredOrganizationPipeline?.activate()
                 acquiredPipeline?.activate()
+                acquiredMemoryMapPipeline?.activate()
                 signal.complete(Unit)
             }
         } catch (failure: Throwable) {
             if (!published) {
                 // 取消也可能发生在这里：状态与共享结果必须在 NonCancellable 中落定，不能停在 STARTING。
                 withContext(NonCancellable) {
-                    val cleanupFailure = releaseResources(acquiredPipeline, acquiredLlm, acquiredVfs, acquiredExecutor)
+                    val cleanupFailure =
+                        releaseResources(
+                            acquiredPipeline,
+                            acquiredOrganizationPipeline,
+                            acquiredMemoryMapPipeline,
+                            acquiredLlm,
+                            acquiredVfs,
+                            acquiredExecutor,
+                        )
                     cleanupFailure?.let(failure::addSuppressed)
                     if (terminalFailure == null) terminalFailure = failure
                     if (startFailure == null) startFailure = failure
@@ -297,6 +403,7 @@ internal class AlcyoneContextImpl(
 
     override fun close() {
         rejectIfInsideOwnExtractionCallback("close()")
+        rejectIfInsideOwnOrganizationCallback("close()")
         rejectIfInsideOwnNotification("close()")
         val (mine, state) = beginClose()
         var interrupted = Thread.interrupted()
@@ -324,6 +431,7 @@ internal class AlcyoneContextImpl(
 
     override suspend fun closeAsync() {
         rejectIfInsideOwnExtractionCallback("closeAsync()")
+        rejectIfInsideOwnOrganizationCallback("closeAsync()")
         rejectIfInsideOwnNotificationAsync("closeAsync()")
         val (mine, state) = beginClose()
         if (!mine) {
@@ -362,6 +470,10 @@ internal class AlcyoneContextImpl(
      */
     private fun rejectIfInsideOwnExtractionCallback(entry: String) {
         ExtractionCallbackMarker.rejectionFor(this, entry)?.let { throw it }
+    }
+
+    private fun rejectIfInsideOwnOrganizationCallback(entry: String) {
+        OrganizationCallbackMarker.rejectionFor(this, entry)?.let { throw it }
     }
 
     private fun insideNotificationClose(entry: String): ContextLifecycleException =
@@ -443,6 +555,8 @@ internal class AlcyoneContextImpl(
         val startedAt = System.nanoTime()
         var waitForStart: CompletableDeferred<Unit>? = null
         var pipelineToClose: ExtractionPipeline? = null
+        var organizationPipelineToClose: OrganizationPipeline? = null
+        var memoryMapPipelineToClose: MemoryMapPipeline? = null
         var llmToClose: KtorLlmClient? = null
         var vfsToClose: AlcyoneVfs? = null
         var executorToClose: ContextDatabaseExecutor? = null
@@ -461,14 +575,21 @@ internal class AlcyoneContextImpl(
                 ContextLifecycleState.RUNNING -> {
                     lifecycle = ContextLifecycleState.STOPPING
                     pipelineToClose = extractionPipeline
-                    // 与 RUNNING→STOPPING 同锁封闭 extraction 准入：不得等到 cancelNotifications/releaseResources。
+                    organizationPipelineToClose = organizationPipeline
+                    memoryMapPipelineToClose = memoryMapPipeline
+                    // 与 RUNNING→STOPPING 同锁封闭三条 pipeline 准入。
                     pipelineToClose?.beginClosing()
+                    organizationPipelineToClose?.beginClosing()
+                    memoryMapPipelineToClose?.beginClosing()
                     llmToClose = llm
                     vfsToClose = vfs
                     executorToClose = executor
                     extractionPipeline = null
+                    organizationPipeline = null
+                    memoryMapPipeline = null
                     llm = null
                     vfs = null
+                    resourceAccess = null
                     executor = null
                     database = null
                     ingestion = null
@@ -497,14 +618,21 @@ internal class AlcyoneContextImpl(
         }
         synchronized(lock) {
             pipelineToClose = pipelineToClose ?: extractionPipeline
+            organizationPipelineToClose = organizationPipelineToClose ?: organizationPipeline
+            memoryMapPipelineToClose = memoryMapPipelineToClose ?: memoryMapPipeline
             // 兜底：任何路径取到 pipeline 都先封闭准入（幂等、短同步）。
             pipelineToClose?.beginClosing()
+            organizationPipelineToClose?.beginClosing()
+            memoryMapPipelineToClose?.beginClosing()
             llmToClose = llmToClose ?: llm
             vfsToClose = vfsToClose ?: vfs
             executorToClose = executorToClose ?: executor
             extractionPipeline = null
+            organizationPipeline = null
+            memoryMapPipeline = null
             llm = null
             vfs = null
+            resourceAccess = null
             executor = null
             database = null
             ingestion = null
@@ -512,7 +640,14 @@ internal class AlcyoneContextImpl(
         }
 
         val failures = mutableListOf<Throwable>()
-        releaseResources(pipelineToClose, llmToClose, vfsToClose, executorToClose)?.let(failures::add)
+        releaseResources(
+            pipelineToClose,
+            organizationPipelineToClose,
+            memoryMapPipelineToClose,
+            llmToClose,
+            vfsToClose,
+            executorToClose,
+        )?.let(failures::add)
         synchronized(lock) { lifecycle = ContextLifecycleState.CLOSED }
         recordShutdownWindow(startedAt)
         if (failures.isNotEmpty()) {
@@ -520,6 +655,70 @@ internal class AlcyoneContextImpl(
             failures.drop(1).forEach(primary::addSuppressed)
             throw primary
         }
+    }
+
+    /** 组装真实 Organization Pipeline；测试可用 Runner 替换业务 Worker，但 Scheduler/Cron/门仍走生产实现。 */
+    private fun defaultOrganizationPipeline(
+        database: ContextDatabaseImpl,
+        llmClient: KtorLlmClient?,
+    ): OrganizationPipeline? {
+        val config = organizationConfig ?: return null
+        val ownedLlm = llmConfig ?: throw invalidOrganizationConfig("context.llm is required for organization")
+        val client = llmClient ?: throw invalidOrganizationConfig("context.llm client is required for organization")
+        val candidateRetriever = LlmCandidateRetriever(database, client, ownedLlm)
+        val governanceService = LlmGovernanceService(client, ownedLlm)
+        val committer = OrganizationCommitter(database, MemoryIdGeneratorImpl(clock), clock)
+        val productionWorker =
+            DefaultOrganizationWorker(
+                database = database,
+                sourceGuard = OrganizationSourceGuard(database),
+                candidateRetriever = candidateRetriever,
+                governanceDecider =
+                    OrganizationGovernanceDecider { rawMemory, candidates ->
+                        governanceService.decide(rawMemory, candidates)
+                    },
+                commit =
+                    OrganizationCommitOperation { rawId, candidates, decision ->
+                        committer.commit(rawId, candidates, decision)
+                    },
+                mapWakeup = effectiveOrganizationMapWakeup,
+            )
+        val selectedRunner = organizationRunner ?: productionWorker
+        val callbackRunner =
+            OrganizationRoundRunner {
+                withContext(OrganizationCallbackMarker(this@AlcyoneContextImpl)) {
+                    selectedRunner.runRound()
+                }
+            }
+        return OrganizationPipeline(
+            config = config,
+            database = database,
+            runner = callbackRunner,
+            clock = clock,
+            tickSource = organizationTickSource,
+        )
+    }
+
+    /** 组装生产 Memory Map Pipeline；Generator/Publisher/Service 均只使用本次 start 已取得的资源。 */
+    private fun defaultMemoryMapPipeline(
+        database: ContextDatabaseImpl,
+        llmClient: KtorLlmClient?,
+        vfs: AlcyoneVfs?,
+    ): MemoryMapPipeline? {
+        val config = memoryMapConfig ?: return null
+        val ownedLlm = llmConfig ?: throw invalidMemoryMapConfig("context.llm is required for memory map")
+        val client = llmClient ?: throw invalidMemoryMapConfig("context.llm client is required for memory map")
+        val runningVfs = vfs ?: throw invalidMemoryMapConfig("vfs is required for memory map")
+        val generator = memoryMapGenerator ?: MemoryMapGenerator(database, client, ownedLlm, clock)
+        val service = MemoryMapService(generator, MemoryMapPublisher(runningVfs))
+        return MemoryMapPipeline(
+            config = config,
+            database = database,
+            vfs = runningVfs,
+            service = service,
+            clock = clock,
+            tickSource = memoryMapTickSource,
+        )
     }
 
     /**
@@ -533,6 +732,7 @@ internal class AlcyoneContextImpl(
     private fun defaultExtractionRunner(
         database: ContextDatabaseImpl,
         llmClient: KtorLlmClient?,
+        organizationWakeup: OrganizationWakeup,
     ): ExtractionRunner? {
         val config = llmConfig ?: return null
         // 合法性判定（CT11-B3 §2.1）：不合法绑定不构造 Builder/pipeline，保留既有 LLM client 生命周期。
@@ -571,15 +771,21 @@ internal class AlcyoneContextImpl(
         return profile.jsonMode == LlmResponseFormat.JSON_SCHEMA || profile.jsonMode == LlmResponseFormat.JSON_OBJECT
     }
 
+    private fun invalidOrganizationConfig(detail: String): ContextConfigException =
+        ContextConfigException(ContextConfigErrorCode.INVALID_CONFIG, detail)
+
+    private fun invalidMemoryMapConfig(detail: String): ContextConfigException =
+        ContextConfigException(ContextConfigErrorCode.INVALID_CONFIG, detail)
+
     /**
-     * 逆序释放资源：Extraction pipeline 先关（先 Idle Cron/扫描、再 Scheduler/Runner 真实 join），
-     * LLM client 次之（取消在途并等待真实收尾），VFS 再次之（自行停止准入并等在途），
-     * 执行器最后关（CT04 在途 drain 后关连接）。
+     * 固定释放顺序：Extraction → Organization → MemoryMap → LLM → VFS → executor。
      *
      * 所有资源都尽力释放：任一失败也继续关；首个失败作为主失败返回，其余 `addSuppressed`。
      */
     private suspend fun releaseResources(
         acquiredPipeline: ExtractionPipeline?,
+        acquiredOrganizationPipeline: OrganizationPipeline?,
+        acquiredMemoryMapPipeline: MemoryMapPipeline?,
         acquiredLlm: KtorLlmClient?,
         acquiredVfs: AlcyoneVfs?,
         acquiredExecutor: ContextDatabaseExecutor?,
@@ -587,6 +793,20 @@ internal class AlcyoneContextImpl(
         var primary: Throwable? = null
         withContext(NonCancellable) {
             acquiredPipeline?.let { pipeline ->
+                try {
+                    pipeline.closeAsync()
+                } catch (failure: Throwable) {
+                    primary = chain(primary, failure)
+                }
+            }
+            acquiredOrganizationPipeline?.let { pipeline ->
+                try {
+                    pipeline.closeAsync()
+                } catch (failure: Throwable) {
+                    primary = chain(primary, failure)
+                }
+            }
+            acquiredMemoryMapPipeline?.let { pipeline ->
                 try {
                     pipeline.closeAsync()
                 } catch (failure: Throwable) {
@@ -654,8 +874,20 @@ internal class AlcyoneContextImpl(
     /** 测试/诊断用：当前组装的 Extraction pipeline（未注入 Runner/未运行/已关闭为 null）。 */
     internal fun pipelineForTesting(): ExtractionPipeline? = synchronized(lock) { extractionPipeline }
 
+    /** 测试/诊断用：当前组装的 Organization pipeline（未配置/未运行/已关闭为 null）。 */
+    internal fun organizationPipelineForTesting(): OrganizationPipeline? = synchronized(lock) { organizationPipeline }
+
+    /** 测试/诊断用：当前组装的 Memory Map pipeline（未配置/未运行/已关闭为 null）。 */
+    internal fun memoryMapPipelineForTesting(): MemoryMapPipeline? = synchronized(lock) { memoryMapPipeline }
+
+    /** 测试/诊断用：生产 Organization 提交后实际使用的 Map wakeup。 */
+    internal fun organizationMapWakeupForTesting(): OrganizationMapWakeup = effectiveOrganizationMapWakeup
+
     /** 测试/诊断用：当前持有的 VFS（未运行或已关闭为 null），不对外公开。 */
     internal fun vfsForTesting(): AlcyoneVfs? = vfs
+
+    /** 测试/诊断用：当前 Resource access（未运行或已关闭为 null），不对外公开。 */
+    internal fun resourceAccessForTesting(): ContextResourceAccess? = synchronized(lock) { resourceAccess }
 
     /** 测试/诊断用：共享终态失败（含启动失败与清理失败）。 */
     internal fun terminalFailureForTesting(): Throwable? = terminalFailure
@@ -673,6 +905,98 @@ internal class AlcyoneContextImpl(
 
     /** 测试/诊断用：当前持有的数据库入口（未运行或已关闭为 null），不对外公开。 */
     internal fun databaseForTesting(): ContextDatabaseImpl? = database
+
+    override suspend fun loadMeta(uri: String): ResourceMetadata = currentResourceAccess("load resource metadata").loadMeta(uri)
+
+    override suspend fun read(uri: String): ByteArray = currentResourceAccess("read resource").read(uri)
+
+    override fun readStream(uri: String): Flow<ByteArray> =
+        flow {
+            emitAll(currentResourceAccess("read resource stream").readStream(uri))
+        }
+
+    override suspend fun searchMemory(
+        query: String,
+        domains: List<String>?,
+        limit: Int,
+    ): List<OrganizedMemory> {
+        val runtime = currentRetrievalRuntime("search memory")
+        return MemorySearchService(
+            database = runtime.database,
+            llmClient = runtime.llmClient,
+            llmConfig = runtime.llmConfig,
+            maxLimit = retrievalConfig.search.maxLimit,
+        ).search(query = query, domains = domains, limit = limit)
+    }
+
+    override suspend fun getMemory(id: String): OrganizedMemory? {
+        val database = currentRetrievalRuntime("get organized memory").database
+        val normalizedId = normalizeRetrievalId(id)
+        return database.read { read -> read.organizedMemories.findById(normalizedId) }
+    }
+
+    override suspend fun getRawMemory(id: String): RawMemory? {
+        val database = currentRetrievalRuntime("get raw memory").database
+        val normalizedId = normalizeRetrievalId(id)
+        return database.read { read -> read.rawMemories.findById(normalizedId) }
+    }
+
+    /** 在状态锁内取得当前 RUNNING 资源快照；DB/LLM 调用必须在锁外执行。 */
+    private fun currentRetrievalRuntime(operation: String): RetrievalRuntime =
+        synchronized(lock) {
+            when (lifecycle) {
+                ContextLifecycleState.CREATED, ContextLifecycleState.STARTING ->
+                    throw ContextLifecycleException(
+                        ContextLifecycleErrorCode.NOT_STARTED,
+                        "context is not started; call start() before attempting to $operation",
+                    )
+                ContextLifecycleState.STOPPING, ContextLifecycleState.CLOSED ->
+                    throw ContextLifecycleException(
+                        ContextLifecycleErrorCode.CLOSED,
+                        "context is closing or closed; attempting to $operation is refused",
+                    )
+                ContextLifecycleState.RUNNING ->
+                    RetrievalRuntime(
+                        database =
+                            database ?: throw ContextLifecycleException(
+                                ContextLifecycleErrorCode.NOT_STARTED,
+                                "context retrieval database is unavailable",
+                            ),
+                        llmClient = llm,
+                        llmConfig = llmConfig,
+                    )
+            }
+        }
+
+    private fun normalizeRetrievalId(id: String): String {
+        val normalized = id.trim()
+        if (normalized.isEmpty()) {
+            throw ContextRetrievalException(ContextRetrievalErrorCode.INVALID_REQUEST, "memory id must not be blank")
+        }
+        return normalized
+    }
+
+    /** 在状态锁内取得当前 RUNNING access，保证关闭清空与准入没有半开窗口。 */
+    private fun currentResourceAccess(operation: String): ContextResourceAccess =
+        synchronized(lock) {
+            when (lifecycle) {
+                ContextLifecycleState.CREATED, ContextLifecycleState.STARTING ->
+                    throw ContextLifecycleException(
+                        ContextLifecycleErrorCode.NOT_STARTED,
+                        "context is not started; call start() before attempting to $operation",
+                    )
+                ContextLifecycleState.STOPPING, ContextLifecycleState.CLOSED ->
+                    throw ContextLifecycleException(
+                        ContextLifecycleErrorCode.CLOSED,
+                        "context is closing or closed; attempting to $operation is refused",
+                    )
+                ContextLifecycleState.RUNNING ->
+                    resourceAccess ?: throw ContextLifecycleException(
+                        ContextLifecycleErrorCode.NOT_STARTED,
+                        "context resource access is unavailable; call start() before attempting to $operation",
+                    )
+            }
+        }
 
     override suspend fun ingestConversation(turn: ConversationTurn): IngestResult {
         val service =
@@ -783,11 +1107,38 @@ internal class AlcyoneContextImpl(
         runCatching { ingestionReporter.reportFailure(cancellation) }
     }
 
+    override suspend fun bootstrap(): BootstrapContext =
+        synchronized(lock) {
+            when (lifecycle) {
+                ContextLifecycleState.CREATED, ContextLifecycleState.STARTING ->
+                    throw ContextLifecycleException(
+                        ContextLifecycleErrorCode.NOT_STARTED,
+                        "context is not started; call start() before reading bootstrap",
+                    )
+                ContextLifecycleState.STOPPING, ContextLifecycleState.CLOSED ->
+                    throw ContextLifecycleException(
+                        ContextLifecycleErrorCode.CLOSED,
+                        "context is closing or closed; bootstrap is refused",
+                    )
+                ContextLifecycleState.RUNNING -> {
+                    if (memoryMapConfig == null) {
+                        BootstrapContext(null, MapStatus.MISSING, BootstrapContext.DEFAULT_CAPABILITIES)
+                    } else {
+                        val state = memoryMapPipeline?.snapshot()
+                        BootstrapContext(
+                            memoryMap = state?.view,
+                            mapStatus = state?.status ?: MapStatus.UNKNOWN,
+                            capabilities = BootstrapContext.DEFAULT_CAPABILITIES,
+                        )
+                    }
+                }
+            }
+        }
+
     override suspend fun getStatus(): ContextStatus =
         ContextStatus(
             lifecycle = lifecycle,
-            // CM1 不创建 Worker，不伪造 RUNNING。
-            workers = emptyMap(),
+            workers = workerStatuses(),
             storage =
                 StorageStatus(
                     databasePath = databasePath.toString(),
@@ -795,5 +1146,102 @@ internal class AlcyoneContextImpl(
                 ),
         )
 
+    private fun organizationWorkerStatus(): Map<String, WorkerStatus> {
+        if (organizationConfig == null) return emptyMap()
+        val pipeline = synchronized(lock) { organizationPipeline }
+        val state =
+            when (lifecycle) {
+                ContextLifecycleState.STOPPING, ContextLifecycleState.CLOSED -> WorkerState.STOPPED
+                ContextLifecycleState.RUNNING ->
+                    pipeline?.workerStatusForTesting()?.toPublicWorkerState() ?: WorkerState.IDLE
+                ContextLifecycleState.CREATED, ContextLifecycleState.STARTING -> WorkerState.IDLE
+            }
+        return mapOf("organization" to WorkerStatus(state = state))
+    }
+
+    private fun memoryMapWorkerStatus(): Map<String, WorkerStatus> {
+        if (memoryMapConfig == null) return emptyMap()
+        val pipeline = synchronized(lock) { memoryMapPipeline }
+        val state =
+            when (lifecycle) {
+                ContextLifecycleState.STOPPING, ContextLifecycleState.CLOSED -> WorkerState.STOPPED
+                ContextLifecycleState.RUNNING ->
+                    pipeline?.coordinatorForTesting()?.statusForTesting()?.toPublicWorkerState() ?: WorkerState.IDLE
+                ContextLifecycleState.CREATED, ContextLifecycleState.STARTING -> WorkerState.IDLE
+            }
+        return mapOf("memoryMap" to WorkerStatus(state = state))
+    }
+
+    private fun workerStatuses(): Map<String, WorkerStatus> =
+        buildMap {
+            putAll(organizationWorkerStatus())
+            putAll(memoryMapWorkerStatus())
+        }
+
+    private fun OrganizationWorkerStatus.toPublicWorkerState(): WorkerState =
+        when (this) {
+            OrganizationWorkerStatus.IDLE -> WorkerState.IDLE
+            OrganizationWorkerStatus.RUNNING -> WorkerState.RUNNING
+            OrganizationWorkerStatus.STOPPED -> WorkerState.STOPPED
+            OrganizationWorkerStatus.FAILED -> WorkerState.FAILED
+        }
+
+    private fun MemoryMapWorkerStatus.toPublicWorkerState(): WorkerState =
+        when (this) {
+            MemoryMapWorkerStatus.IDLE -> WorkerState.IDLE
+            MemoryMapWorkerStatus.RUNNING -> WorkerState.RUNNING
+            MemoryMapWorkerStatus.STOPPED -> WorkerState.STOPPED
+            MemoryMapWorkerStatus.FAILED -> WorkerState.FAILED
+        }
+
+    private fun currentMemoryMapPipeline(): MemoryMapPipeline? = synchronized(lock) { memoryMapPipeline }
+
+    /** B1 Pipeline 未直接暴露 requestRefresh；复用其 Coordinator 的同一 CONFLATED 准入。 */
+    private fun MemoryMapPipeline.requestRefresh(): Boolean = coordinatorForTesting().requestRefresh()
+
     private fun closed(message: String): ContextLifecycleException = ContextLifecycleException(ContextLifecycleErrorCode.CLOSED, message)
+
+    private data class RetrievalRuntime(
+        val database: ContextDatabaseImpl,
+        val llmClient: KtorLlmClient?,
+        val llmConfig: LlmConfig?,
+    )
+}
+
+/** Organization Worker 回调来源标记，用于阻止在自身 Round 内调用 Context.close() 造成自等待。 */
+internal class OrganizationCallbackMarker(
+    private val owner: Any,
+) : ThreadContextElement<Any?>,
+    CoroutineContext.Element {
+    override val key: CoroutineContext.Key<*> get() = Key
+
+    override fun updateThreadContext(context: CoroutineContext): Any? {
+        val previous = CURRENT_OWNER.get()
+        CURRENT_OWNER.set(owner)
+        return previous
+    }
+
+    override fun restoreThreadContext(
+        context: CoroutineContext,
+        oldState: Any?,
+    ) {
+        if (oldState == null) CURRENT_OWNER.remove() else CURRENT_OWNER.set(oldState)
+    }
+
+    companion object Key : CoroutineContext.Key<OrganizationCallbackMarker> {
+        private val CURRENT_OWNER = ThreadLocal<Any?>()
+
+        fun currentOwner(): Any? = CURRENT_OWNER.get()
+
+        fun rejectionFor(
+            owner: Any,
+            entry: String,
+        ): ContextLifecycleException? {
+            if (currentOwner() !== owner) return null
+            return ContextLifecycleException(
+                ContextLifecycleErrorCode.CLOSED,
+                "$entry cannot be called from inside an organization worker callback; let the callback finish first",
+            )
+        }
+    }
 }

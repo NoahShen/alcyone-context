@@ -138,6 +138,7 @@ class WebDavStorage private constructor(
                 createDirectory = capability.createDir,
                 boundedRead = capability.read,
                 readOnly = false,
+                atomicReplace = false,
             )
         }
     }
@@ -281,6 +282,20 @@ class WebDavStorage private constructor(
             afterChange { lifetime.call { statOrFail(plain(path), "write", VfsEffect.PARTIAL) } }
         }
     }
+
+    /** WebDAV 首版没有可验证的原子替换语义：明确拒绝，且这个分支不发起任何网络请求。 */
+    override suspend fun safeReplace(
+        path: StoragePath,
+        content: ByteArray,
+    ): StorageAttributes =
+        call("safeReplace") {
+            lifetime.call {
+                throw VfsException(
+                    VfsErrorCode.UNSUPPORTED_OPERATION,
+                    "webdav storage does not provide atomic replacement",
+                )
+            }
+        }
 
     /**
      * 建目录。已经存在就算成功。

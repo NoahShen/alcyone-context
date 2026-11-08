@@ -11,6 +11,13 @@ import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmConfig
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmDefaults
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmProfileConfig
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmTaskConfig
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapConfig
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapDefaults
+import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapPeriodicConfig
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationConfig
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationDefaults
+import com.github.noahshen.alcyone.context.memory.runtime.retrieval.RetrievalConfig
+import com.github.noahshen.alcyone.context.memory.runtime.retrieval.SearchConfig
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.core.VfsLimits
@@ -46,8 +53,11 @@ import kotlin.time.Duration.Companion.seconds
  *   `triggers.idle.enabled` / `.idleTimeout` / `.cron` 四层、以及 CT10 的 `initialWindowTurns`，
  *   并逐层拒绝未知键，交给
  *   [ExtractionConfig] 的同一 `validateExtraction` 校验（固定 `Asia/Shanghai`，无 timezone 键）；
- *   `organization` / `memoryMap` / `backup` 仍为蓝图已知但尚未实现的子树，整体接受、不校验、
- *   不展开 ENV；阶段豁免不等于对未知字段的全面豁免；
+ *   `context.organization` 自 CT16-B1 起严格解析 `triggers.immediate.enabled` 与
+ *   `triggers.periodic.enabled/cron`；固定 Asia/Shanghai，出现 `timezone` 即未知键；
+ *   `context.memoryMap` 自 CT19-B1 起严格解析 `refresh.periodic.enabled/cron`；固定 Asia/Shanghai，
+ *   出现 `timezone` 即未知键；`context.retrieval.search.maxLimit` 自 CT20-B2 起严格解析。
+ *   `backup` 仍为蓝图已知但尚未实现的子树，整体接受、不校验、不展开 ENV；
  * - 类型/范围错误 → `INVALID_CONFIG`，消息只带字段路径与原因，不回显原始值；
  * - 解析使用 SnakeYAML `SafeConstructor` 并禁止重复键；
  * - 加载过程只读配置：不建目录、不建文件、不打开数据库、不连网络、不启协程。
@@ -63,7 +73,7 @@ object ContextConfigLoader {
     private const val DEFAULT_LIMIT_BYTES: Long = VfsLimits.DEFAULT_LIMIT_BYTES
 
     private val CONTEXT_KEYS =
-        setOf("database", "lifecycle", "ingestion", "llm", "extraction", "organization", "memoryMap", "backup")
+        setOf("database", "lifecycle", "ingestion", "llm", "extraction", "organization", "memoryMap", "retrieval", "backup")
     private val CONTEXT_DATABASE_KEYS = setOf("path")
     private val CONTEXT_LIFECYCLE_KEYS = setOf("shutdownTimeout")
     private val CONTEXT_INGESTION_KEYS = setOf("maxTurnBytes", "maxMessages", "maxIdLength")
@@ -85,6 +95,15 @@ object ContextConfigLoader {
     private val CONTEXT_EXTRACTION_TRIGGER_KEYS = setOf("count", "idle")
     private val CONTEXT_EXTRACTION_COUNT_KEYS = setOf("threshold")
     private val CONTEXT_EXTRACTION_IDLE_KEYS = setOf("enabled", "idleTimeout", "cron")
+    private val CONTEXT_ORGANIZATION_KEYS = setOf("triggers")
+    private val CONTEXT_ORGANIZATION_TRIGGER_KEYS = setOf("immediate", "periodic")
+    private val CONTEXT_ORGANIZATION_IMMEDIATE_KEYS = setOf("enabled")
+    private val CONTEXT_ORGANIZATION_PERIODIC_KEYS = setOf("enabled", "cron")
+    private val CONTEXT_MEMORY_MAP_KEYS = setOf("refresh")
+    private val CONTEXT_MEMORY_MAP_REFRESH_KEYS = setOf("periodic")
+    private val CONTEXT_MEMORY_MAP_PERIODIC_KEYS = setOf("enabled", "cron")
+    private val CONTEXT_RETRIEVAL_KEYS = setOf("search")
+    private val CONTEXT_RETRIEVAL_SEARCH_KEYS = setOf("maxLimit")
     private val VFS_KEYS =
         setOf("database", "namespaces", "mounts", "limits", "streamTotalLimit", "eventBufferCapacity", "closeGracePeriod")
     private val VFS_DATABASE_KEYS = setOf("path")
@@ -127,6 +146,9 @@ object ContextConfigLoader {
         val ingestionLimits = parseIngestionLimits(contextSection)
         val llmConfig = parseLlm(contextSection, environment)
         val extractionConfig = parseExtraction(contextSection, environment)
+        val organizationConfig = parseOrganization(contextSection, environment)
+        val memoryMapConfig = parseMemoryMap(contextSection, environment)
+        val retrievalConfig = parseRetrieval(contextSection)
 
         val vfsDatabase =
             parseVfsDatabase(vfsSection, baseDirectory, environment)
@@ -160,6 +182,9 @@ object ContextConfigLoader {
             vfsConfig = vfsConfig,
             llm = llmConfig,
             extraction = extractionConfig,
+            organization = organizationConfig,
+            memoryMap = memoryMapConfig,
+            retrieval = retrievalConfig,
         )
     }
 
@@ -347,6 +372,93 @@ object ContextConfigLoader {
             cron = cron,
             initialWindowTurns = initialWindowTurns,
         )
+    }
+
+    // ------------------------------------------------------------------ context.organization
+
+    /**
+     * 解析 `context.organization`（CT16-B1）。
+     *
+     * 缺省返回 `null`；出现空映射返回默认 Trigger。所有层级严格拒绝未知键，`timezone` 不例外。
+     * cron 支持 ENV 展开，最终由 [OrganizationConfig] 的构造期校验统一验证。
+     */
+    private fun parseOrganization(
+        context: Map<String, Any?>?,
+        environment: (String) -> String?,
+    ): OrganizationConfig? {
+        if (context == null || !context.containsKey("organization")) return null
+        val organization = asStringMap(context["organization"], "context.organization")
+        rejectUnknown(organization, CONTEXT_ORGANIZATION_KEYS, "context.organization")
+
+        val triggers = organization["triggers"]?.let { asStringMap(it, "context.organization.triggers") } ?: emptyMap()
+        rejectUnknown(triggers, CONTEXT_ORGANIZATION_TRIGGER_KEYS, "context.organization.triggers")
+
+        val immediate = triggers["immediate"]?.let { asStringMap(it, "context.organization.triggers.immediate") } ?: emptyMap()
+        rejectUnknown(immediate, CONTEXT_ORGANIZATION_IMMEDIATE_KEYS, "context.organization.triggers.immediate")
+
+        val periodic = triggers["periodic"]?.let { asStringMap(it, "context.organization.triggers.periodic") } ?: emptyMap()
+        rejectUnknown(periodic, CONTEXT_ORGANIZATION_PERIODIC_KEYS, "context.organization.triggers.periodic")
+
+        val immediateEnabled =
+            booleanAt(immediate, "enabled", "context.organization.triggers.immediate.enabled")
+                ?: OrganizationDefaults.IMMEDIATE_ENABLED
+        val periodicEnabled =
+            booleanAt(periodic, "enabled", "context.organization.triggers.periodic.enabled")
+                ?: OrganizationDefaults.PERIODIC_ENABLED
+        val cron =
+            stringAt(periodic, "cron", "context.organization.triggers.periodic.cron", environment)
+                ?: OrganizationDefaults.CRON
+
+        return OrganizationConfig(
+            immediateEnabled = immediateEnabled,
+            periodicEnabled = periodicEnabled,
+            cron = cron,
+        )
+    }
+
+    // ------------------------------------------------------------------ context.memoryMap
+
+    /**
+     * 解析 `context.memoryMap`（CT19-B1）。
+     *
+     * 缺省返回 `null`；出现空映射返回默认 Periodic 配置。所有层级严格拒绝未知键，
+     * `timezone` 不例外；cron 支持 ENV 展开并由 [MemoryMapConfig] 构造期统一校验。
+     */
+    private fun parseMemoryMap(
+        context: Map<String, Any?>?,
+        environment: (String) -> String?,
+    ): MemoryMapConfig? {
+        if (context == null || !context.containsKey("memoryMap")) return null
+        val memoryMap = asStringMap(context["memoryMap"], "context.memoryMap")
+        rejectUnknown(memoryMap, CONTEXT_MEMORY_MAP_KEYS, "context.memoryMap")
+
+        val refresh = memoryMap["refresh"]?.let { asStringMap(it, "context.memoryMap.refresh") } ?: emptyMap()
+        rejectUnknown(refresh, CONTEXT_MEMORY_MAP_REFRESH_KEYS, "context.memoryMap.refresh")
+
+        val periodic = refresh["periodic"]?.let { asStringMap(it, "context.memoryMap.refresh.periodic") } ?: emptyMap()
+        rejectUnknown(periodic, CONTEXT_MEMORY_MAP_PERIODIC_KEYS, "context.memoryMap.refresh.periodic")
+
+        val enabled =
+            booleanAt(periodic, "enabled", "context.memoryMap.refresh.periodic.enabled")
+                ?: MemoryMapDefaults.PERIODIC_ENABLED
+        val cron =
+            stringAt(periodic, "cron", "context.memoryMap.refresh.periodic.cron", environment)
+                ?: MemoryMapDefaults.CRON
+        return MemoryMapConfig(periodic = MemoryMapPeriodicConfig(enabled = enabled, cron = cron))
+    }
+
+    // ------------------------------------------------------------------ context.retrieval
+
+    /** 解析 `context.retrieval.search.maxLimit`；缺省/空 mapping 使用默认 50。 */
+    private fun parseRetrieval(context: Map<String, Any?>?): RetrievalConfig {
+        val retrieval = context?.let { section(it, "retrieval") } ?: return RetrievalConfig()
+        rejectUnknown(retrieval, CONTEXT_RETRIEVAL_KEYS, "context.retrieval")
+        val search = retrieval["search"]?.let { asStringMap(it, "context.retrieval.search") } ?: emptyMap()
+        rejectUnknown(search, CONTEXT_RETRIEVAL_SEARCH_KEYS, "context.retrieval.search")
+        val maxLimit =
+            intAt(search, "maxLimit", "context.retrieval.search.maxLimit")
+                ?: SearchConfig().maxLimit
+        return RetrievalConfig(search = SearchConfig(maxLimit = maxLimit))
     }
 
     private fun parseLlmProfile(

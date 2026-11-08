@@ -12,4 +12,7 @@ interface OrganizationPendingRepository {
     suspend fun hasAnyPending(): Boolean
 
     suspend fun nextByRawCreatedAt(): String?
+
+    /** 在一次短读作用域内取得完整固定 Pending ID 列表。 */
+    suspend fun listAllByRawCreatedAt(): List<String>
 }

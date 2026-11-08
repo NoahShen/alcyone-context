@@ -7,6 +7,13 @@ import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleState
 import com.github.noahshen.alcyone.context.memory.api.ContextPersistenceErrorCode
 import com.github.noahshen.alcyone.context.memory.api.ContextPersistenceException
+import com.github.noahshen.alcyone.context.memory.api.WorkerState
+import com.github.noahshen.alcyone.context.memory.core.llm.LlmResponseFormat
+import com.github.noahshen.alcyone.context.memory.core.llm.LlmTask
+import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmConfig
+import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmProfileConfig
+import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmTaskConfig
+import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationConfig
 import com.github.noahshen.alcyone.context.vfs.VfsPath
 import com.github.noahshen.alcyone.context.vfs.runtime.MountConfig
 import kotlinx.coroutines.runBlocking
@@ -208,4 +215,91 @@ class AlcyoneContextFactoryTest {
             val failure = assertFailsWith<ContextLifecycleException> { runBlocking { context.start() } }
             assertEquals(ContextLifecycleErrorCode.CLOSED, failure.errorCode)
         }
+
+    @Test
+    fun `explicit organization binding failures reject create before any resource side effect`() =
+        ContextFixture().use { fixture ->
+            val cases =
+                listOf(
+                    null,
+                    organizationLlm(includeScanner = false),
+                    organizationLlm(includeGovernance = false),
+                    organizationLlm(scannerMode = LlmResponseFormat.PROMPT_ONLY),
+                    organizationLlm(governanceMode = LlmResponseFormat.PROMPT_ONLY),
+                )
+            val before = fixture.snapshot()
+            cases.forEach { llm ->
+                val failure =
+                    assertFailsWith<ContextConfigException> {
+                        AlcyoneContextFactory.create(
+                            fixture.config().copy(organization = OrganizationConfig(), llm = llm),
+                            fixture.vfsConfig(),
+                        )
+                    }
+                assertEquals(ContextConfigErrorCode.INVALID_CONFIG, failure.errorCode)
+                assertFalse(failure.message.orEmpty().contains("ct16-secret-key"))
+                assertEquals(before, fixture.snapshot(), "非法 Organization 绑定不得产生任何文件/目录")
+            }
+            assertFalse(Files.exists(fixture.contextPath))
+            assertFalse(Files.exists(fixture.vfsPath))
+        }
+
+    @Test
+    fun `a legal explicit organization config keeps create side effect free and exposes idle worker`() =
+        ContextFixture().use { fixture ->
+            val before = fixture.snapshot()
+            val context =
+                AlcyoneContextFactory.create(
+                    fixture.config().copy(organization = OrganizationConfig(), llm = organizationLlm()),
+                    fixture.vfsConfig(),
+                )
+
+            assertEquals(before, fixture.snapshot())
+            assertEquals(ContextLifecycleState.CREATED, context.status().lifecycle)
+            assertEquals(mapOf("organization" to WorkerState.IDLE), context.status().workers.mapValues { it.value.state })
+            assertFalse(Files.exists(fixture.contextPath))
+            assertFalse(Files.exists(fixture.vfsPath))
+        }
+
+    private fun organizationLlm(
+        includeScanner: Boolean = true,
+        includeGovernance: Boolean = true,
+        scannerMode: LlmResponseFormat = LlmResponseFormat.JSON_OBJECT,
+        governanceMode: LlmResponseFormat = LlmResponseFormat.JSON_SCHEMA,
+    ): LlmConfig {
+        val profiles =
+            mapOf(
+                "scanner" to profile("scanner", scannerMode),
+                "governance" to profile("governance", governanceMode),
+            )
+        val tasks =
+            buildMap {
+                if (includeScanner) {
+                    put(
+                        LlmTask.CANDIDATE_SCANNER,
+                        LlmTaskConfig(profile = "scanner", maxInputTokens = 4_000, maxOutputTokens = 1_000),
+                    )
+                }
+                if (includeGovernance) {
+                    put(
+                        LlmTask.GOVERNANCE,
+                        LlmTaskConfig(profile = "governance", maxInputTokens = 4_000, maxOutputTokens = 1_000),
+                    )
+                }
+            }
+        return LlmConfig(profiles = profiles, tasks = tasks)
+    }
+
+    private fun profile(
+        name: String,
+        mode: LlmResponseFormat,
+    ): LlmProfileConfig =
+        LlmProfileConfig(
+            name = name,
+            baseUrl = "https://example.test/v1",
+            apiKey = "ct16-secret-key",
+            model = "test-model",
+            contextWindowTokens = 16_000,
+            jsonMode = mode,
+        )
 }

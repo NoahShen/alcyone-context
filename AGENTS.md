@@ -1,5 +1,39 @@
 # AGENTS.md
 
+## 本次修改（2026-11-08，CM3 整体收口 DONE）
+
+- Architect 复核 **CT15 B1/CT15 APPROVED / DONE**：5 文件/29 例、定向 29/0/0/0、`./scripts/check` 131 tasks、14 模块 **1587=1587**、81 基线 all OK、VFS diff 空、Core 无 Ktor/serialization、Schema 未变、生产零接线。
+- CT15 保持组件化；Source 幂等、目标 `updatedAt` 冲突、Organized/Source/Pending 原子提交及全局毫秒水位已验收。Architect 沙箱 Gradle 的 FileLock socket 限制由双重实跑/XML/SHA/静态复核补足。
+- Architect 复核 **CT16 B1 APPROVED / DONE**：21 文件/50 例、1637=1637、81/Core/Schema/生产边界通过，见 [B1 Architect 复核](docs/context/tasks/cm3-ct16/B1_Architect复核.md)。
+- CT16 B2 Worker 交付 6 文件/16 例；Lead 独立定向 42s、wiring 3/3、E2E 2/2、全量 `./scripts/check` 2m36s 均通过；14 模块 **1653=1653**、81/Core/Schema/公共 API/依赖边界通过。
+- Architect 复核 **CT16 B2 APPROVED / DONE**：6 文件/16 例、B1/CT13/14/15 SHA 与边界通过，见 [B2 Architect 复核](docs/context/tasks/cm3-ct16/B2_Architect复核.md)。
+- Architect 最终整体复核：`./scripts/check` exit 0（2m18s、131/131 tasks）、14 模块 **1653=1653**、81 VFS 基线 all OK、VFS/common/Schema/依赖边界通过，见 [CM3 里程碑复核](docs/context/milestones/cm3/milestone-review.md)。
+- **CM3（CT13～CT16）APPROVED / DONE**；Map no-op，CT17/CM4 未启动；无 git 写操作/推送；真实模型 not-run。
+
+## 本次修改（2026-11-01，CT14 DONE；按用户暂停，CT15 不启动）
+
+- Architect 复核 **CT14 B1 APPROVED / DONE；CT14 整体 APPROVED / DONE**：12 文件/60 例、`./scripts/check` exit 0、14 模块 **1558=1558**、81 基线 all OK、VFS diff 空、Core 无 Ktor/serialization、Schema 未变；CT13 组件 SHA 未变；未接生产。
+- 用户暂停指令：**保存进度，不启动 CT15**。恢复点：CM3 IN_PROGRESS（用户暂停），CT13 DONE、CT14 DONE，CT15/CT16 未启动，CM4 不启动；CT14 保持组件化，生产接线归 CT16。
+- 已落 [CM3 暂停恢复点](docs/context/milestones/cm3/CM3_暂停恢复点.md)；停止派发新任务，等待用户明确恢复。无 git 写操作/推送。
+
+## 本次修改（2026-11-01，CM3 授权，CT13 只读方案）
+
+- 用户明确授权 CM3（仅 CT13～CT16，不启动 CM4）；`main`/`origin/main` 基线 `9723bb7`，CM1+CM2 已提交推送。
+- 已落 [CM3 范围与依赖方案](docs/context/milestones/cm3/CM3_范围与依赖方案.md)、[CT13 任务书](docs/context/milestones/cm3/CT13_任务书.md)、[CT13 方案核对](docs/context/tasks/cm3-ct13/方案核对.md)；本轮只做只读方案，不派发 Worker、不改生产/测试/构建。
+- 方案锁定：动态预算串行全量快照扫描、无 Domain/Agent 硬过滤、批内 ID 校验、任一批失败整条失败、无截断、单条放不下显式预算失败；CT14～CT16 的 Governance/幂等/水位/调度边界见 CM3 方案。
+- CT13 通过 Architect 裁定前不实现；CT13 DONE 前不进入 CT14；CT16 通过前不宣称 CM3 完成。无 git 写操作/推送；真实模型未运行，Fake 不得冒充语义质量。
+- 2026-11-01 Architect 已批准 CT13 B1（局部 Q1～Q8）；B1 已派发 Worker `7bc568e0`，只新增 Core/Runtime organization 组件、Prompt/Schema、通用预算分批与测试；不接 Factory/Impl，CT14 未放行。
+- 2026-11-01 CT13 B1 完成并通过 Lead 初验：13 文件/48 例、全量 1489=1489、81 基线/Core/Schema 通过；未接生产。已提交 Architect 复核，CT13 未 DONE，CT14 未放行。
+- 2026-11-01 Architect 首轮复核：13 SHA/398 测试通过，未确认生产缺陷；R1 验收覆盖阻断（真实跨批 ID、不同域/来源、批间取消、非零 schema/输出/余量、第二批非法 JSON/截断）。已派发 Worker `6920f01b` 仅修测试/辅助，生产/资源 SHA 保持。
+- 2026-11-01 R1 完成并通过 Lead 初验：只改 2 个测试文件（+9 例，Planner 取消改确定性），全量 1498=1498、81 基线/Core/Schema 通过，生产/资源 8 SHA 未变；已提交 Architect 复核，CT13 未 DONE，CT14 未放行。
+- 2026-11-01 Architect 复核 R1：R1 CLOSED、B1 APPROVED / DONE，放行 CT13 B2；B2 只做验收/证据/A01-A08/全量边界，不改代码。已派发 Worker `44c6578b`，CT13 未 DONE，CT14 未放行。
+- 2026-11-01 Architect 复核 B2：**CT13 B2 APPROVED / DONE；CT13 APPROVED / DONE**；1498=1498、81 基线/Core/Schema、8 SHA 通过。CT14 Governance 已放行（仅组件，不接生产）；CT15/CT16 逐批；CM4 不启动。
+- 2026-11-01 CT14 只读方案已落：`CT14_任务书.md`、`tasks/cm3-ct14/方案核对.md`；范围锁定 Governance NEW/MERGE/UPDATE 严格字段、候选权限、非法不降 NEW、事实时间/补录/不确定 Prompt；未派发实现，待 Architect 裁定。
+- 2026-11-01 Architect 批准 CT14 D1～D10 并放行 B1：只做 Core DTO/Validator/Prompt + Runtime LLM/JSON 组件，不接生产；D4 MERGE domains 空数组也拒绝，D5 空白拒绝/重复去重，D6 空候选允许 NEW，D8 禁止 PROMPT_ONLY。待落委派单派发。
+- 2026-11-01 CT14 B1 已派发 Worker `b7a7cbfe`：Core Governance DTO/Validator/Prompt + Runtime Service/Parser + 测试；不接生产，不改 CT13/Schema/依赖（历史记录，后经复核 DONE）。
+- 2026-11-01 CT14 B1 完成并通过 Lead 初验：12 文件/60 例、全量 1558=1558、81/Core/Schema 通过；未接生产（历史记录，后经 Architect 复核 DONE）。
+- 2026-11-01 Architect 最终裁定：**CT13 B2 APPROVED / DONE；CT13 APPROVED / DONE；放行 CT14（先只读方案核对）**。证据保持 1498=1498、81 基线 all OK、VFS diff 空、Core 无 Ktor、Schema `ec727a53…` 未变；8 个生产/资源 SHA 与 B1/R1 终态一致。CT13 仍组件化，不接 Factory/Impl/Scheduler；CT15/CT16 未放行，CM4 不启动，无 git 写操作/推送。
+
 ## 本次修改（2026-10-30，CT12 DONE，CM2 全部完成）
 
 - Architect 复核 CT12 B1+B2：**CT12 APPROVED / DONE；CM2（CT08～CT12）全部 DONE；CT13 不启动**。方案 A 测试级 `vfs.runtime` 依赖获批准（生产 compileClasspath vfs 0）。

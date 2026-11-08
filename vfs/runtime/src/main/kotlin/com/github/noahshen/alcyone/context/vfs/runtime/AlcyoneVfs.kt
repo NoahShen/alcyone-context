@@ -223,6 +223,11 @@ class AlcyoneVfs private constructor(
         options: WriteOptions,
     ): NodeInfo = operation("write") { delegate.write(uri, content, options) }
 
+    override suspend fun safeReplace(
+        uri: VfsUri,
+        content: ByteArray,
+    ): NodeInfo = operation("safeReplace") { delegate.safeReplace(uri, content) }
+
     override suspend fun stat(
         uri: VfsUri,
         options: StatOptions,

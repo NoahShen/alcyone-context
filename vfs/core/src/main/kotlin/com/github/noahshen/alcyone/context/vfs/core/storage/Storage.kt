@@ -1,6 +1,8 @@
 package com.github.noahshen.alcyone.context.vfs.core.storage
 
 import com.github.noahshen.alcyone.context.vfs.NodeType
+import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
+import com.github.noahshen.alcyone.context.vfs.VfsException
 import java.io.InputStream
 import java.time.Instant
 
@@ -65,6 +67,8 @@ data class StorageCapabilities(
     val createDirectory: Boolean = true,
     val boundedRead: Boolean = true,
     val readOnly: Boolean = false,
+    /** 后端是否能保证完整替换：提交前失败保旧，不得降级为普通覆盖或先删后移。 */
+    val atomicReplace: Boolean = false,
 )
 
 /**
@@ -114,6 +118,17 @@ interface Storage {
         content: ByteArray,
         mode: StorageWriteMode,
     ): StorageAttributes
+
+    /**
+     * 原子地创建或完整替换文件。
+     *
+     * 目标不存在时创建，存在时替换；目标目录、缺失父目录等错误沿用 [write] 的契约。
+     * 默认实现明确拒绝，避免没有原子能力的后端被误用。调用方必须先检查 [StorageCapabilities.atomicReplace]。
+     */
+    suspend fun safeReplace(
+        path: StoragePath,
+        content: ByteArray,
+    ): StorageAttributes = throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "safeReplace is not supported by this storage backend")
 
     /**
      * 创建目录。父路径异常时的错误码**条件式**：实现能确认是文件 / 目录类型冲突时抛 TYPE_MISMATCH；

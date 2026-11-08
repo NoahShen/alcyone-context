@@ -35,6 +35,25 @@ class WebDavStorageTest {
                 assertTrue(capabilities.createDirectory, "MKCOL 是验过的最小闭环之一")
                 assertTrue(capabilities.boundedRead, "有界读是验过的最小闭环之一")
                 assertFalse(capabilities.readOnly, "只读与否要后端说了算，打开时猜不出来")
+                assertFalse(capabilities.atomicReplace, "WebDAV 没有经过一致性验证的原子替换能力，不能虚报")
+            } finally {
+                storage.close()
+            }
+        }
+
+    @Test
+    @Timeout(60)
+    fun `safeReplace is unsupported without touching the network`() =
+        runBlocking {
+            val storage = open()
+            try {
+                val failure =
+                    assertFailsWith<VfsException> {
+                        storage.safeReplace(StoragePath.parse("map.json"), "{}".toByteArray())
+                    }
+
+                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, failure.code)
+                assertEquals(VfsEffect.NONE, failure.effect)
             } finally {
                 storage.close()
             }

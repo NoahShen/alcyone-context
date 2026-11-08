@@ -20,7 +20,7 @@ import kotlin.time.Duration.Companion.seconds
 
 /**
  * CT06-B1 配置加载：真实临时目录 + 真实 YAML 文件，覆盖最小配置/默认值/路径基准/ENV/
- * 未知字段/`server` 忽略/蓝图未实现字段/类型范围/LocalFs/WebDav 映射/脱敏/路径隔离。
+ * 未知字段/`server` 忽略/蓝图未实现字段/Memory Map/类型范围/LocalFs/WebDav 映射/脱敏/路径隔离。
  */
 class ContextConfigLoaderTest {
     private companion object {
@@ -114,7 +114,7 @@ class ContextConfigLoaderTest {
         }
 
     @Test
-    fun `unimplemented blueprint sections are accepted without validation or env expansion`() =
+    fun `remaining blueprint backup section is accepted without validation or env expansion`() =
         withDirectory { dir ->
             val requested = mutableListOf<String>()
             val config =
@@ -123,11 +123,6 @@ class ContextConfigLoaderTest {
                         dir,
                         """
                         context:
-                          organization:
-                            triggers:
-                              periodic: { enabled: true, cron: "*/10 * * * *" }
-                          memoryMap:
-                            refresh: { enabled: true }
                           backup:
                             enabled: false
                         vfs:
@@ -144,6 +139,180 @@ class ContextConfigLoaderTest {
             assertEquals(dir.resolve("data/context.db"), config.databasePath)
             // CT08-B1 起 `context.llm` 首次消费并严格校验，不再属于“接受但不消费”的蓝图分区。
             assertNull(config.llm, "未配置 context.llm 时必须是 null")
+            assertNull(config.organization, "未配置 context.organization 时必须是 null")
+            assertNull(config.memoryMap, "未配置 context.memoryMap 时必须是 null")
+        }
+
+    @Test
+    fun `memory map is disabled by default while an empty mapping uses periodic defaults`() =
+        withDirectory { dir ->
+            assertNull(load(dir, "context:\n  database:\n    path: ./data/context.db\n").memoryMap)
+
+            val config = load(dir, "context:\n  memoryMap: {}\n")
+            val memoryMap = requireNotNull(config.memoryMap)
+            assertTrue(memoryMap.periodic.enabled)
+            assertEquals("*/10 * * * *", memoryMap.periodic.cron)
+        }
+
+    @Test
+    fun `memory map periodic overrides and cron environment expansion are mapped strictly`() =
+        withDirectory { dir ->
+            val config =
+                ContextConfigLoader.load(
+                    write(
+                        dir,
+                        """
+                        context:
+                          memoryMap:
+                            refresh:
+                              periodic:
+                                enabled: false
+                                cron: ${'$'}{CT19_MAP_CRON}
+                        """,
+                    ),
+                ) { name -> if (name == "CT19_MAP_CRON") "*/30 * * * *" else null }
+
+            val memoryMap = requireNotNull(config.memoryMap)
+            assertFalse(memoryMap.periodic.enabled)
+            assertEquals("*/30 * * * *", memoryMap.periodic.cron)
+        }
+
+    @Test
+    fun `memory map loader rejects unknown keys timezone types and invalid cron safely`() =
+        withDirectory { dir ->
+            val cases =
+                listOf(
+                    "context:\n  memoryMap:\n    unknown: 1\n" to ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  memoryMap: []\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  memoryMap:\n    refresh:\n      unknown: 1\n" to
+                        ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  memoryMap:\n    refresh:\n      periodic:\n        timezone: Asia/Shanghai\n" to
+                        ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  memoryMap:\n    refresh:\n      periodic:\n        enabled: 1\n" to
+                        ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  memoryMap:\n    refresh:\n      periodic:\n        cron: invalid-cron-secret\n" to
+                        ContextConfigErrorCode.INVALID_CONFIG,
+                )
+
+            cases.forEach { (yaml, code) ->
+                val failure = assertFailsWith<ContextConfigException> { load(dir, yaml) }
+                assertEquals(code, failure.errorCode)
+                assertFalse(failure.message.orEmpty().contains("invalid-cron-secret"))
+                assertNull(failure.cause)
+            }
+        }
+
+    @Test
+    fun `retrieval is defaulted while empty mapping and maxLimit overrides are strict`() =
+        withDirectory { dir ->
+            assertEquals(50, load(dir, "context: {}\n").retrieval.search.maxLimit)
+            assertEquals(50, load(dir, "context:\n  retrieval: {}\n").retrieval.search.maxLimit)
+            assertEquals(50, load(dir, "context:\n  retrieval:\n    search: {}\n").retrieval.search.maxLimit)
+            assertEquals(
+                1,
+                load(dir, "context:\n  retrieval:\n    search:\n      maxLimit: 1\n").retrieval.search.maxLimit,
+            )
+            assertEquals(
+                1_000,
+                load(dir, "context:\n  retrieval:\n    search:\n      maxLimit: 1000\n").retrieval.search.maxLimit,
+            )
+            assertNull(load(dir, "context:\n  retrieval:\n    search:\n      maxLimit: 1000\n").llm)
+        }
+
+    @Test
+    fun `retrieval loader rejects unknown keys types and out of range values safely`() =
+        withDirectory { dir ->
+            val cases =
+                listOf(
+                    "context:\n  retrieval: []\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  retrieval:\n    unknown: 1\n" to ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  retrieval:\n    search:\n      unknown: 1\n" to ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  retrieval:\n    search:\n      maxLimit: invalid-secret\n" to
+                        ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  retrieval:\n    search:\n      maxLimit: 0\n" to
+                        ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  retrieval:\n    search:\n      maxLimit: 1001\n" to
+                        ContextConfigErrorCode.INVALID_CONFIG,
+                )
+            cases.forEach { (yaml, code) ->
+                val failure = assertFailsWith<ContextConfigException> { load(dir, yaml) }
+                assertEquals(code, failure.errorCode)
+                assertFalse(failure.message.orEmpty().contains("invalid-secret"))
+                assertNull(failure.cause)
+            }
+        }
+
+    @Test
+    fun `organization is disabled by default and an empty mapping uses trigger defaults`() =
+        withDirectory { dir ->
+            assertNull(load(dir, "context:\n  database:\n    path: ./data/context.db\n").organization)
+
+            val config =
+                load(
+                    dir,
+                    """
+                    context:
+                      organization: {}
+                    """,
+                )
+            val organization = config.organization
+            assertTrue(organization != null)
+            assertEquals(true, organization.immediateEnabled)
+            assertEquals(true, organization.periodicEnabled)
+            assertEquals("*/10 * * * *", organization.cron)
+        }
+
+    @Test
+    fun `organization trigger overrides and cron env expansion are mapped strictly`() =
+        withDirectory { dir ->
+            val config =
+                ContextConfigLoader.load(
+                    write(
+                        dir,
+                        """
+                        context:
+                          organization:
+                            triggers:
+                              immediate:
+                                enabled: false
+                              periodic:
+                                enabled: true
+                                cron: ${'$'}{CT16_ORG_CRON}
+                        """,
+                    ),
+                ) { name -> if (name == "CT16_ORG_CRON") "*/15 * * * *" else null }
+
+            val organization = config.organization
+            assertTrue(organization != null)
+            assertEquals(false, organization.immediateEnabled)
+            assertEquals(true, organization.periodicEnabled)
+            assertEquals("*/15 * * * *", organization.cron)
+        }
+
+    @Test
+    fun `organization loader rejects unknown keys types timezone invalid cron and disabled triggers safely`() =
+        withDirectory { dir ->
+            val cases =
+                listOf(
+                    "context:\n  organization:\n    unknown: 1\n" to ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  organization: []\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  organization:\n    triggers:\n      unknown: 1\n" to ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  organization:\n    triggers:\n      periodic:\n        timezone: Asia/Shanghai\n" to
+                        ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  organization:\n    triggers:\n      immediate:\n        enabled: 1\n" to
+                        ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  organization:\n    triggers:\n      immediate:\n        enabled: false\n" +
+                        "      periodic:\n        enabled: false\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  organization:\n    triggers:\n      periodic:\n        enabled: false\n" +
+                        "        cron: invalid-cron-secret\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                )
+
+            cases.forEach { (yaml, code) ->
+                val failure = assertFailsWith<ContextConfigException> { load(dir, yaml) }
+                assertEquals(code, failure.errorCode)
+                assertFalse(failure.message.orEmpty().contains("invalid-cron-secret"))
+                assertNull(failure.cause)
+            }
         }
 
     @Test

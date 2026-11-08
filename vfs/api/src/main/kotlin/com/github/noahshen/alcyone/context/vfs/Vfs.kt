@@ -34,6 +34,17 @@ interface Vfs {
         options: WriteOptions = WriteOptions(),
     ): NodeInfo
 
+    /**
+     * 完整替换一个文件：目标不存在则创建，存在则替换；实现必须保证提交前失败不会留下半写目标。
+     *
+     * 这是显式能力，不复用 [WriteMode]。默认实现明确拒绝，避免第三方后端把普通覆盖误报成安全替换。
+     * Local FS 走同目录临时文件 + 原子 replace；WebDAV 首版返回 `UNSUPPORTED_OPERATION`。
+     */
+    suspend fun safeReplace(
+        uri: VfsUri,
+        content: ByteArray,
+    ): NodeInfo = throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "safeReplace is not supported by this VFS implementation", uri)
+
     /** 默认取得底层属性；Node 不存在时可懒注册，因此可能写入状态库。 */
     suspend fun stat(
         uri: VfsUri,

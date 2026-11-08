@@ -1,5 +1,6 @@
 package com.github.noahshen.alcyone.context.vfs
 
+import kotlinx.coroutines.runBlocking
 import java.lang.reflect.Modifier
 import java.time.Instant
 import kotlin.test.Test
@@ -175,18 +176,44 @@ class PublicContractTest {
 
     // A04 公共边界
     @Test
-    fun `vfs is an interface with only abstract declarations`() {
+    fun `vfs exposes safeReplace plus the established operation set`() {
         assertTrue(Vfs::class.java.isInterface)
         val methods = Vfs::class.java.declaredMethods.filterNot { it.isSynthetic } // 过滤默认参数桥接方法
         assertEquals(
-            setOf("read", "openStream", "write", "stat", "getNode", "list", "move", "delete", "getMetadata", "setMetadata"),
+            setOf("read", "openStream", "write", "safeReplace", "stat", "getNode", "list", "move", "delete", "getMetadata", "setMetadata"),
             methods.map { it.name }.toSet(),
         )
-        for (method in methods) {
+        for (method in methods.filterNot { it.name == "safeReplace" }) {
             assertTrue(Modifier.isAbstract(method.modifiers), "${method.name} must have no body in vfs/api")
         }
         assertEquals(0, methods.filter { Modifier.isStatic(it.modifiers) }.size)
     }
+
+    @Test
+    fun `safeReplace has the approved signature and a default unsupported implementation`() =
+        runBlocking {
+            val method =
+                Vfs::class.java.getDeclaredMethod(
+                    "safeReplace",
+                    VfsUri::class.java,
+                    ByteArray::class.java,
+                    kotlin.coroutines.Continuation::class.java,
+                )
+            assertEquals(VfsUri::class.java, method.parameterTypes[0])
+            assertEquals(ByteArray::class.java, method.parameterTypes[1])
+            assertTrue(
+                method.genericParameterTypes
+                    .last()
+                    .typeName
+                    .contains(NodeInfo::class.java.name),
+            )
+
+            val uri = VfsUri.parse("alcyone://resources/a.txt")
+            val failure = assertFailsWith<VfsException> { DefaultSafeReplaceVfs().safeReplace(uri, "new".toByteArray()) }
+            assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, failure.code)
+            assertEquals(VfsEffect.NONE, failure.effect)
+            assertEquals(uri, failure.uri)
+        }
 
     @Test
     fun `public signatures expose no infrastructure or physical path types`() {
@@ -238,4 +265,49 @@ class PublicContractTest {
         assertTrue(classpath.contains("kotlinx-serialization-json"), "expected serialization json on the api classpath")
         assertTrue(forbidden.none { classpath.contains(it) }, "vfs/api must not put infrastructure on its classpath")
     }
+}
+
+/** 只覆盖既有抽象方法，safeReplace 故意不覆盖，用来验证接口默认拒绝行为。 */
+private class DefaultSafeReplaceVfs : Vfs {
+    override suspend fun read(
+        uri: VfsUri,
+        options: ReadOptions,
+    ): ByteArray = error("read must not be called")
+
+    override suspend fun openStream(
+        uri: VfsUri,
+        options: VfsStreamOptions,
+    ): VfsStreamResult = error("openStream must not be called")
+
+    override suspend fun write(
+        uri: VfsUri,
+        content: ByteArray,
+        options: WriteOptions,
+    ): NodeInfo = error("write must not be called")
+
+    override suspend fun stat(
+        uri: VfsUri,
+        options: StatOptions,
+    ): NodeInfo = error("stat must not be called")
+
+    override suspend fun getNode(id: NodeId): NodeInfo = error("getNode must not be called")
+
+    override suspend fun list(uri: VfsUri): List<VfsEntry> = error("list must not be called")
+
+    override suspend fun move(
+        source: VfsUri,
+        target: VfsUri,
+    ): NodeInfo = error("move must not be called")
+
+    override suspend fun delete(
+        uri: VfsUri,
+        options: DeleteOptions,
+    ): Unit = error("delete must not be called")
+
+    override suspend fun getMetadata(id: NodeId): NodeMetadata = error("getMetadata must not be called")
+
+    override suspend fun setMetadata(
+        id: NodeId,
+        metadata: NodeMetadata,
+    ): Unit = error("setMetadata must not be called")
 }
