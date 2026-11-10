@@ -100,6 +100,17 @@ interface AlcyoneContext : AutoCloseable {
     /** 打开已初始化的 Context 状态库并组装 VFS；并发调用共享同一结果，`RUNNING` 重复调用幂等。 */
     suspend fun start()
 
+    /**
+     * Runs one bounded Dreaming run from the persisted checkpoint. Concurrent runs return
+     * ContextDreamingException(ALREADY_RUNNING); incomplete runs expose their last committed batch.
+     * The default third-party implementation rejects the operation as unsupported.
+     */
+    suspend fun runDreaming(): DreamingResult =
+        throw ContextDreamingException(
+            ContextDreamingErrorCode.UNAVAILABLE,
+            "dreaming is unsupported for this AlcyoneContext implementation",
+        )
+
     /** 阻塞宿主关闭实例：等待同一次真实清理结果（含失败）；线程被中断不放弃清理。 */
     override fun close()
 

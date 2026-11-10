@@ -46,6 +46,29 @@ interface ConversationReadOps {
     ): List<StoredConversationTurn> =
         sessionWindow(sessionKey.runtimeId, sessionKey.agentId, sessionKey.sessionId, beforeTimestamp, beforeId, limit)
 
+    /**
+     * 取严格晚于锚点 `(afterTimestamp, afterId)` 的同 Session Turn，按真实会话顺序返回。
+     *
+     * SQL 条件固定为 `timestamp > ? OR (timestamp = ? AND id > ?)`，排序为
+     * `timestamp ASC, id ASC`；参数化且复用 `idx_turn_session_time`。
+     */
+    fun sessionWindowAfter(
+        runtimeId: String,
+        agentId: String,
+        sessionId: String,
+        afterTimestamp: Instant,
+        afterId: Long,
+        limit: Int,
+    ): List<StoredConversationTurn> = throw UnsupportedOperationException("sessionWindowAfter is not supported by this ConversationReadOps")
+
+    fun sessionWindowAfter(
+        sessionKey: SessionKey,
+        afterTimestamp: Instant,
+        afterId: Long,
+        limit: Int,
+    ): List<StoredConversationTurn> =
+        sessionWindowAfter(sessionKey.runtimeId, sessionKey.agentId, sessionKey.sessionId, afterTimestamp, afterId, limit)
+
     fun latestPending(
         runtimeId: String,
         agentId: String,

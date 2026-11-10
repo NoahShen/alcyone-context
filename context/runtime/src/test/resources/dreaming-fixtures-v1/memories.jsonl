@@ -1,0 +1,2 @@
+{"kind":"raw","id":"fixture-raw-001","content":"The sanitized retry policy is bounded.","generatedBy":"DREAMING","createdAt":"2026-11-10T00:00:30Z","sourceTurnIds":[1]}
+{"kind":"organized","id":"fixture-organized-001","content":"Sanitized client retries use a fixed boundary.","domains":["testing"],"createdAt":"2026-11-10T00:00:40Z","updatedAt":"2026-11-10T00:00:40Z","rawMemoryIds":["fixture-raw-001"]}

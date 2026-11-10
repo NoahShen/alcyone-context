@@ -1,0 +1,19 @@
+{
+  "title": "DreamingEvidenceNoveltyOutputV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "coveredOrganizedIds"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["NEEDS_EVIDENCE", "FULLY_COVERED"]
+    },
+    "coveredOrganizedIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

@@ -5,6 +5,7 @@ import com.github.noahshen.alcyone.context.memory.api.ContextConfigException
 import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionLimits
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmResponseFormat
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmTask
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingConfig
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.ExtractionConfig
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.ExtractionDefaults
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmConfig
@@ -57,7 +58,7 @@ import kotlin.time.Duration.Companion.seconds
  *   `triggers.periodic.enabled/cron`；固定 Asia/Shanghai，出现 `timezone` 即未知键；
  *   `context.memoryMap` 自 CT19-B1 起严格解析 `refresh.periodic.enabled/cron`；固定 Asia/Shanghai，
  *   出现 `timezone` 即未知键；`context.retrieval.search.maxLimit` 自 CT20-B2 起严格解析。
- *   `backup` 仍为蓝图已知但尚未实现的子树，整体接受、不校验、不展开 ENV；
+ *   `context.dreaming` 自 CT22-B1 起严格解析可选 cron 与 IANA timezone；`backup` 仍为蓝图已知但尚未实现的子树，整体接受、不校验、不展开 ENV；
  * - 类型/范围错误 → `INVALID_CONFIG`，消息只带字段路径与原因，不回显原始值；
  * - 解析使用 SnakeYAML `SafeConstructor` 并禁止重复键；
  * - 加载过程只读配置：不建目录、不建文件、不打开数据库、不连网络、不启协程。
@@ -73,7 +74,7 @@ object ContextConfigLoader {
     private const val DEFAULT_LIMIT_BYTES: Long = VfsLimits.DEFAULT_LIMIT_BYTES
 
     private val CONTEXT_KEYS =
-        setOf("database", "lifecycle", "ingestion", "llm", "extraction", "organization", "memoryMap", "retrieval", "backup")
+        setOf("database", "lifecycle", "ingestion", "llm", "extraction", "organization", "memoryMap", "retrieval", "dreaming", "backup")
     private val CONTEXT_DATABASE_KEYS = setOf("path")
     private val CONTEXT_LIFECYCLE_KEYS = setOf("shutdownTimeout")
     private val CONTEXT_INGESTION_KEYS = setOf("maxTurnBytes", "maxMessages", "maxIdLength")
@@ -104,6 +105,7 @@ object ContextConfigLoader {
     private val CONTEXT_MEMORY_MAP_PERIODIC_KEYS = setOf("enabled", "cron")
     private val CONTEXT_RETRIEVAL_KEYS = setOf("search")
     private val CONTEXT_RETRIEVAL_SEARCH_KEYS = setOf("maxLimit")
+    private val CONTEXT_DREAMING_KEYS = setOf("cron", "timezone")
     private val VFS_KEYS =
         setOf("database", "namespaces", "mounts", "limits", "streamTotalLimit", "eventBufferCapacity", "closeGracePeriod")
     private val VFS_DATABASE_KEYS = setOf("path")
@@ -149,6 +151,7 @@ object ContextConfigLoader {
         val organizationConfig = parseOrganization(contextSection, environment)
         val memoryMapConfig = parseMemoryMap(contextSection, environment)
         val retrievalConfig = parseRetrieval(contextSection)
+        val dreamingConfig = parseDreaming(contextSection, environment)
 
         val vfsDatabase =
             parseVfsDatabase(vfsSection, baseDirectory, environment)
@@ -185,6 +188,7 @@ object ContextConfigLoader {
             organization = organizationConfig,
             memoryMap = memoryMapConfig,
             retrieval = retrievalConfig,
+            dreaming = dreamingConfig,
         )
     }
 
@@ -459,6 +463,26 @@ object ContextConfigLoader {
             intAt(search, "maxLimit", "context.retrieval.search.maxLimit")
                 ?: SearchConfig().maxLimit
         return RetrievalConfig(search = SearchConfig(maxLimit = maxLimit))
+    }
+
+    // ------------------------------------------------------------------ context.dreaming
+
+    /** 解析 flat `context.dreaming.cron/timezone`；空映射为 manual-only。 */
+    private fun parseDreaming(
+        context: Map<String, Any?>?,
+        environment: (String) -> String?,
+    ): DreamingConfig {
+        if (context == null || !context.containsKey("dreaming")) return DreamingConfig()
+        val dreaming = asStringMap(context["dreaming"], "context.dreaming")
+        rejectUnknown(dreaming, CONTEXT_DREAMING_KEYS, "context.dreaming")
+        val cron = stringAt(dreaming, "cron", "context.dreaming.cron", environment)
+        val timezone =
+            stringAt(dreaming, "timezone", "context.dreaming.timezone", environment)
+                ?: DreamingConfig.DEFAULT_TIMEZONE
+        if (cron == null && dreaming.containsKey("timezone")) {
+            throw invalid("context.dreaming.timezone is not allowed without context.dreaming.cron")
+        }
+        return DreamingConfig(cron = cron, timezone = timezone)
     }
 
     private fun parseLlmProfile(

@@ -1,5 +1,17 @@
 # AGENTS.md
 
+## 本次修改（2026-11-10，CT26 追溯性 R1，生产接线定点修复）
+
+- CT25 保持 DONE；CT26 预实现未获倒签批准。已补 [CT26 任务书](docs/context/milestones/cm5/CT26_任务书.md) 与 [方案核对](docs/context/tasks/cm5-ct26/方案核对.md)。
+- B1 已派发 Lead→Worker：修默认 `UNAVAILABLE`、manual 部分绑定启动前失败、关闭等待手动 run 后再释放 LLM/SQLite，以及真实 SQLite/受控 HTTP 非空多批集成。
+- B2 独立进程恢复/全量验收待 B1 复核；真实收费模型 B3 默认 LOCKED。CT26/CM5 未 DONE，无 Git 写操作。
+
+## 本次修改（2026-11-10，CT25 B2 Architect R1，定点补验收）
+
+- Architect 独立复跑三模块定向测试、Spotless 与 `./scripts/check` 全绿（131/131，14 模块 XML **2115=2115**）；B1/B2 生产 SHA、Schema、VFS/common/Core 与零生产接线边界通过。
+- B2 判定 **IN_REVIEW / R1**：普通通知异常、真实 SQLite Commit 故障、失败零副作用/后续不执行及非空 Topic 0 Insight 缺有效正式断言；退回 Lead→Worker 仅补测试/证据，见 [B2 Architect 复核](docs/context/tasks/cm5-ct25/B2_Architect复核.md)。
+- **CT25 B1 保持 DONE；CT25 整体未 DONE；CT26/真实模型/公共 Factory/Impl 继续 LOCKED**；无 Git 写操作。
+
 ## 本次修改（2026-11-08，CM3 整体收口 DONE）
 
 - Architect 复核 **CT15 B1/CT15 APPROVED / DONE**：5 文件/29 例、定向 29/0/0/0、`./scripts/check` 131 tasks、14 模块 **1587=1587**、81 基线 all OK、VFS diff 空、Core 无 Ktor/serialization、Schema 未变、生产零接线。

@@ -10,6 +10,8 @@ import com.github.noahshen.alcyone.context.memory.api.ContextPersistenceExceptio
 import com.github.noahshen.alcyone.context.memory.api.WorkerState
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmResponseFormat
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmTask
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingConfig
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingRuntime
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmConfig
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmProfileConfig
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmTaskConfig
@@ -24,6 +26,8 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -289,6 +293,207 @@ class AlcyoneContextFactoryTest {
             }
         return LlmConfig(profiles = profiles, tasks = tasks)
     }
+
+    @Test
+    fun `automatic dreaming rejects missing or incompatible llm bindings before side effects`() =
+        ContextFixture().use { fixture ->
+            val automatic = DreamingConfig(cron = "0 3 * * *")
+            val before = fixture.snapshot()
+            listOf(null, dreamingLlm(includeReflection = false), dreamingLlm(mode = LlmResponseFormat.PROMPT_ONLY))
+                .forEach { llm ->
+                    val failure =
+                        assertFailsWith<ContextConfigException> {
+                            AlcyoneContextFactory.create(
+                                fixture.config().copy(dreaming = automatic, llm = llm),
+                                fixture.vfsConfig(),
+                            )
+                        }
+                    assertEquals(ContextConfigErrorCode.INVALID_CONFIG, failure.errorCode)
+                    assertFalse(failure.message.orEmpty().contains("ct16-secret-key"))
+                    assertEquals(before, fixture.snapshot())
+                }
+            val valid =
+                AlcyoneContextFactory.create(
+                    fixture.config().copy(dreaming = automatic, llm = dreamingLlm()),
+                    fixture.vfsConfig(),
+                )
+            assertEquals(ContextLifecycleState.CREATED, valid.status().lifecycle)
+            assertEquals(before, fixture.snapshot())
+        }
+
+    private fun dreamingLlm(
+        includeReflection: Boolean = true,
+        mode: LlmResponseFormat = LlmResponseFormat.JSON_SCHEMA,
+    ): LlmConfig {
+        val profile = profile("dreaming", mode)
+        val tasks =
+            buildMap {
+                listOf(LlmTask.DREAMING_TOPIC, LlmTask.MEMORY_SEARCH, LlmTask.DREAMING_EVIDENCE).forEach {
+                    put(it, LlmTaskConfig("dreaming", 4_000, 1_000))
+                }
+                if (includeReflection) put(LlmTask.DREAMING_REFLECTION, LlmTaskConfig("dreaming", 4_000, 1_000))
+            }
+        return LlmConfig(mapOf("dreaming" to profile), tasks)
+    }
+
+    @Test
+    fun `partial manual dreaming bindings fail before resource acquisition`() =
+        ContextFixture().use { fixture ->
+            val before = fixture.snapshot()
+            val complete = dreamingLlm()
+            val invalid =
+                buildList {
+                    listOf(LlmTask.DREAMING_TOPIC, LlmTask.DREAMING_EVIDENCE, LlmTask.DREAMING_REFLECTION)
+                        .forEach { task -> add(LlmConfig(complete.profiles, mapOf(task to complete.tasks.getValue(task)))) }
+                    add(LlmConfig(complete.profiles, complete.tasks - LlmTask.MEMORY_SEARCH))
+                    add(dreamingLlm(mode = LlmResponseFormat.PROMPT_ONLY))
+                }
+            invalid.forEach { llm ->
+                val failure =
+                    assertFailsWith<ContextConfigException> {
+                        AlcyoneContextFactory.create(fixture.config().copy(llm = llm), fixture.vfsConfig())
+                    }
+                assertEquals(ContextConfigErrorCode.INVALID_CONFIG, failure.errorCode)
+                assertFalse(failure.message.orEmpty().contains("ct16-secret-key"))
+                assertEquals(before, fixture.snapshot())
+            }
+            AlcyoneContextFactory.create(fixture.config().copy(llm = complete), fixture.vfsConfig())
+            assertEquals(before, fixture.snapshot())
+        }
+
+    @Test
+    fun `every dreaming task profile rejects prompt only before resource acquisition`() =
+        ContextFixture().use { fixture ->
+            val before = fixture.snapshot()
+            val complete = dreamingLlm()
+            complete.tasks.forEach { (task, binding) ->
+                val profile = profile("invalid-$task", LlmResponseFormat.PROMPT_ONLY)
+                val llm =
+                    LlmConfig(
+                        complete.profiles + (profile.name to profile),
+                        complete.tasks + (task to LlmTaskConfig(profile.name, binding.maxInputTokens, binding.maxOutputTokens)),
+                    )
+                val failure =
+                    assertFailsWith<ContextConfigException> {
+                        AlcyoneContextFactory.create(fixture.config().copy(llm = llm), fixture.vfsConfig())
+                    }
+                assertEquals(ContextConfigErrorCode.INVALID_CONFIG, failure.errorCode)
+                assertTrue(failure.message.orEmpty().contains("$task profile jsonMode must be JSON_SCHEMA or JSON_OBJECT"))
+                assertFalse(failure.message.orEmpty().contains("ct16-secret-key"))
+                assertEquals(before, fixture.snapshot())
+            }
+        }
+
+    @Test
+    fun `exclusive tasks require every remaining binding and each missing task or profile is named`() =
+        ContextFixture().use { fixture ->
+            val before = fixture.snapshot()
+            val tasks =
+                listOf(LlmTask.DREAMING_TOPIC, LlmTask.MEMORY_SEARCH, LlmTask.DREAMING_EVIDENCE, LlmTask.DREAMING_REFLECTION)
+            listOf(LlmTask.DREAMING_TOPIC, LlmTask.DREAMING_EVIDENCE, LlmTask.DREAMING_REFLECTION).forEach { exclusive ->
+                tasks.forEach { required ->
+                    val complete = dreamingLlm()
+                    val llm = LlmConfig(complete.profiles, complete.tasks.filterKeys { task -> task == exclusive || task == required })
+                    val failure =
+                        assertFailsWith<ContextConfigException> {
+                            AlcyoneContextFactory.create(fixture.config().copy(llm = llm), fixture.vfsConfig())
+                        }
+                    assertEquals(ContextConfigErrorCode.INVALID_CONFIG, failure.errorCode)
+                    val expected =
+                        tasks.first { task -> task != exclusive && task != required }
+                    assertTrue(failure.message.orEmpty().contains("context.llm.tasks.$expected is required for dreaming"))
+                    assertFalse(failure.message.orEmpty().contains("ct16-secret-key"))
+                    assertEquals(before, fixture.snapshot())
+                }
+            }
+
+            val missingProfile =
+                dreamingLlm().let { complete ->
+                    assertFailsWith<ContextConfigException> {
+                        LlmConfig(
+                            complete.profiles,
+                            complete.tasks + (LlmTask.DREAMING_EVIDENCE to LlmTaskConfig("missing", 4_000, 1_000)),
+                        )
+                    }
+                }
+            assertEquals(
+                "[INVALID_CONFIG] context.llm.tasks.DREAMING_EVIDENCE.profile refers to an unknown profile: missing",
+                missingProfile.message,
+            )
+            val noProfiles = assertFailsWith<ContextConfigException> { LlmConfig(emptyMap(), dreamingLlm().tasks) }
+            assertEquals(ContextConfigErrorCode.INVALID_CONFIG, noProfiles.errorCode)
+            assertEquals(before, fixture.snapshot())
+        }
+
+    @Test
+    fun `standalone memory search preserves retrieval-only binding modes without a dreaming worker`() =
+        ContextFixture().use { fixture ->
+            val before = fixture.snapshot()
+            listOf(LlmResponseFormat.JSON_SCHEMA, LlmResponseFormat.JSON_OBJECT, LlmResponseFormat.PROMPT_ONLY)
+                .forEach { mode ->
+                    val complete = dreamingLlm(mode = mode)
+                    val searchOnly =
+                        LlmConfig(
+                            complete.profiles,
+                            mapOf(
+                                LlmTask.MEMORY_SEARCH to complete.tasks.getValue(LlmTask.MEMORY_SEARCH),
+                            ),
+                        )
+                    val context = AlcyoneContextFactory.create(fixture.config().copy(llm = searchOnly), fixture.vfsConfig())
+                    assertTrue(context.status().workers.isEmpty())
+                    assertEquals(before, fixture.snapshot())
+                }
+        }
+
+    @Test
+    fun `manual dreaming runs through public context and close joins its runtime`() =
+        ContextFixture().use { fixture ->
+            fixture.initialize()
+            var runtime: DreamingRuntime? = null
+            val context =
+                AlcyoneContextFactory.create(
+                    fixture.config().copy(llm = dreamingLlm()),
+                    fixture.vfsConfig(),
+                    object : AlcyoneContextFactory.StartProbe {
+                        override suspend fun afterResourcesAcquired() = Unit
+                    },
+                    dreamingRuntimeConfigurator = { runtime = it },
+                )
+            runBlocking {
+                context.start()
+                val result = context.runDreaming()
+                assertEquals(0L, result.startCheckpoint)
+                assertEquals(0L, result.endCheckpoint)
+                assertEquals(0, result.scannedTurns)
+                assertEquals("RUNNING", runtime?.stateForTesting())
+                assertNull(runtime?.periodicCronForTesting())
+                context.closeAsync()
+            }
+            assertEquals("CLOSED", runtime?.stateForTesting())
+        }
+
+    @Test
+    fun `dreaming construction failure releases runtime and does not publish context`() =
+        ContextFixture().use { fixture ->
+            fixture.initialize()
+            var runtime: DreamingRuntime? = null
+            val failure = IllegalStateException("ct27-start-failure")
+            val context =
+                AlcyoneContextFactory.create(
+                    fixture.config().copy(llm = dreamingLlm()),
+                    fixture.vfsConfig(),
+                    object : AlcyoneContextFactory.StartProbe {
+                        override suspend fun afterResourcesAcquired() = Unit
+                    },
+                    dreamingRuntimeConfigurator = {
+                        runtime = it
+                        it.startFailureForTesting = failure
+                    },
+                )
+            assertSame(failure, assertFailsWith<IllegalStateException> { runBlocking { context.start() } })
+            assertEquals(ContextLifecycleState.CLOSED, context.status().lifecycle)
+            assertEquals("CLOSED", runtime?.stateForTesting())
+        }
 
     private fun profile(
         name: String,

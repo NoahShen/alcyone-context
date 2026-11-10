@@ -7,6 +7,9 @@ import com.github.noahshen.alcyone.context.memory.core.extraction.ExtractionRunn
 import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionNotificationReporter
 import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionNotifier
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseInitializer
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingPeriodicTickSource
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingRuntime
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.validateDreamingBinding
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.ExtractionPipeline
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.IdleTickSource
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.OrganizationWakeup
@@ -67,6 +70,8 @@ object AlcyoneContextFactory {
             memoryMapGenerator = null,
             memoryMapTickSource = null,
             memoryMapPipelineConfigurator = null,
+            dreamingTickSource = null,
+            dreamingRuntimeConfigurator = null,
         )
 
     /**
@@ -93,6 +98,8 @@ object AlcyoneContextFactory {
         memoryMapGenerator: MemoryMapGeneratorPort? = null,
         memoryMapTickSource: MemoryMapPeriodicTickSource? = null,
         memoryMapPipelineConfigurator: ((MemoryMapPipeline) -> Unit)? = null,
+        dreamingTickSource: DreamingPeriodicTickSource? = null,
+        dreamingRuntimeConfigurator: ((DreamingRuntime) -> Unit)? = null,
     ): AlcyoneContext =
         build(
             contextConfig = contextConfig,
@@ -114,6 +121,8 @@ object AlcyoneContextFactory {
             memoryMapGenerator = memoryMapGenerator,
             memoryMapTickSource = memoryMapTickSource,
             memoryMapPipelineConfigurator = memoryMapPipelineConfigurator,
+            dreamingTickSource = dreamingTickSource,
+            dreamingRuntimeConfigurator = dreamingRuntimeConfigurator,
         )
 
     /** 组装探针；生产入口使用空实现，测试用它制造确定性的 start/close 交错。 */
@@ -161,6 +170,8 @@ object AlcyoneContextFactory {
         memoryMapGenerator: MemoryMapGeneratorPort?,
         memoryMapTickSource: MemoryMapPeriodicTickSource?,
         memoryMapPipelineConfigurator: ((MemoryMapPipeline) -> Unit)?,
+        dreamingTickSource: DreamingPeriodicTickSource?,
+        dreamingRuntimeConfigurator: ((DreamingRuntime) -> Unit)?,
     ): AlcyoneContext {
         // 先取得归本实例所有的配置快照，再对快照校验；调用者之后的修改不得影响已校验配置。
         val ownedVfsConfig =
@@ -177,6 +188,7 @@ object AlcyoneContextFactory {
         validateOrganizationBinding(contextConfig.organization, ownedLlmConfig)
         // Memory Map 显式配置时同样在任何资源打开前完成 LLM binding 纯校验。
         validateMemoryMapBinding(ownedMemoryMapConfig, ownedLlmConfig)
+        validateDreamingBinding(contextConfig.dreaming, ownedLlmConfig)
         validateContext(databasePath, contextConfig.lifecycleShutdownTimeout)
         validateVfs(ownedVfsConfig)
         ContextPathIsolation.requireDistinctDatabases(databasePath, ownedVfsConfig.stateDatabase)
@@ -205,6 +217,9 @@ object AlcyoneContextFactory {
             memoryMapGenerator = memoryMapGenerator,
             memoryMapTickSource = memoryMapTickSource,
             memoryMapPipelineConfigurator = memoryMapPipelineConfigurator,
+            dreamingConfig = contextConfig.dreaming,
+            dreamingTickSource = dreamingTickSource,
+            dreamingRuntimeConfigurator = dreamingRuntimeConfigurator,
             retrievalConfig = contextConfig.retrieval,
             clock = clock,
             ingestionNotifier = ingestionNotifier,

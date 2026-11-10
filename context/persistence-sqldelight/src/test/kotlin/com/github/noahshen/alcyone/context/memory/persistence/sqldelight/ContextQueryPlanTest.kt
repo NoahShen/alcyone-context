@@ -2,6 +2,7 @@ package com.github.noahshen.alcyone.context.memory.persistence.sqldelight
 
 import app.cash.sqldelight.db.SqlPreparedStatement
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
@@ -38,6 +39,23 @@ class ContextQueryPlanTest {
                     bind.bindLong(3, 10L)
                 }
             assertTrue(plan.contains("idx_turn_session_time"), "无锚点会话窗口必须走 idx_turn_session_time，实际计划:\n$plan")
+        }
+
+    @Test
+    fun `forward session window uses idx_turn_session_time and seven bound parameters`() =
+        ConversationFixtures.withDatabase { executor ->
+            assertEquals(7, ContextSqlQueries.SELECT_SESSION_WINDOW_AFTER.count { char -> char == '?' })
+            val plan =
+                explain(executor, ContextSqlQueries.SELECT_SESSION_WINDOW_AFTER) { bind ->
+                    bind.bindString(0, "runtime-1")
+                    bind.bindString(1, "agent-1")
+                    bind.bindString(2, "session-1")
+                    bind.bindString(3, "2026-10-28T08:30:00.123+08:00")
+                    bind.bindString(4, "2026-10-28T08:30:00.123+08:00")
+                    bind.bindLong(5, 42L)
+                    bind.bindLong(6, 10L)
+                }
+            assertTrue(plan.contains("idx_turn_session_time"), "前向会话窗口必须走 idx_turn_session_time，实际计划:\n$plan")
         }
 
     @Test

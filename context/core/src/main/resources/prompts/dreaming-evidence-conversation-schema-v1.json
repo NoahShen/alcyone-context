@@ -1,0 +1,15 @@
+{
+  "title": "DreamingEvidenceConversationNeedOutputV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["memoryIds"],
+  "properties": {
+    "memoryIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

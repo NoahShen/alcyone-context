@@ -42,6 +42,18 @@ class ConversationRepositoryImpl(
             ConversationReadOpsImpl(scope).sessionWindow(runtimeId, agentId, sessionId, beforeTimestamp, beforeId, limit)
         }
 
+    override suspend fun sessionWindowAfter(
+        runtimeId: String,
+        agentId: String,
+        sessionId: String,
+        afterTimestamp: Instant,
+        afterId: Long,
+        limit: Int,
+    ): List<StoredConversationTurn> =
+        executor.read { scope ->
+            ConversationReadOpsImpl(scope).sessionWindowAfter(runtimeId, agentId, sessionId, afterTimestamp, afterId, limit)
+        }
+
     override suspend fun latestPending(
         runtimeId: String,
         agentId: String,

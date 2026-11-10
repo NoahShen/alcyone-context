@@ -6,6 +6,11 @@
 **项目**：Alcyone Context System  
 **位置**：Alcyone / Context System
 
+## 本次修改（2026-11-10，CT26 SDK 接线边界补充）
+
+- 在 §8.2/§8.7 补充已存在 SDK 手动入口的关闭与错误语义：第三方未实现为 `UNAVAILABLE`，真实重叠才为 `ALREADY_RUNNING`；关闭须先封闭手动/Cron 准入并等待已登记手动及后台运行收尾，再释放 LLM/SQLite。
+- 不改变 Manual+可选 Cron、单 Worker、Checkpoint、短事务与无 StartupRecovery 契约；真实收费模型评测仍按 §10.6 独立授权。
+
 ## 本次修改（2026-10-25，CT01 设计差异同步与 VFS 配置归属）
 
 - 按用户意见调整 §1.1、§1.2、§1.5～1.6：Context Runtime 读取 YAML 的 `context` 与 `vfs` 分区，将 `vfs` 配置转换为现有 `VfsRuntimeConfig`；不新增 VFS Loader、不修改 VFS。
@@ -1484,6 +1489,8 @@ Reflection 只接收本 Topic 相关的：新 Conversation、召回及反查的�
 | 第 N 批失败而前 N−1 批已提交 | 前批保留，当前批无部分保存 | 下次从最后成功 Checkpoint 继续 |
 | Manual / Cron 重叠触发 | 不创建第二 Worker | 手动返回 ALREADY_RUNNING / Cron 跳过 |
 | 进程重启 | 已提交 Raw、Pending 和 Checkpoint 保留 | 不做 StartupRecovery，等待下次 Manual/Cron |
+
+SDK `AlcyoneContext.runDreaming()` 与 Cron 共用上述协调器；未提供该能力的第三方默认实现抛出 `UNAVAILABLE`，不得复用 `ALREADY_RUNNING`。Runtime 关闭先封闭手动/Cron 准入，等待已登记手动运行与后台运行真实收尾（后台运行可取消），调用方取消仅取消自身，随后才释放 LLM 与 SQLite；关闭中/后新请求返回 `CLOSED`。
 
 运行状态至少记录已提交/当前 Checkpoint、最近执行时间、已处理 Turn/Topic/Insight 数、失败阶段与脱敏错误；敏感 Conversation/Raw 原文及模型 Prompt 不写日志。普通业务失败不将 Worker 标为永久 FAILED，任务取消按既有 Coroutine 语义传播。
 

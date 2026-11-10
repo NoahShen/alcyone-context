@@ -46,6 +46,17 @@ internal object ContextSqlQueries {
             "WHERE runtime_id = ? AND agent_id = ? AND session_id = ? " +
             "ORDER BY timestamp DESC, id DESC LIMIT ?"
 
+    /**
+     * 严格前向窗口：仅返回 `(timestamp, id)` 大于锚点的同 Session Turn。
+     *
+     * 参数顺序：runtime, agent, session, afterTimestamp(>), afterTimestamp(=), afterId, limit。
+     */
+    const val SELECT_SESSION_WINDOW_AFTER =
+        "SELECT $TURN_COLUMNS FROM conversation_turn " +
+            "WHERE runtime_id = ? AND agent_id = ? AND session_id = ? " +
+            "AND (timestamp > ? OR (timestamp = ? AND id > ?)) " +
+            "ORDER BY timestamp ASC, id ASC LIMIT ?"
+
     /** 最近一条 pending（按会话时间与内部 id 倒序）。 */
     const val SELECT_LATEST_PENDING =
         "SELECT $TURN_COLUMNS FROM conversation_turn " +

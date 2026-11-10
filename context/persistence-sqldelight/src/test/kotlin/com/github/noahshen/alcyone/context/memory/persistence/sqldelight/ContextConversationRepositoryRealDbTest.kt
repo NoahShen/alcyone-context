@@ -49,6 +49,7 @@ class ContextConversationRepositoryRealDbTest {
             assertNull(repository.getById(1L))
             assertNull(repository.findByBusinessKey(session, "missing"))
             assertEquals(emptyList<StoredConversationTurn>(), repository.sessionWindow(session, null, null, 10))
+            assertEquals(emptyList<StoredConversationTurn>(), repository.sessionWindowAfter(session, timestamp, 1L, 10))
             assertNull(repository.latestPending(session))
             assertEquals(0, repository.countPending(session))
             assertFalse(repository.idleCheck(session, idleBefore))
@@ -168,6 +169,77 @@ class ContextConversationRepositoryRealDbTest {
             // 同一时刻按 id <= 锚点截断，且包含锚点自身。
             val tieBreak = repository.sessionWindow(session, timestamp, secondAtTimestamp, 10)
             assertEquals(listOf(firstAtTimestamp, secondAtTimestamp), tieBreak.map { it.id })
+        }
+
+    @Test
+    fun `sessionWindowAfter excludes the anchor uses strict timestamp id ordering and applies the limit`() =
+        ConversationFixtures.withDatabase { executor ->
+            val repository = ConversationRepositoryImpl(executor)
+            val ids =
+                (1..5).map { index ->
+                    ConversationFixtures
+                        .insert(
+                            executor,
+                            "turn-$index",
+                            timestamp = timestamp,
+                            messages = ConversationFixtures.messages("m$index"),
+                        ).id
+                }
+            val later =
+                ConversationFixtures
+                    .insert(
+                        executor,
+                        "turn-6",
+                        timestamp = timestamp.plusSeconds(1),
+                        messages = ConversationFixtures.messages("later"),
+                    ).id
+
+            assertEquals(
+                listOf(ids[2], ids[3], ids[4], later),
+                repository.sessionWindowAfter(session, timestamp, ids[1], 10).map { it.id },
+            )
+            assertEquals(listOf(ids[3], ids[4]), repository.sessionWindowAfter(session, timestamp, ids[2], 2).map { it.id })
+            assertEquals(listOf(later), repository.sessionWindowAfter(session, timestamp, ids[4], 10).map { it.id })
+            assertEquals(emptyList(), repository.sessionWindowAfter(session, timestamp.plusSeconds(1), later, 10))
+        }
+
+    @Test
+    fun `sessionWindowAfter does not cross runtime agent or session boundaries`() =
+        ConversationFixtures.withDatabase { executor ->
+            val repository = ConversationRepositoryImpl(executor)
+            val anchor = ConversationFixtures.insert(executor, "turn-1", timestamp = timestamp).id
+            ConversationFixtures.insert(executor, "other-session", timestamp = timestamp.plusSeconds(1), session = otherSession)
+            ConversationFixtures.insert(
+                executor,
+                "other-agent",
+                timestamp = timestamp.plusSeconds(2),
+                session = session.copy(agentId = "agent-2"),
+            )
+            ConversationFixtures.insert(
+                executor,
+                "other-runtime",
+                timestamp = timestamp.plusSeconds(3),
+                session = session.copy(runtimeId = "runtime-2"),
+            )
+            val expected = ConversationFixtures.insert(executor, "turn-2", timestamp = timestamp.plusSeconds(4)).id
+
+            assertEquals(listOf(expected), repository.sessionWindowAfter(session, timestamp, anchor, 10).map { it.id })
+        }
+
+    @Test
+    fun `read tx and repository forward windows share the same semantics`() =
+        ConversationFixtures.withDatabase { executor ->
+            val anchor = ConversationFixtures.insert(executor, "turn-1", timestamp = timestamp).id
+            val expected = ConversationFixtures.insert(executor, "turn-2", timestamp = timestamp.plusSeconds(1)).id
+            val readResult =
+                executor.read { read -> ConversationReadOpsImpl(read).sessionWindowAfter(session, timestamp, anchor, 1).map { it.id } }
+            val txResult =
+                executor.write { tx -> ConversationTxOpsImpl(tx).sessionWindowAfter(session, timestamp, anchor, 1).map { it.id } }
+            val repositoryResult = ConversationRepositoryImpl(executor).sessionWindowAfter(session, timestamp, anchor, 1).map { it.id }
+
+            assertEquals(listOf(expected), readResult)
+            assertEquals(readResult, txResult)
+            assertEquals(readResult, repositoryResult)
         }
 
     @Test

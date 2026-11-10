@@ -1,6 +1,7 @@
 package com.github.noahshen.alcyone.context.memory.runtime
 
 import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionLimits
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingConfig
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.ExtractionConfig
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmConfig
 import com.github.noahshen.alcyone.context.memory.runtime.map.MemoryMapConfig
@@ -22,6 +23,7 @@ import kotlin.time.Duration
  * - [organization]：`context.organization` 的不可变快照（CT16-B1），缺省 `null` 表示不建 pipeline。
  * - [memoryMap]：`context.memoryMap` 的不可变快照（CT19-B1），缺省 `null` 表示不建 Map pipeline。
  * - [retrieval]：`context.retrieval` 的不可变快照（CT20-B2），缺省使用默认 Search 上限。
+ * - [dreaming]：`context.dreaming` 的不可变快照（CT22-B1），缺省 manual-only。
  *
  * 本类只承载配置事实，不含生命周期或资源句柄（CT06-B1 不引入 `AlcyoneContext` / `start` / `close`）。
  * `toString()` 由数据类生成，但 WebDAV 凭据不会泄漏：`MountBackend.WebDav.toString` 已脱敏。
@@ -50,6 +52,8 @@ data class ContextConfig(
     val memoryMap: MemoryMapConfig? = null,
     /** `context.retrieval` 配置快照（CT20-B2）。 */
     val retrieval: RetrievalConfig = RetrievalConfig(),
+    /** `context.dreaming` 配置快照（CT22-B1）；cron=null 表示 manual-only。 */
+    val dreaming: DreamingConfig = DreamingConfig(),
 ) {
     /** VFS 状态库绝对路径（`vfsConfig.stateDatabase` 的便捷视图）。 */
     val vfsDatabasePath: Path get() = vfsConfig.stateDatabase

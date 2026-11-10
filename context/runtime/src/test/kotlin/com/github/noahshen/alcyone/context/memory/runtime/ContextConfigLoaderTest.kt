@@ -243,6 +243,38 @@ class ContextConfigLoaderTest {
         }
 
     @Test
+    fun `dreaming defaults to manual only and flat overrides are mapped strictly`() =
+        withDirectory { dir ->
+            val default = load(dir, "context: {}\n").dreaming
+            assertNull(default.cron)
+            assertEquals("Asia/Shanghai", default.timezone)
+            val empty = load(dir, "context:\n  dreaming: {}\n").dreaming
+            assertNull(empty.cron)
+            val overridden = load(dir, "context:\n  dreaming:\n    cron: '0 3 * * *'\n    timezone: Europe/London\n").dreaming
+            assertEquals("0 3 * * *", overridden.cron)
+            assertEquals("Europe/London", overridden.timezone)
+        }
+
+    @Test
+    fun `dreaming loader rejects unknown type invalid cron timezone and orphan timezone`() =
+        withDirectory { dir ->
+            val cases =
+                listOf(
+                    "context:\n  dreaming: []\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  dreaming:\n    unknown: 1\n" to ContextConfigErrorCode.UNKNOWN_FIELD,
+                    "context:\n  dreaming:\n    cron: 3\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  dreaming:\n    cron: not-cron\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  dreaming:\n    cron: '0 3 * * *'\n    timezone: Not/AZone\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                    "context:\n  dreaming:\n    timezone: Asia/Shanghai\n" to ContextConfigErrorCode.INVALID_CONFIG,
+                )
+            cases.forEach { (yaml, code) ->
+                val failure = assertFailsWith<ContextConfigException> { load(dir, yaml) }
+                assertEquals(code, failure.errorCode)
+                assertNull(failure.cause)
+            }
+        }
+
+    @Test
     fun `organization is disabled by default and an empty mapping uses trigger defaults`() =
         withDirectory { dir ->
             assertNull(load(dir, "context:\n  database:\n    path: ./data/context.db\n").organization)

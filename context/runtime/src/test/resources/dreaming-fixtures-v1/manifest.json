@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "sanitization": "synthetic identifiers and non-sensitive text; no credentials, personal data, or real provider responses",
+  "topicPromptVersion": "v1",
+  "topicSchemaVersion": "v1",
+  "evidencePromptVersion": "v1",
+  "evidenceSchemaVersion": "v1",
+  "reflectionPromptVersion": "v1",
+  "reflectionSchemaVersion": "v1",
+  "profiles": {
+    "fixture-topic": {
+      "model": "fixture-topic-model",
+      "apiKey": "not-a-secret-topic",
+      "contextWindowTokens": 1000000,
+      "jsonMode": "JSON_SCHEMA"
+    },
+    "fixture-evidence": {
+      "model": "fixture-evidence-model",
+      "apiKey": "not-a-secret-evidence",
+      "contextWindowTokens": 1000000,
+      "jsonMode": "JSON_SCHEMA"
+    },
+    "fixture-reflection": {
+      "model": "fixture-reflection-model",
+      "apiKey": "not-a-secret-reflection",
+      "contextWindowTokens": 1000000,
+      "jsonMode": "JSON_SCHEMA"
+    },
+    "fixture-memory-search": {
+      "model": "fixture-memory-search-model",
+      "apiKey": "not-a-secret-memory-search",
+      "contextWindowTokens": 1000000,
+      "jsonMode": "JSON_SCHEMA"
+    }
+  },
+  "turnsFile": "turns.jsonl",
+  "memoriesFile": "memories.jsonl",
+  "scenariosFile": "scenarios.jsonl",
+  "realModelResultsFile": "real-model-results.json",
+  "memorySearchPromptVersion": "v1",
+  "memorySearchSchemaVersion": "v1"
+}

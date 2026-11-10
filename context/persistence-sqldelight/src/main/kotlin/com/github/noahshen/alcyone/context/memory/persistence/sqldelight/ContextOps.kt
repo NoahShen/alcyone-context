@@ -168,6 +168,15 @@ class ConversationReadOpsImpl(
         limit: Int,
     ): List<StoredConversationTurn> = reader.sessionWindow(runtimeId, agentId, sessionId, beforeTimestamp, beforeId, limit)
 
+    override fun sessionWindowAfter(
+        runtimeId: String,
+        agentId: String,
+        sessionId: String,
+        afterTimestamp: Instant,
+        afterId: Long,
+        limit: Int,
+    ): List<StoredConversationTurn> = reader.sessionWindowAfter(runtimeId, agentId, sessionId, afterTimestamp, afterId, limit)
+
     override fun latestPending(
         runtimeId: String,
         agentId: String,
@@ -221,6 +230,15 @@ class ConversationTxOpsImpl(
         beforeId: Long?,
         limit: Int,
     ): List<StoredConversationTurn> = reader.sessionWindow(runtimeId, agentId, sessionId, beforeTimestamp, beforeId, limit)
+
+    override fun sessionWindowAfter(
+        runtimeId: String,
+        agentId: String,
+        sessionId: String,
+        afterTimestamp: Instant,
+        afterId: Long,
+        limit: Int,
+    ): List<StoredConversationTurn> = reader.sessionWindowAfter(runtimeId, agentId, sessionId, afterTimestamp, afterId, limit)
 
     override fun latestPending(
         runtimeId: String,
@@ -373,6 +391,33 @@ internal class ConversationTurnReader(
             bind.bindLong(5, anchorId)
             bind.bindLong(6, limit.toLong())
         }) { cursor -> readNewestPage(cursor) }
+    }
+
+    /** 严格前向窗口，直接按 `timestamp ASC, id ASC` 返回。 */
+    fun sessionWindowAfter(
+        runtimeId: String,
+        agentId: String,
+        sessionId: String,
+        afterTimestamp: Instant,
+        afterId: Long,
+        limit: Int,
+    ): List<StoredConversationTurn> {
+        requirePagination(limit)
+        if (limit == 0) return emptyList()
+        val anchor = ContextDbTime.encode(afterTimestamp)
+        return queries.queryPrepared(ContextSqlQueries.SELECT_SESSION_WINDOW_AFTER, { bind ->
+            bind.bindString(0, runtimeId)
+            bind.bindString(1, agentId)
+            bind.bindString(2, sessionId)
+            bind.bindString(3, anchor)
+            bind.bindString(4, anchor)
+            bind.bindLong(5, afterId)
+            bind.bindLong(6, limit.toLong())
+        }) { cursor ->
+            val rows = mutableListOf<StoredConversationTurn>()
+            while (cursor.next().value) rows += ConversationTurnMapper.map(cursor)
+            rows
+        }
     }
 
     /** 按 `timestamp DESC, id DESC` 读出的页，反序为真实会话顺序。 */

@@ -42,6 +42,32 @@ class PaginationArgumentValidationTest {
         }
 
     @Test
+    fun `sessionWindowAfter rejects a negative limit and returns an empty page for zero`() =
+        withExecutor { executor ->
+            val anchor = insertTurn(executor, "turn-1", t0)
+            insertTurn(executor, "turn-2", t0.plusSeconds(1))
+
+            val invalid =
+                assertFailsWith<IllegalArgumentException> {
+                    runBlocking {
+                        executor.read { read ->
+                            ConversationReadOpsImpl(read).sessionWindowAfter(session, t0, anchor, -1)
+                        }
+                    }
+                }
+            assertInvalid(invalid, "limit", "-1")
+            assertEquals(
+                emptyList(),
+                runBlocking { executor.read { read -> ConversationReadOpsImpl(read).sessionWindowAfter(session, t0, anchor, 0) } },
+            )
+            assertEquals(
+                1,
+                runBlocking { executor.read { read -> ConversationReadOpsImpl(read).sessionWindowAfter(session, t0, anchor, 10) } }.size,
+            )
+            assertHealthy(executor)
+        }
+
+    @Test
     fun `idRange rejects a negative limit and returns an empty page for zero`() =
         withExecutor { executor ->
             val first = insertTurn(executor, "turn-1", t0)

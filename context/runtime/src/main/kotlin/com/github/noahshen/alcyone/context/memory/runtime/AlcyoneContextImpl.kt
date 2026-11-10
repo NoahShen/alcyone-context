@@ -11,6 +11,7 @@ import com.github.noahshen.alcyone.context.memory.api.ContextRetrievalErrorCode
 import com.github.noahshen.alcyone.context.memory.api.ContextRetrievalException
 import com.github.noahshen.alcyone.context.memory.api.ContextStatus
 import com.github.noahshen.alcyone.context.memory.api.ConversationTurn
+import com.github.noahshen.alcyone.context.memory.api.DreamingResult
 import com.github.noahshen.alcyone.context.memory.api.IngestResult
 import com.github.noahshen.alcyone.context.memory.api.IngestStatus
 import com.github.noahshen.alcyone.context.memory.api.MapStatus
@@ -36,6 +37,10 @@ import com.github.noahshen.alcyone.context.memory.core.organization.Organization
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseExecutor
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseFactory
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseImpl
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingConfig
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingPeriodicTickSource
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingRuntime
+import com.github.noahshen.alcyone.context.memory.runtime.dreaming.validateDreamingBinding
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.DefaultExtractionRunner
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.DefaultPreExtractionContextBuilder
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.ExtractionCallbackMarker
@@ -163,6 +168,9 @@ internal class AlcyoneContextImpl(
     internal val memoryMapTickSource: MemoryMapPeriodicTickSource? = null,
     /** 内部测试用：Memory Map pipeline 构造后、start 前接缝。 */
     internal val memoryMapPipelineConfigurator: ((MemoryMapPipeline) -> Unit)? = null,
+    internal val dreamingConfig: DreamingConfig = DreamingConfig(),
+    internal val dreamingTickSource: DreamingPeriodicTickSource? = null,
+    internal val dreamingRuntimeConfigurator: ((DreamingRuntime) -> Unit)? = null,
     /** `context.retrieval` 配置快照（CT20-B2）。 */
     internal val retrievalConfig: RetrievalConfig = RetrievalConfig(),
     /** 服务端 `created_at` 时钟；生产为系统 UTC，测试可注入固定时钟。 */
@@ -239,6 +247,7 @@ internal class AlcyoneContextImpl(
 
     /** `start()` 内组装的 Memory Map pipeline（未配置 memoryMap 时为 null）。 */
     private var memoryMapPipeline: MemoryMapPipeline? = null
+    private var dreamingRuntime: DreamingRuntime? = null
 
     /** 生产默认 Map wakeup：仅在当前实例持有 pipeline 时合并一次刷新信号。 */
     private val effectiveOrganizationMapWakeup: OrganizationMapWakeup =
@@ -287,6 +296,7 @@ internal class AlcyoneContextImpl(
         var acquiredLlm: KtorLlmClient? = null
         var acquiredOrganizationPipeline: OrganizationPipeline? = null
         var acquiredMemoryMapPipeline: MemoryMapPipeline? = null
+        var acquiredDreamingRuntime: DreamingRuntime? = null
         var acquiredPipeline: ExtractionPipeline? = null
         var published = false
         var failureToThrow: Throwable? = null
@@ -305,6 +315,12 @@ internal class AlcyoneContextImpl(
                     ?.also { pipeline -> memoryMapPipelineConfigurator?.invoke(pipeline) }
             val organizationWakeup =
                 organizationWakeup ?: acquiredOrganizationPipeline?.wakeup ?: OrganizationWakeup { }
+            acquiredDreamingRuntime =
+                defaultDreamingRuntime(
+                    assembledDatabase,
+                    acquiredLlm,
+                    organizationWakeup,
+                )?.also { dreamingRuntimeConfigurator?.invoke(it) }
             // pipeline 只使用已取得的 DB/配置/时钟；Runner 被激活门挡住，RUNNING 发布前不会执行。
             val pipelineRunner = extractionRunner ?: defaultExtractionRunner(assembledDatabase, acquiredLlm, organizationWakeup)
             acquiredPipeline =
@@ -321,6 +337,7 @@ internal class AlcyoneContextImpl(
                 }
             acquiredOrganizationPipeline?.start()
             acquiredMemoryMapPipeline?.start()
+            acquiredDreamingRuntime?.start()
             acquiredPipeline?.start()
             startProbe.afterResourcesAcquired()
             published =
@@ -335,6 +352,7 @@ internal class AlcyoneContextImpl(
                         llm = acquiredLlm
                         organizationPipeline = acquiredOrganizationPipeline
                         memoryMapPipeline = acquiredMemoryMapPipeline
+                        dreamingRuntime = acquiredDreamingRuntime
                         extractionPipeline = acquiredPipeline
                         ingestion =
                             createIngestionService(
@@ -355,6 +373,7 @@ internal class AlcyoneContextImpl(
                         acquiredPipeline,
                         acquiredOrganizationPipeline,
                         acquiredMemoryMapPipeline,
+                        acquiredDreamingRuntime,
                         acquiredLlm,
                         acquiredVfs,
                         acquiredExecutor,
@@ -384,6 +403,7 @@ internal class AlcyoneContextImpl(
                             acquiredPipeline,
                             acquiredOrganizationPipeline,
                             acquiredMemoryMapPipeline,
+                            acquiredDreamingRuntime,
                             acquiredLlm,
                             acquiredVfs,
                             acquiredExecutor,
@@ -557,6 +577,7 @@ internal class AlcyoneContextImpl(
         var pipelineToClose: ExtractionPipeline? = null
         var organizationPipelineToClose: OrganizationPipeline? = null
         var memoryMapPipelineToClose: MemoryMapPipeline? = null
+        var dreamingRuntimeToClose: DreamingRuntime? = null
         var llmToClose: KtorLlmClient? = null
         var vfsToClose: AlcyoneVfs? = null
         var executorToClose: ContextDatabaseExecutor? = null
@@ -577,16 +598,19 @@ internal class AlcyoneContextImpl(
                     pipelineToClose = extractionPipeline
                     organizationPipelineToClose = organizationPipeline
                     memoryMapPipelineToClose = memoryMapPipeline
+                    dreamingRuntimeToClose = dreamingRuntime
                     // 与 RUNNING→STOPPING 同锁封闭三条 pipeline 准入。
                     pipelineToClose?.beginClosing()
                     organizationPipelineToClose?.beginClosing()
                     memoryMapPipelineToClose?.beginClosing()
+                    dreamingRuntimeToClose?.beginClosing()
                     llmToClose = llm
                     vfsToClose = vfs
                     executorToClose = executor
                     extractionPipeline = null
                     organizationPipeline = null
                     memoryMapPipeline = null
+                    dreamingRuntime = null
                     llm = null
                     vfs = null
                     resourceAccess = null
@@ -620,16 +644,19 @@ internal class AlcyoneContextImpl(
             pipelineToClose = pipelineToClose ?: extractionPipeline
             organizationPipelineToClose = organizationPipelineToClose ?: organizationPipeline
             memoryMapPipelineToClose = memoryMapPipelineToClose ?: memoryMapPipeline
+            dreamingRuntimeToClose = dreamingRuntimeToClose ?: dreamingRuntime
             // 兜底：任何路径取到 pipeline 都先封闭准入（幂等、短同步）。
             pipelineToClose?.beginClosing()
             organizationPipelineToClose?.beginClosing()
             memoryMapPipelineToClose?.beginClosing()
+            dreamingRuntimeToClose?.beginClosing()
             llmToClose = llmToClose ?: llm
             vfsToClose = vfsToClose ?: vfs
             executorToClose = executorToClose ?: executor
             extractionPipeline = null
             organizationPipeline = null
             memoryMapPipeline = null
+            dreamingRuntime = null
             llm = null
             vfs = null
             resourceAccess = null
@@ -644,6 +671,7 @@ internal class AlcyoneContextImpl(
             pipelineToClose,
             organizationPipelineToClose,
             memoryMapPipelineToClose,
+            dreamingRuntimeToClose,
             llmToClose,
             vfsToClose,
             executorToClose,
@@ -771,6 +799,40 @@ internal class AlcyoneContextImpl(
         return profile.jsonMode == LlmResponseFormat.JSON_SCHEMA || profile.jsonMode == LlmResponseFormat.JSON_OBJECT
     }
 
+    /** Four complete bindings enable manual runs even without Cron; partial bindings fail before use. */
+    private fun defaultDreamingRuntime(
+        database: ContextDatabaseImpl,
+        llmClient: KtorLlmClient?,
+        wakeup: OrganizationWakeup,
+    ): DreamingRuntime? {
+        val ownedLlm = llmConfig ?: return null
+        val client = llmClient ?: return null
+        validateDreamingBinding(dreamingConfig, ownedLlm)
+        // 无 DREAMING 专属 Task 且无 Cron 时不建 Runtime（manual-only 无绑定兼容）。
+        val hasDreamingTasks =
+            ownedLlm.tasks.keys.any { it in setOf(LlmTask.DREAMING_TOPIC, LlmTask.DREAMING_EVIDENCE, LlmTask.DREAMING_REFLECTION) }
+        if (dreamingConfig.cron == null && !hasDreamingTasks) return null
+        return DreamingRuntime(
+            config = dreamingConfig,
+            database = database,
+            llmClient = client,
+            llmConfig = ownedLlm,
+            organizationWakeup = wakeup,
+            clock = clock,
+            idGenerator = MemoryIdGeneratorImpl(clock),
+            tickSource = dreamingTickSource,
+        )
+    }
+
+    override suspend fun runDreaming(): DreamingResult {
+        val runtime =
+            synchronized(lock) {
+                if (lifecycle != ContextLifecycleState.RUNNING) throw closed("runDreaming() requires RUNNING context")
+                dreamingRuntime ?: throw invalidOrganizationConfig("dreaming requires all four LLM task bindings")
+            }
+        return runtime.runOnce()
+    }
+
     private fun invalidOrganizationConfig(detail: String): ContextConfigException =
         ContextConfigException(ContextConfigErrorCode.INVALID_CONFIG, detail)
 
@@ -778,7 +840,7 @@ internal class AlcyoneContextImpl(
         ContextConfigException(ContextConfigErrorCode.INVALID_CONFIG, detail)
 
     /**
-     * 固定释放顺序：Extraction → Organization → MemoryMap → LLM → VFS → executor。
+     * 固定释放顺序：Extraction → Organization → MemoryMap → Dreaming → LLM → VFS → executor。
      *
      * 所有资源都尽力释放：任一失败也继续关；首个失败作为主失败返回，其余 `addSuppressed`。
      */
@@ -786,6 +848,7 @@ internal class AlcyoneContextImpl(
         acquiredPipeline: ExtractionPipeline?,
         acquiredOrganizationPipeline: OrganizationPipeline?,
         acquiredMemoryMapPipeline: MemoryMapPipeline?,
+        acquiredDreamingRuntime: DreamingRuntime?,
         acquiredLlm: KtorLlmClient?,
         acquiredVfs: AlcyoneVfs?,
         acquiredExecutor: ContextDatabaseExecutor?,
@@ -809,6 +872,13 @@ internal class AlcyoneContextImpl(
             acquiredMemoryMapPipeline?.let { pipeline ->
                 try {
                     pipeline.closeAsync()
+                } catch (failure: Throwable) {
+                    primary = chain(primary, failure)
+                }
+            }
+            acquiredDreamingRuntime?.let { runtime ->
+                try {
+                    runtime.closeAsync()
                 } catch (failure: Throwable) {
                     primary = chain(primary, failure)
                 }
