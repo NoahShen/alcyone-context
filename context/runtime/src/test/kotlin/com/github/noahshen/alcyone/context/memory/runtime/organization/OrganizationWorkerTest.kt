@@ -174,6 +174,105 @@ class OrganizationWorkerTest {
         }
 
     @Test
+    fun `swallowed item failure is observable with a safe classification only for the failed raw`() =
+        withOrganizationDatabase { test ->
+            Slf4jCapture().use {
+                val failedRaw = "raw-observed-fails"
+                val successRaw = "raw-observed-succeeds"
+                prepareRaw(test.database, failedRaw, now.minusSeconds(1), pending = true)
+                prepareRaw(test.database, successRaw, now, pending = true)
+                val observed = mutableListOf<Triple<String, String, String?>>()
+                val retriever =
+                    RecordingCandidateRetriever {
+                        if (it.id == failedRaw) {
+                            throw ContextPersistenceException(
+                                ContextPersistenceErrorCode.PERSISTENCE_UNAVAILABLE,
+                                "ct31-observed-marker",
+                            )
+                        }
+                        emptyList()
+                    }
+                val commit =
+                    RecordingCommitOperation { id, _, _ ->
+                        test.database.write { tx -> tx.pending.dequeue(id) }
+                        OrganizationCommitResult.Committed(GovernanceAction.NEW, "org-$id")
+                    }
+                val worker =
+                    DefaultOrganizationWorker(
+                        database = test.database,
+                        sourceGuard = OrganizationSourceGuard(test.database),
+                        candidateRetriever = retriever,
+                        governanceDecider = RecordingGovernanceDecider { _, _ -> decision() },
+                        commit = commit,
+                        itemFailureObserver =
+                            OrganizationItemFailureObserver { rawId, errorType, errorCode ->
+                                observed += Triple(rawId, errorType, errorCode)
+                            },
+                    )
+
+                worker.runRound()
+
+                assertEquals(listOf(failedRaw), observed.map { it.first })
+                assertEquals(
+                    ContextPersistenceException::class.qualifiedName,
+                    observed.single().second,
+                )
+                assertNull(observed.single().third)
+                assertFalse(observed.single().toString().contains("ct31-observed-marker"))
+                assertTrue(test.database.read { it.pending.exists(failedRaw) })
+                assertFalse(test.database.read { it.pending.exists(successRaw) })
+                assertEquals(0, observed.count { it.first == successRaw })
+            }
+        }
+
+    @Test
+    fun `observer failure never replaces the production swallow or changes pending`() =
+        withOrganizationDatabase { test ->
+            val rawId = "raw-observer-throws"
+            prepareRaw(test.database, rawId, now, pending = true)
+            val worker =
+                DefaultOrganizationWorker(
+                    database = test.database,
+                    sourceGuard = OrganizationSourceGuard(test.database),
+                    candidateRetriever =
+                        RecordingCandidateRetriever {
+                            throw ContextPersistenceException(ContextPersistenceErrorCode.PERSISTENCE_UNAVAILABLE, "marker")
+                        },
+                    governanceDecider = RecordingGovernanceDecider { _, _ -> decision() },
+                    commit = RecordingCommitOperation(),
+                    itemFailureObserver = OrganizationItemFailureObserver { _, _, _ -> error("observer marker") },
+                )
+
+            worker.runRound()
+
+            assertTrue(test.database.read { it.pending.exists(rawId) })
+        }
+
+    @Test
+    fun `cancellation during an item is not reported as an item failure`() =
+        withOrganizationDatabase { test ->
+            val rawId = "raw-observer-cancel"
+            prepareRaw(test.database, rawId, now, pending = true)
+            val cancellation = CancellationException("ct31-observer-cancel-marker")
+            val observed = mutableListOf<String>()
+            val worker =
+                DefaultOrganizationWorker(
+                    database = test.database,
+                    sourceGuard = OrganizationSourceGuard(test.database),
+                    candidateRetriever = RecordingCandidateRetriever { throw cancellation },
+                    governanceDecider = RecordingGovernanceDecider { _, _ -> decision() },
+                    commit = RecordingCommitOperation(),
+                    itemFailureObserver = OrganizationItemFailureObserver { id, _, _ -> observed += id },
+                )
+
+            val thrown = assertFailsWith<CancellationException> { worker.runRound() }
+
+            assertEquals(cancellation.message, thrown.message)
+            assertTrue(observed.isEmpty())
+            assertTrue(test.database.read { it.pending.exists(rawId) })
+        }
+
+    @Test
     fun `round level pending list failure escapes for scheduler backoff handling`() =
         runBlocking {
             withOrganizationDatabase { test ->

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "datasetVersion": "ct31-v1",
+  "status": "NOT_RUN",
+  "authorized": false,
+  "provider": null,
+  "profile": null,
+  "model": null,
+  "reason": "B2 is offline-only. No provider/profile, outbound-data scope, or cost limit was authorized.",
+  "semanticQualityEvaluated": false,
+  "usage": null,
+  "cost": null,
+  "results": []
+}

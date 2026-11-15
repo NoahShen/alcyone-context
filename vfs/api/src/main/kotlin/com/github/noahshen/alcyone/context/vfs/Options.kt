@@ -26,6 +26,26 @@ data class WriteOptions(
 )
 
 /**
+ * 流式发布一个全新文件。
+ *
+ * [maxBytes] 和 [expectedSizeBytes] 都是硬约束：实际读取超限、短读或额外字节都拒绝。
+ * 实现负责在成功、失败和取消时关闭输入流，调用方不得再次关闭。
+ */
+data class PublishOptions(
+    val maxBytes: Long,
+    val expectedSizeBytes: Long,
+) {
+    init {
+        if (maxBytes < 0 || expectedSizeBytes < 0 || expectedSizeBytes > maxBytes) {
+            throw VfsException(
+                VfsErrorCode.INVALID_ARGUMENT,
+                "PublishOptions requires 0 <= expectedSizeBytes <= maxBytes: expected=$expectedSizeBytes max=$maxBytes",
+            )
+        }
+    }
+}
+
+/**
  * 查询选项。
  *
  * @param includeStorage 为 false 时只允许已有 Node 走逻辑查询；未注册时仍须由 Storage 确认资源存在。

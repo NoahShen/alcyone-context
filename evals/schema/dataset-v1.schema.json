@@ -1,0 +1,336 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alcyone.local/evals/schema/dataset-v1.schema.json",
+  "title": "CT31 Evaluation Sample V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "datasetVersion",
+    "task",
+    "split",
+    "route",
+    "synthetic",
+    "containsPersonalData",
+    "provenance",
+    "input",
+    "oracle",
+    "review"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "datasetVersion": { "const": "ct31-v1" },
+    "task": {
+      "enum": ["EXTRACTION", "CANDIDATE_SCANNER", "GOVERNANCE", "MEMORY_SEARCH", "MEMORY_MAP", "DREAMING"]
+    },
+    "split": { "const": "regression" },
+    "route": { "type": "string", "minLength": 1 },
+    "synthetic": { "const": true },
+    "containsPersonalData": { "const": false },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourcePath", "sourceSha256", "sourceSampleId", "transformNote"],
+      "properties": {
+        "kind": { "enum": ["IMPORTED", "SYNTHESIZED"] },
+        "sourcePath": { "type": ["string", "null"] },
+        "sourceSha256": { "type": ["string", "null"] },
+        "sourceSampleId": { "type": ["string", "null"], "minLength": 1 },
+        "transformNote": { "type": "string", "minLength": 1 }
+      }
+    },
+    "input": { "type": "object" },
+    "oracle": { "type": "object" },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "notes"],
+      "properties": {
+        "status": { "const": "APPROVED_FOR_OFFLINE" },
+        "notes": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "provenance": { "properties": { "kind": { "const": "IMPORTED" } }, "required": ["kind"] } },
+        "required": ["provenance"]
+      },
+      "then": { "properties": { "provenance": { "properties": { "sourceSampleId": { "type": "string", "minLength": 1 } } } } }
+    },
+    {
+      "if": {
+        "properties": { "provenance": { "properties": { "kind": { "const": "SYNTHESIZED" } }, "required": ["kind"] } },
+        "required": ["provenance"]
+      },
+      "then": { "properties": { "provenance": { "properties": { "sourceSampleId": { "type": "null" }, "sourcePath": { "type": "null" }, "sourceSha256": { "type": "null" } } } } }
+    },
+    {
+      "if": { "properties": { "task": { "const": "EXTRACTION" } } },
+      "then": { "properties": { "input": { "$ref": "#/$defs/extractionInput" }, "oracle": { "$ref": "#/$defs/extractionOracle" } } }
+    },
+    {
+      "if": { "properties": { "task": { "const": "CANDIDATE_SCANNER" } } },
+      "then": { "properties": { "input": { "$ref": "#/$defs/scannerInput" }, "oracle": { "$ref": "#/$defs/scannerOracle" } } }
+    },
+    {
+      "if": { "properties": { "task": { "const": "GOVERNANCE" } } },
+      "then": { "properties": { "input": { "$ref": "#/$defs/governanceInput" }, "oracle": { "$ref": "#/$defs/governanceOracle" } } }
+    },
+    {
+      "if": { "properties": { "task": { "const": "MEMORY_SEARCH" } } },
+      "then": { "properties": { "input": { "$ref": "#/$defs/searchInput" }, "oracle": { "$ref": "#/$defs/searchOracle" } } }
+    },
+    {
+      "if": { "properties": { "task": { "const": "MEMORY_MAP" } } },
+      "then": { "properties": { "input": { "$ref": "#/$defs/mapInput" }, "oracle": { "$ref": "#/$defs/mapOracle" } } }
+    },
+    {
+      "if": { "properties": { "task": { "const": "DREAMING" } } },
+      "then": { "properties": { "input": { "$ref": "#/$defs/dreamingInput" }, "oracle": { "$ref": "#/$defs/dreamingOracle" } } }
+    }
+  ],
+  "$defs": {
+    "stringArray": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "domains": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "timestamp", "role", "content", "target"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1 },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "role": { "enum": ["user", "assistant", "system"] },
+        "content": { "type": "string", "minLength": 1 },
+        "target": { "type": "boolean" }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content", "domains"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "content": { "type": "string", "minLength": 1 },
+        "domains": { "$ref": "#/$defs/domains" }
+      }
+    },
+    "organizedMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content", "domains", "sourceUpdatedAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "content": { "type": "string", "minLength": 1 },
+        "domains": { "$ref": "#/$defs/domains" },
+        "sourceUpdatedAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "sourceMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content", "sourceTurnIds"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "content": { "type": "string", "minLength": 1 },
+        "sourceTurnIds": { "type": "array", "items": { "type": "integer", "minimum": 1 } }
+      }
+    },
+    "extractionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turns"],
+      "properties": { "turns": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/turn" } } }
+    },
+    "extractionOracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criticality", "riskTags", "requiredFacts", "forbiddenFacts", "sourceTurnIds", "timeAnchors", "expectedEmpty"],
+      "properties": {
+        "criticality": { "enum": ["NORMAL", "IMPORTANT", "CRITICAL"] },
+        "riskTags": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "requiredFacts": { "$ref": "#/$defs/stringArray" },
+        "forbiddenFacts": { "$ref": "#/$defs/stringArray" },
+        "sourceTurnIds": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+        "timeAnchors": { "$ref": "#/$defs/stringArray" },
+        "expectedEmpty": { "type": "boolean" }
+      }
+    },
+    "scannerInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "candidates"],
+      "properties": {
+        "raw": { "$ref": "#/$defs/sourceMemory" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/memory" } }
+      }
+    },
+    "scannerOracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criticality", "riskTags", "relevantIds", "criticalIds", "forbiddenIds", "expectedEmpty"],
+      "properties": {
+        "criticality": { "enum": ["NORMAL", "IMPORTANT", "CRITICAL"] },
+        "riskTags": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "relevantIds": { "$ref": "#/$defs/stringArray" },
+        "criticalIds": { "$ref": "#/$defs/stringArray" },
+        "forbiddenIds": { "$ref": "#/$defs/stringArray" },
+        "expectedEmpty": { "type": "boolean" }
+      }
+    },
+    "governanceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "candidates"],
+      "properties": {
+        "raw": { "$ref": "#/$defs/sourceMemory" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/memory" } }
+      }
+    },
+    "governanceOracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criticality", "riskTags", "expectedAction", "allowedTargets", "forbiddenTargets", "requiredContentPoints", "forbiddenRegressions", "uncertaintyRequired", "expectedEmpty"],
+      "properties": {
+        "criticality": { "enum": ["NORMAL", "IMPORTANT", "CRITICAL"] },
+        "riskTags": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "expectedAction": { "enum": ["NEW", "MERGE", "UPDATE"] },
+        "allowedTargets": { "$ref": "#/$defs/stringArray" },
+        "forbiddenTargets": { "$ref": "#/$defs/stringArray" },
+        "requiredContentPoints": { "$ref": "#/$defs/stringArray" },
+        "forbiddenRegressions": { "$ref": "#/$defs/stringArray" },
+        "uncertaintyRequired": { "type": "boolean" },
+        "expectedEmpty": { "type": "boolean" }
+      }
+    },
+    "qrel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "gain"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "gain": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "searchInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query", "domains", "candidates"],
+      "properties": {
+        "query": { "type": "string", "minLength": 1 },
+        "domains": { "$ref": "#/$defs/domains" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/memory" } }
+      }
+    },
+    "searchOracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criticality", "riskTags", "qrels", "criticalIds", "k", "domains", "expectedEmpty", "scanner", "rerank", "resultMode", "domainFilterMode", "inputTrustBoundary", "emptyCandidatesBehavior", "uncertaintyRequired", "sourceSemanticConstraints", "sourceExpectedBehavior", "sourceForbiddenErrors"],
+      "properties": {
+        "criticality": { "enum": ["NORMAL", "IMPORTANT", "CRITICAL"] },
+        "riskTags": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "qrels": { "type": "array", "items": { "$ref": "#/$defs/qrel" } },
+        "criticalIds": { "$ref": "#/$defs/stringArray" },
+        "k": { "type": "integer", "minimum": 1 },
+        "domains": { "$ref": "#/$defs/domains" },
+        "expectedEmpty": { "type": "boolean" },
+        "resultMode": { "enum": ["REQUIRE_RESULTS", "REQUIRE_EMPTY", "ALLOW_RESULTS_OR_EMPTY"] },
+        "domainFilterMode": { "enum": ["NONE", "STRICT"] },
+        "inputTrustBoundary": { "enum": ["NORMAL", "DATA_ONLY"] },
+        "emptyCandidatesBehavior": { "enum": ["NORMAL", "RETURN_EMPTY_WITHOUT_MODEL_CALL"] },
+        "uncertaintyRequired": { "type": "boolean" },
+        "sourceSemanticConstraints": { "$ref": "#/$defs/stringArray" },
+        "sourceExpectedBehavior": { "type": ["string", "null"], "minLength": 1 },
+        "sourceForbiddenErrors": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "scanner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expectedIds", "forbiddenIds"],
+          "properties": {
+            "expectedIds": { "$ref": "#/$defs/stringArray" },
+            "forbiddenIds": { "$ref": "#/$defs/stringArray" }
+          }
+        },
+        "rerank": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expectedOrder", "forbiddenIds"],
+          "properties": {
+            "expectedOrder": { "$ref": "#/$defs/stringArray" },
+            "forbiddenIds": { "$ref": "#/$defs/stringArray" }
+          }
+        }
+      }
+    },
+    "mapInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organizedMemories"],
+      "properties": { "organizedMemories": { "type": "array", "items": { "$ref": "#/$defs/organizedMemory" } } }
+    },
+    "mapOracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criticality", "riskTags", "requiredFacts", "forbiddenFacts", "requiredDomains", "requiredMemoryIds", "navigationChecks", "uncertaintyRequirements", "expectedEmpty", "inputTrustBoundary", "emptyMapBehavior", "sourceSemanticConstraints", "sourceExpectedBehavior", "sourceForbiddenErrors"],
+      "properties": {
+        "criticality": { "enum": ["NORMAL", "IMPORTANT", "CRITICAL"] },
+        "riskTags": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "requiredFacts": { "$ref": "#/$defs/stringArray" },
+        "forbiddenFacts": { "$ref": "#/$defs/stringArray" },
+        "requiredDomains": { "$ref": "#/$defs/stringArray" },
+        "requiredMemoryIds": { "$ref": "#/$defs/stringArray" },
+        "navigationChecks": { "$ref": "#/$defs/stringArray" },
+        "uncertaintyRequirements": { "$ref": "#/$defs/stringArray" },
+        "expectedEmpty": { "type": "boolean" },
+        "inputTrustBoundary": { "enum": ["NORMAL", "DATA_ONLY"] },
+        "emptyMapBehavior": { "enum": ["NORMAL", "RETURN_DETERMINISTIC_EMPTY_WITHOUT_MODEL_CALL"] },
+        "sourceSemanticConstraints": { "$ref": "#/$defs/stringArray" },
+        "sourceExpectedBehavior": { "type": ["string", "null"], "minLength": 1 },
+        "sourceForbiddenErrors": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "dreamingInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turnIds", "turns", "organizedMemories", "rawMemories"],
+      "properties": {
+        "turnIds": { "type": "array", "minItems": 1, "items": { "type": "integer", "minimum": 1 } },
+        "turns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "role", "content"],
+            "properties": {
+              "id": { "type": "integer", "minimum": 1 },
+              "role": { "enum": ["user", "assistant", "system"] },
+              "content": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "organizedMemories": { "type": "array", "items": { "$ref": "#/$defs/memory" } },
+        "rawMemories": { "type": "array", "items": { "$ref": "#/$defs/sourceMemory" } }
+      }
+    },
+    "dreamingOracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criticality", "riskTags", "expectedInsights", "forbiddenInsightPatterns", "requiredEvidenceTurnIds", "duplicateOf", "correctionGuard", "expectedEmpty", "inputTrustBoundary", "sourceScenarioExpected", "sourceScenarioStageOutputs"],
+      "properties": {
+        "criticality": { "enum": ["NORMAL", "IMPORTANT", "CRITICAL"] },
+        "riskTags": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "expectedInsights": { "$ref": "#/$defs/stringArray" },
+        "forbiddenInsightPatterns": { "$ref": "#/$defs/stringArray" },
+        "requiredEvidenceTurnIds": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+        "duplicateOf": { "$ref": "#/$defs/stringArray" },
+        "correctionGuard": { "type": "string", "minLength": 1 },
+        "expectedEmpty": { "type": "boolean" },
+        "inputTrustBoundary": { "enum": ["NORMAL", "DATA_ONLY"] },
+        "sourceScenarioExpected": { "type": ["object", "null"] },
+        "sourceScenarioStageOutputs": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  }
+}

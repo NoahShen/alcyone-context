@@ -1,0 +1,9 @@
+# CT29 static example. Replace the hostname; Caddy obtains TLS certificates normally.
+# Caddy and real certificate issuance were not executed in the macOS test environment.
+context.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}
+
+# No health/admin exception is configured. Authorization is forwarded unchanged.
+# The application does not trust client Forwarded/X-Forwarded-* headers for access control.

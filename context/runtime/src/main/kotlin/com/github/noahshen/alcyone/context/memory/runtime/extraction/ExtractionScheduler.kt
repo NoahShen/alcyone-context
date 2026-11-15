@@ -1,8 +1,10 @@
 package com.github.noahshen.alcyone.context.memory.runtime.extraction
 
+import com.github.noahshen.alcyone.context.memory.api.AdminWorkerStatus
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleErrorCode
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
 import com.github.noahshen.alcyone.context.memory.api.SessionKey
+import com.github.noahshen.alcyone.context.memory.api.WorkerState
 import com.github.noahshen.alcyone.context.memory.core.extraction.ExtractionRunner
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -90,8 +92,22 @@ internal class ExtractionScheduler(
     private var closeOutcome: CompletableDeferred<Throwable?>? = null
 
     private var executions: Long = 0
+    private var unexpectedTermination: Boolean = false
 
-    /** 测试接缝：owner 清理的最后一个动作（生产为 null），用于注入失败或阻塞。 */
+    /** Read-only process-local worker fact; individual runner failures remain isolated. */
+    internal fun workerStatus(): AdminWorkerStatus =
+        synchronized(lock) {
+            val state =
+                when {
+                    unexpectedTermination -> WorkerState.FAILED
+                    state == State.NEW || executions == 0L -> WorkerState.IDLE
+                    state == State.CLOSING || state == State.CLOSED -> WorkerState.STOPPED
+                    else -> WorkerState.RUNNING
+                }
+            AdminWorkerStatus(state, if (unexpectedTermination) true else null)
+        }
+
+    // ------------------------------------------------------------------ 测试/诊断访问器
     internal var closeActionForTesting: (() -> Unit)? = null
 
     // ------------------------------------------------------------------ 测试/诊断访问器
@@ -350,6 +366,7 @@ internal class ExtractionScheduler(
             val unexpected =
                 synchronized(lock) {
                     if (state == State.RUNNING) {
+                        unexpectedTermination = true
                         cleanupToStart = beginCleanupLocked()
                         true
                     } else {

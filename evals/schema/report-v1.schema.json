@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alcyone.local/evals/report-v1.schema.json",
+  "title": "Alcyone CT31 offline evaluation report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "datasetVersion",
+    "sourceManifestSha256",
+    "semanticQualityEvaluated",
+    "integrity",
+    "datasets",
+    "inputCoverage",
+    "fakeReplay",
+    "aggregates",
+    "criticalErrors",
+    "modelRun"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "datasetVersion": { "const": "ct31-v1" },
+    "sourceManifestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "semanticQualityEvaluated": { "const": false },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "datasetCount", "sampleCount", "importedCount", "newCount", "duplicateIdCount", "danglingReferenceCount", "privacyViolationCount"],
+      "properties": {
+        "status": { "const": "PASS" },
+        "datasetCount": { "const": 6 },
+        "sampleCount": { "const": 72 },
+        "importedCount": { "const": 28 },
+        "newCount": { "const": 44 },
+        "duplicateIdCount": { "const": 0 },
+        "danglingReferenceCount": { "const": 0 },
+        "privacyViolationCount": { "const": 0 }
+      }
+    },
+    "datasets": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "task", "sampleCount", "importedCount", "newCount", "sha256", "riskTags", "criticalCount", "expectedEmptyCount", "expectedIds", "protocolStatus", "semanticStatus"],
+        "properties": {
+          "id": { "enum": ["extraction", "scanner", "governance", "retrieval", "memory-map", "dreaming"] },
+          "task": { "enum": ["EXTRACTION", "CANDIDATE_SCANNER", "GOVERNANCE", "MEMORY_SEARCH", "MEMORY_MAP", "DREAMING"] },
+          "sampleCount": { "const": 12 },
+          "importedCount": { "type": "integer", "minimum": 0, "maximum": 12 },
+          "newCount": { "type": "integer", "minimum": 0, "maximum": 12 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "riskTags": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "criticalCount": { "type": "integer", "minimum": 1 },
+          "expectedEmptyCount": { "type": "integer", "minimum": 0 },
+          "expectedIds": { "type": "array", "minItems": 12, "maxItems": 12, "uniqueItems": true, "items": { "type": "string" } },
+          "protocolStatus": { "const": "NOT_RUN" },
+          "semanticStatus": { "const": "NOT_EVALUATED" }
+        }
+      }
+    },
+    "inputCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retrieval"],
+      "properties": {
+        "retrieval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sampleCount", "samplesWithRelevantJudgments", "samplesWithoutRelevantJudgments", "totalCandidateCount", "semanticMetricsStatus", "semanticMetricsNote", "samples"],
+          "properties": {
+            "sampleCount": { "const": 12 },
+            "samplesWithRelevantJudgments": { "type": "integer", "minimum": 0, "maximum": 12 },
+            "samplesWithoutRelevantJudgments": { "type": "integer", "minimum": 0, "maximum": 12 },
+            "totalCandidateCount": { "type": "integer", "minimum": 0 },
+            "semanticMetricsStatus": { "const": "NOT_APPLICABLE_NO_CAPTURED_OUTPUT" },
+            "semanticMetricsNote": { "const": "Canonical inputs and qrels are summarized; no retrieval outputs were captured." },
+            "samples": {
+              "type": "array",
+              "minItems": 12,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["sampleId", "k", "candidateCount", "relevantJudgmentCount", "expectedEmpty"],
+                "properties": {
+                  "sampleId": { "type": "string", "pattern": "^ret-[0-9]{3}$" },
+                  "k": { "type": "integer", "minimum": 1 },
+                  "candidateCount": { "type": "integer", "minimum": 0 },
+                  "relevantJudgmentCount": { "type": "integer", "minimum": 0 },
+                  "expectedEmpty": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "fakeReplay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenarioCount", "status", "semanticEvidence"],
+      "properties": {
+        "scenarioCount": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["COMPLETED_FIXTURE_REPLAY", "NOT_RUN"] },
+        "semanticEvidence": { "const": false }
+      }
+    },
+    "aggregates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["search", "extraction"],
+      "properties": {
+        "search": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["k", "qrelsVersion", "recallAtK", "criticalRecallAtK", "mrrAtK", "finalRecallAtK"],
+          "properties": {
+            "k": { "const": 3 },
+            "qrelsVersion": { "const": "ct31-v1" },
+            "recallAtK": { "$ref": "#/$defs/notApplicableMetric" },
+            "criticalRecallAtK": { "$ref": "#/$defs/notApplicableMetric" },
+            "mrrAtK": { "$ref": "#/$defs/notApplicableMetric" },
+            "finalRecallAtK": { "$ref": "#/$defs/notApplicableMetric" }
+          }
+        },
+        "extraction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mustFactRecall", "emptyExactRate"],
+          "properties": {
+            "mustFactRecall": { "$ref": "#/$defs/notApplicableMetric" },
+            "emptyExactRate": { "$ref": "#/$defs/notApplicableMetric" }
+          }
+        }
+      }
+    },
+    "criticalErrors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sampleId", "type", "severity", "humanConclusion"],
+        "properties": {
+          "sampleId": { "type": "string", "minLength": 1 },
+          "type": { "enum": ["H1", "H2", "H3"] },
+          "severity": { "enum": ["HIGH", "CRITICAL"] },
+          "humanConclusion": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "modelRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "usage", "cost", "reason"],
+      "properties": {
+        "status": { "const": "NOT_RUN" },
+        "usage": { "type": "null" },
+        "cost": { "type": "null" },
+        "reason": { "const": "B2 is offline-only; real-model execution remains locked." }
+      }
+    }
+  },
+  "$defs": {
+    "notApplicableMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "value", "numerator", "denominator"],
+      "properties": {
+        "status": { "const": "NOT_APPLICABLE" },
+        "value": { "type": "null" },
+        "numerator": { "const": 0 },
+        "denominator": { "const": 0 }
+      }
+    }
+  }
+}

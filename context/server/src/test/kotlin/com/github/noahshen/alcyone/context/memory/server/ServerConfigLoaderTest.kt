@@ -78,6 +78,28 @@ class ServerConfigLoaderTest {
         }
 
     @Test
+    fun `ready timeout has an independent positive long configuration`() =
+        withDirectory { dir ->
+            assertEquals(2_000, ServerLimits().readyTimeoutMillis)
+            val config =
+                load(
+                    dir,
+                    "server:\n  limits:\n    requestTimeoutMillis: 9000\n    readyTimeoutMillis: 1234\n",
+                )
+            assertEquals(9_000, config.limits.requestTimeoutMillis)
+            assertEquals(1_234, config.limits.readyTimeoutMillis)
+            assertTrue(config.toString().contains("readyTimeoutMillis=1234"))
+            listOf("0", "-1", "not-a-number").forEach { value ->
+                val failure =
+                    assertFailsWith<ContextConfigException> {
+                        load(dir, "server:\n  limits:\n    readyTimeoutMillis: $value\n")
+                    }
+                assertEquals(ContextConfigErrorCode.INVALID_CONFIG, failure.errorCode)
+                assertTrue(failure.message.orEmpty().contains("server.limits.readyTimeoutMillis"))
+            }
+        }
+
+    @Test
     fun `unknown fields are rejected at every level`() =
         withDirectory { dir ->
             val cases =

@@ -354,6 +354,8 @@ private class FailingStateWriteUnitOfWork(
                     override val metadata get() = scope.metadata
 
                     override val events get() = scope.events
+
+                    override val recovery get() = scope.recovery
                 }
             block(decorated)
         }

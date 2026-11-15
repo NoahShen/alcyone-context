@@ -157,10 +157,10 @@ class VfsStateDatabaseLifecycleTest {
             }
         }
 
-    /** 基线 schema 是版本 2（T18 给 mount 表补物理身份，1.sqm 把 1 → 2）。 */
+    /** 当前 schema 是版本 4（CT30 B2 新增持久事件 sequence 与 consumer cursor，3.sqm 把 3 → 4）。 */
     @Test
-    fun `the baseline schema is version two`() {
-        assertEquals(2L, VfsDatabase.Schema.version)
+    fun `the baseline schema is version four`() {
+        assertEquals(4L, VfsDatabase.Schema.version)
     }
 
     /**

@@ -14,6 +14,9 @@ interface OrganizationPendingReadOps {
     /** 按 Raw 创建时间 ASC, id ASC 取下一条待治理的 raw_memory_id。 */
     fun nextByRawCreatedAt(): String?
 
+    /** 生产实现使用 COUNT 查询；默认实现仅为第三方只读替身保留源码兼容。 */
+    fun count(): Int = listAllByRawCreatedAt().size
+
     /** 一次性取得当前全部 Pending ID，按 Raw created_at ASC, id ASC 稳定排序；无 limit。 */
     fun listAllByRawCreatedAt(): List<String>
 }

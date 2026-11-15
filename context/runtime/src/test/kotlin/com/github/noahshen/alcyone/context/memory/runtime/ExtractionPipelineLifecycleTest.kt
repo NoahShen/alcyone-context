@@ -174,7 +174,16 @@ class ExtractionPipelineLifecycleTest {
                 repeat(5) { index ->
                     runBlocking { context.ingestConversation(turn(index)) }
                 }
-                awaitUntil { runner.executions.size == 1 }
+                awaitUntil { runner.executions.isNotEmpty() }
+                awaitNotificationsDrained(impl)
+                val scheduler = assertNotNull(impl.pipelineForTesting()).schedulerForTesting()
+                awaitUntil { scheduler.queueDepthForTesting() == 0 && scheduler.stateForTesting() == "RUNNING" }
+                val executions = runner.executions.toList()
+                assertTrue(executions.size in 1..5, "五次通知只能产生一至五次执行，实际 $executions")
+                assertEquals(listOf(sessionKey), executions.distinct())
+                ticks.tick()
+                delay(300)
+                assertEquals(executions, runner.executions.toList(), "idle 关闭时后续 tick 不得增加执行")
             } finally {
                 context.close()
             }
@@ -634,7 +643,7 @@ class ExtractionPipelineLifecycleTest {
     }
 
     /** 可控 tick 来源：`tick()` 投递一次，`close()` 结束循环。 */
-    private class ManualTicks : IdleTickSource {
+    internal class ManualTicks : IdleTickSource {
         private val channel = Channel<Unit>(Channel.UNLIMITED)
 
         fun tick() {

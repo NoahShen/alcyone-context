@@ -3,6 +3,7 @@ package com.github.noahshen.alcyone.context.memory.runtime.organization
 import com.github.noahshen.alcyone.context.memory.api.OrganizedMemory
 import com.github.noahshen.alcyone.context.memory.api.RawMemory
 import com.github.noahshen.alcyone.context.memory.core.ContextDatabase
+import com.github.noahshen.alcyone.context.memory.core.llm.LlmException
 import com.github.noahshen.alcyone.context.memory.core.organization.GovernanceDecision
 import com.github.noahshen.alcyone.context.memory.core.organization.OrganizationCandidateRetriever
 import com.github.noahshen.alcyone.context.memory.core.organization.OrganizationCommitResult
@@ -34,6 +35,15 @@ internal fun interface OrganizationMapWakeup {
     suspend fun onOrganizedCommitted()
 }
 
+/** CT31 evaluation-only observation of an item failure swallowed by [DefaultOrganizationWorker]. */
+internal fun interface OrganizationItemFailureObserver {
+    fun onFailure(
+        rawId: String,
+        errorType: String,
+        errorCode: String?,
+    )
+}
+
 /**
  * 单轮固定 Pending 列表的 Organization Worker。
  *
@@ -48,6 +58,7 @@ internal class DefaultOrganizationWorker(
     private val governanceDecider: OrganizationGovernanceDecider,
     private val commit: OrganizationCommitOperation,
     private val mapWakeup: OrganizationMapWakeup = OrganizationMapWakeup { },
+    private val itemFailureObserver: OrganizationItemFailureObserver = OrganizationItemFailureObserver { _, _, _ -> },
     private val logger: Logger = LoggerFactory.getLogger(DefaultOrganizationWorker::class.java),
 ) : OrganizationRoundRunner {
     override suspend fun runRound() {
@@ -58,9 +69,27 @@ internal class DefaultOrganizationWorker(
                 process(rawId)
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (_: Throwable) {
+            } catch (failure: Throwable) {
+                observeFailure(rawId, failure)
                 logger.warn("organization.item.failed")
             }
+        }
+    }
+
+    private fun observeFailure(
+        rawId: String,
+        failure: Throwable,
+    ) {
+        try {
+            itemFailureObserver.onFailure(
+                rawId,
+                failure::class.qualifiedName ?: failure::class.simpleName ?: "Unknown",
+                (failure as? LlmException)?.errorCode?.name,
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Observation must never change the production swallow/skip behavior.
         }
     }
 

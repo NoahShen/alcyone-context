@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
     `java-library`
+    `java-test-fixtures`
 }
 
 dependencies {
@@ -18,4 +19,7 @@ dependencies {
     testImplementation(platform(libs.junit.bom))
     testRuntimeOnly(libs.junit.engine)
     testRuntimeOnly(libs.junit.launcher)
+    testFixturesImplementation(libs.serialization.json)
+    testFixturesApi(projects.context.core)
+    testFixturesImplementation(projects.context.persistenceSqldelight)
 }

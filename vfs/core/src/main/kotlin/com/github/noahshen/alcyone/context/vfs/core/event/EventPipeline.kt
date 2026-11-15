@@ -83,6 +83,8 @@ private class RecordingScope(
     override val metadata get() = delegate.metadata
 
     override val events: EventRepository = RecordingEventRepository(delegate.events, recorded)
+
+    override val recovery get() = delegate.recovery
 }
 
 private class RecordingEventRepository(

@@ -8,6 +8,11 @@ import com.github.noahshen.alcyone.context.vfs.VfsEventType
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.event.TrackedNotifiers
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryDiagnosticCode
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryJournal
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryOperation
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryOperationKind
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryPhase
 import com.github.noahshen.alcyone.context.vfs.core.registry.withFile
 import com.github.noahshen.alcyone.context.vfs.core.storage.Storage
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageAttributes
@@ -65,6 +70,7 @@ class DefaultVfsCopyMoveTest {
         limits: VfsLimits = VfsLimits(),
         sourceCapabilities: StorageCapabilities? = null,
         targetCapabilities: StorageCapabilities? = null,
+        recoveryJournal: RecoveryJournal? = null,
     ) = VfsHarness(
         mounts =
             listOf(
@@ -88,6 +94,7 @@ class DefaultVfsCopyMoveTest {
         },
         notifier = notifiers.create(),
         clock = { VfsHarness.FIXED_CLOCK },
+        recoveryJournal = recoveryJournal,
         // 懒注册走自动提交、提交阶段又在事务视图里读同一条记录，所以这里让两份状态共享。
         shareNodeState = true,
     )
@@ -439,7 +446,8 @@ class DefaultVfsCopyMoveTest {
             val source = StorageFakeImpl()
             val backendFailure = VfsException(VfsErrorCode.STORAGE_ACCESS_DENIED, "permission revoked while confirming")
             val target = ConfirmingStorage(StorageFakeImpl(), backendFailure)
-            val harness = crossMountHarness(source, target)
+            val journal = RecordingRecoveryJournal()
+            val harness = crossMountHarness(source, target, recoveryJournal = journal)
             source.withFile("a.txt", "hello")
             val original = harness.seedNode("/resources/a.txt")
             source.calls.clear()
@@ -457,6 +465,19 @@ class DefaultVfsCopyMoveTest {
             assertEquals(listOf("/resources/a.txt"), harness.committedNodes().map { it.path.toString() }, "逻辑路径仍指向源")
             assertEquals(original.id, harness.committedNodes().single().id)
             assertTrue(harness.committedEvents().isEmpty(), "失败不发成功事件")
+            val operation = journal.operations.single()
+            assertEquals(RecoveryOperationKind.COPY_FILE_MOVE, operation.kind)
+            assertEquals(RecoveryPhase.TARGET_WRITE_OBSERVED, operation.phase, "写回执已返回，确认失败也必须记下目标已写")
+            assertEquals(RecoveryDiagnosticCode.STORAGE_FAILURE, operation.diagnosticCode)
+            assertEquals(2, operation.generation)
+            assertEquals(
+                listOf(
+                    "begin@0:COPY_FILE_MOVE",
+                    "advance@0->1:TARGET_WRITE_OBSERVED",
+                    "diagnose@1->2:STORAGE_FAILURE",
+                ),
+                journal.calls,
+            )
         }
 
     /**
@@ -1209,5 +1230,51 @@ class DefaultVfsCopyMoveTest {
         fun typeOfOrNull(path: String): NodeType? = delegate.typeOfOrNull(path)
 
         fun readText(path: String): String = delegate.readText(path)
+    }
+
+    /** 在内存里执行同一套 phase/generation 状态机，供编排测试核对 journal 的写入顺序。 */
+    private class RecordingRecoveryJournal : RecoveryJournal {
+        private val operationsById = linkedMapOf<String, RecoveryOperation>()
+        val operations: List<RecoveryOperation> get() = operationsById.values.toList()
+        val calls: MutableList<String> = mutableListOf()
+
+        override suspend fun begin(operation: RecoveryOperation): RecoveryOperation {
+            check(operationsById.put(operation.operationId, operation) == null)
+            calls += "begin@${operation.generation}:${operation.kind}"
+            return operation
+        }
+
+        override suspend fun advance(
+            operationId: String,
+            expectedGeneration: Long,
+            nextPhase: RecoveryPhase,
+            diagnosticCode: RecoveryDiagnosticCode,
+            at: java.time.Instant,
+        ): RecoveryOperation {
+            val current = operationsById.getValue(operationId)
+            check(current.generation == expectedGeneration)
+            val next = current.transitionTo(nextPhase, diagnosticCode, at)
+            operationsById[operationId] = next
+            calls += "advance@$expectedGeneration->${next.generation}:${next.phase}"
+            return next
+        }
+
+        override suspend fun diagnose(
+            operationId: String,
+            expectedGeneration: Long,
+            diagnosticCode: RecoveryDiagnosticCode,
+            at: java.time.Instant,
+        ): RecoveryOperation {
+            val current = operationsById.getValue(operationId)
+            check(current.generation == expectedGeneration)
+            val next = current.withDiagnostic(diagnosticCode, at)
+            operationsById[operationId] = next
+            calls += "diagnose@$expectedGeneration->${next.generation}:${next.diagnosticCode}"
+            return next
+        }
+
+        override suspend fun find(operationId: String): RecoveryOperation? = operationsById[operationId]
+
+        override suspend fun listPending(): List<RecoveryOperation> = operations
     }
 }

@@ -452,6 +452,38 @@ class KtorLlmClientDiagnosticsTest {
             schema = schema,
         )
 
+    @Test
+    fun `snapshot copies every task profile counter without recording content`() {
+        val statistics = LlmCallStatistics()
+        statistics.recordSuccess(
+            LlmTask.DREAMING_TOPIC,
+            "dreaming",
+            2,
+            com.github.noahshen.alcyone.context.memory.core.llm
+                .TokenUsage(11, 7, 18),
+        )
+        statistics.recordFailure(LlmTask.DREAMING_TOPIC, "dreaming", 3)
+        statistics.recordSuccess(LlmTask.EXTRACTION, "extraction", 1, null)
+
+        val snapshot = statistics.snapshots().associateBy { it.task to it.profile }
+        val dreaming = snapshot.getValue("DREAMING_TOPIC" to "dreaming")
+        assertEquals(2, dreaming.calls)
+        assertEquals(1, dreaming.successes)
+        assertEquals(1, dreaming.failures)
+        assertEquals(5, dreaming.attempts)
+        assertEquals(1, dreaming.usagePresent)
+        assertEquals(0, dreaming.usageMissing)
+        assertEquals(11L, dreaming.inputTokens)
+        assertEquals(7L, dreaming.outputTokens)
+        assertEquals(18L, dreaming.totalTokens)
+        val extraction = snapshot.getValue("EXTRACTION" to "extraction")
+        assertEquals(1, extraction.calls)
+        assertEquals(0, extraction.usagePresent)
+        assertEquals(1, extraction.usageMissing)
+        assertNull(extraction.totalTokens)
+        assertEquals(2, snapshot.size)
+    }
+
     /** 解析 `key=value` 白名单字段（值内不含空格）。 */
     private fun parseFields(message: String): Map<String, String> {
         val body =

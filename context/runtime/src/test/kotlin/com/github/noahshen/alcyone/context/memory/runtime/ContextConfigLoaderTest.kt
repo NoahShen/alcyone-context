@@ -114,7 +114,7 @@ class ContextConfigLoaderTest {
         }
 
     @Test
-    fun `remaining blueprint backup section is accepted without validation or env expansion`() =
+    fun `backup config accepts strict size limit and does not expand unconfigured values`() =
         withDirectory { dir ->
             val requested = mutableListOf<String>()
             val config =
@@ -124,7 +124,7 @@ class ContextConfigLoaderTest {
                         """
                         context:
                           backup:
-                            enabled: false
+                            maxBytes: 2097152
                         vfs:
                           database:
                             path: ./data/vfs.db
@@ -141,6 +141,14 @@ class ContextConfigLoaderTest {
             assertNull(config.llm, "未配置 context.llm 时必须是 null")
             assertNull(config.organization, "未配置 context.organization 时必须是 null")
             assertNull(config.memoryMap, "未配置 context.memoryMap 时必须是 null")
+            assertEquals(2097152, config.backup.maxBytes)
+        }
+
+    @Test fun `backup size limit must be positive`() =
+        withDirectory { dir ->
+            assertFailsWith<ContextConfigException> { load(dir, "context:\n  backup:\n    maxBytes: 0\n") }
+            assertFailsWith<ContextConfigException> { load(dir, "context:\n  backup:\n    maxBytes: nope\n") }
+            assertFailsWith<ContextConfigException> { load(dir, "context:\n  backup:\n    enabled: false\n") }
         }
 
     @Test

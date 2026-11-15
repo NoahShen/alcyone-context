@@ -16,6 +16,7 @@ tasks.named<Test>("test") {
 
 dependencies {
     testImplementation(projects.context.runtime)
+    testImplementation(testFixtures(projects.context.runtime))
     testImplementation(projects.context.server)
     // B3：集成测试直接使用持久化装配（ContextDatabaseFactory / ContextDatabaseImpl），不经 Runtime。
     testImplementation(projects.context.persistenceSqldelight)
@@ -27,4 +28,20 @@ dependencies {
     testImplementation(platform(libs.junit.bom))
     testRuntimeOnly(libs.junit.engine)
     testRuntimeOnly(libs.junit.launcher)
+}
+
+val contextRealModelEval by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Run opt-in CT31 evaluation. Use contextEvalLive=true and contextEvalProduction=true for real production components."
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass = "com.github.noahshen.alcyone.context.integration.evaluation.RealModelEvalCliKt"
+    systemProperty("alcyone.eval.root", rootDir.absolutePath)
+    systemProperty("alcyone.eval.live", providers.gradleProperty("contextEvalLive").orElse("false").get())
+    systemProperty("alcyone.eval.production", providers.gradleProperty("contextEvalProduction").orElse("false").get())
+    systemProperty("alcyone.eval.externalApproved", providers.gradleProperty("contextEvalExternalApproved").orElse("false").get())
+    systemProperty("alcyone.eval.config", providers.gradleProperty("contextEvalConfig").orElse(".local/ct31/model.yaml").get())
+    providers.gradleProperty("contextEvalTask").orNull?.let { systemProperty("alcyone.eval.task", it) }
+    providers.gradleProperty("contextEvalSample").orNull?.let { systemProperty("alcyone.eval.sample", it) }
+    providers.gradleProperty("contextEvalLimit").orNull?.let { systemProperty("alcyone.eval.limit", it) }
+    providers.gradleProperty("contextEvalOutput").orNull?.let { systemProperty("alcyone.eval.output", it) }
 }

@@ -1,0 +1,29 @@
+-- 版本 3 → 4（CT30 B2）：旧 rowid 决定历史事件的稳定顺序，后续由 SQLite AUTOINCREMENT 分配。
+-- 整个迁移由 VfsStateDatabase 的显式事务包裹；任何一步失败都不留下半张新表。
+CREATE TABLE event_v4 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL,
+    node_id TEXT,
+    occurred_at INTEGER NOT NULL,
+    uri TEXT NOT NULL,
+    operation_id TEXT,
+    source_uri TEXT,
+    target_uri TEXT
+);
+
+INSERT INTO event_v4 (
+    sequence, event_id, event_type, node_id, occurred_at, uri, operation_id, source_uri, target_uri
+)
+SELECT rowid, event_id, event_type, node_id, occurred_at, uri, operation_id, source_uri, target_uri
+FROM event
+ORDER BY rowid;
+
+DROP TABLE event;
+ALTER TABLE event_v4 RENAME TO event;
+CREATE INDEX event_occurred_at ON event (occurred_at, sequence);
+
+CREATE TABLE consumer_cursor (
+    consumer_id TEXT NOT NULL PRIMARY KEY,
+    next_sequence INTEGER NOT NULL CHECK (next_sequence > 0)
+);

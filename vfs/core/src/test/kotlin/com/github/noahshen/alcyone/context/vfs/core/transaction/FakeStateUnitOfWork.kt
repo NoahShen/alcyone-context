@@ -10,6 +10,7 @@ import com.github.noahshen.alcyone.context.vfs.core.repository.EventRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.MetadataRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository
+import com.github.noahshen.alcyone.context.vfs.core.transaction.RecoveryCloseRepository
 import java.time.Instant
 
 /**
@@ -37,6 +38,9 @@ class FakeStateUnitOfWork(
         (sharedNodeStore ?: mutableMapOf()).apply { putAll(indexByPath(initialNodes)) }
     private var committedMetadata: MutableMap<NodeId, NodeMetadata> = initialMetadata.toMutableMap()
     private var committedEvents: MutableList<EventRecord> = initialEvents.toMutableList()
+    private val committedClosedRecoveries: MutableSet<String> = mutableSetOf()
+
+    fun closedRecoveryOperations(): Set<String> = committedClosedRecoveries.toSet()
 
     // 故障注入开关
     var failOnStateWrite: VfsException? = null
@@ -65,6 +69,7 @@ class FakeStateUnitOfWork(
         val stagedNodes = committedNodes.toMutableMap()
         val stagedMetadata = committedMetadata.toMutableMap()
         val stagedEvents = committedEvents.toMutableList()
+        val stagedClosedRecoveries = committedClosedRecoveries.toMutableSet()
         var closed = false
 
         fun ensureOpen() {
@@ -76,6 +81,18 @@ class FakeStateUnitOfWork(
                 override val nodes: NodeRepository = StagedNodeRepository(stagedNodes, ::ensureOpen)
                 override val metadata: MetadataRepository = StagedMetadataRepository(stagedMetadata, ::ensureOpen)
                 override val events: EventRepository = StagedEventRepository(stagedEvents, ::ensureOpen)
+                override val recovery: RecoveryCloseRepository =
+                    object : RecoveryCloseRepository {
+                        override suspend fun close(
+                            operationId: String,
+                            expectedGeneration: Long,
+                            at: Instant,
+                        ) {
+                            ensureOpen()
+                            calls += "recovery.close:$operationId@$expectedGeneration"
+                            stagedClosedRecoveries += operationId
+                        }
+                    }
             }
 
         val result = block(scope)
@@ -92,6 +109,8 @@ class FakeStateUnitOfWork(
         committedNodes.putAll(stagedNodes)
         committedMetadata = stagedMetadata
         committedEvents = stagedEvents
+        committedClosedRecoveries.clear()
+        committedClosedRecoveries += stagedClosedRecoveries
         return result
     }
 

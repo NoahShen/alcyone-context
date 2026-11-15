@@ -7,6 +7,7 @@ import com.github.noahshen.alcyone.context.memory.core.extraction.ExtractionRunn
 import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionNotificationReporter
 import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionNotifier
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseInitializer
+import com.github.noahshen.alcyone.context.memory.runtime.backup.BackupTickSource
 import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingPeriodicTickSource
 import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingRuntime
 import com.github.noahshen.alcyone.context.memory.runtime.dreaming.validateDreamingBinding
@@ -23,6 +24,8 @@ import com.github.noahshen.alcyone.context.memory.runtime.organization.Organizat
 import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationPipeline
 import com.github.noahshen.alcyone.context.memory.runtime.organization.OrganizationRoundRunner
 import com.github.noahshen.alcyone.context.memory.runtime.organization.validateOrganizationBinding
+import com.github.noahshen.alcyone.context.vfs.Vfs
+import com.github.noahshen.alcyone.context.vfs.runtime.AlcyoneVfs
 import com.github.noahshen.alcyone.context.vfs.runtime.VfsRuntimeConfig
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
@@ -72,6 +75,8 @@ object AlcyoneContextFactory {
             memoryMapPipelineConfigurator = null,
             dreamingTickSource = null,
             dreamingRuntimeConfigurator = null,
+            backupTickSource = null,
+            vfsFactory = AlcyoneVfs::create,
         )
 
     /**
@@ -100,6 +105,8 @@ object AlcyoneContextFactory {
         memoryMapPipelineConfigurator: ((MemoryMapPipeline) -> Unit)? = null,
         dreamingTickSource: DreamingPeriodicTickSource? = null,
         dreamingRuntimeConfigurator: ((DreamingRuntime) -> Unit)? = null,
+        backupTickSource: BackupTickSource? = null,
+        vfsFactory: suspend (VfsRuntimeConfig) -> Vfs = AlcyoneVfs::create,
     ): AlcyoneContext =
         build(
             contextConfig = contextConfig,
@@ -123,6 +130,8 @@ object AlcyoneContextFactory {
             memoryMapPipelineConfigurator = memoryMapPipelineConfigurator,
             dreamingTickSource = dreamingTickSource,
             dreamingRuntimeConfigurator = dreamingRuntimeConfigurator,
+            backupTickSource = backupTickSource,
+            vfsFactory = vfsFactory,
         )
 
     /** 组装探针；生产入口使用空实现，测试用它制造确定性的 start/close 交错。 */
@@ -172,6 +181,8 @@ object AlcyoneContextFactory {
         memoryMapPipelineConfigurator: ((MemoryMapPipeline) -> Unit)?,
         dreamingTickSource: DreamingPeriodicTickSource?,
         dreamingRuntimeConfigurator: ((DreamingRuntime) -> Unit)?,
+        backupTickSource: BackupTickSource?,
+        vfsFactory: suspend (VfsRuntimeConfig) -> Vfs,
     ): AlcyoneContext {
         // 先取得归本实例所有的配置快照，再对快照校验；调用者之后的修改不得影响已校验配置。
         val ownedVfsConfig =
@@ -194,6 +205,12 @@ object AlcyoneContextFactory {
         ContextPathIsolation.requireDistinctDatabases(databasePath, ownedVfsConfig.stateDatabase)
         ContextPathIsolation.requireOutsideLocalMounts(databasePath, ownedVfsConfig.mounts, "context.database.path")
         ContextPathIsolation.requireOutsideLocalMounts(ownedVfsConfig.stateDatabase, ownedVfsConfig.mounts, "vfs.database.path")
+        validateBackup(contextConfig.backup, ownedVfsConfig)
+        val backupTemp =
+            contextConfig.backup.effectiveTempDirectory
+                .toAbsolutePath()
+                .normalize()
+        ContextPathIsolation.requireOutsideLocalMounts(backupTemp, ownedVfsConfig.mounts, "context.backup.tempDirectory")
         return AlcyoneContextImpl(
             databasePath = databasePath,
             shutdownTimeout = contextConfig.lifecycleShutdownTimeout,
@@ -220,10 +237,14 @@ object AlcyoneContextFactory {
             dreamingConfig = contextConfig.dreaming,
             dreamingTickSource = dreamingTickSource,
             dreamingRuntimeConfigurator = dreamingRuntimeConfigurator,
+            backupTickSource = backupTickSource,
+            backupConfig = contextConfig.backup,
+            backupTempRoot = backupTemp,
             retrievalConfig = contextConfig.retrieval,
             clock = clock,
             ingestionNotifier = ingestionNotifier,
             ingestionReporter = ingestionReporter,
+            vfsFactory = vfsFactory,
         )
     }
 
@@ -271,4 +292,16 @@ object AlcyoneContextFactory {
         }
 
     private fun invalid(detail: String): ContextConfigException = ContextConfigException(ContextConfigErrorCode.INVALID_CONFIG, detail)
+
+    private fun validateBackup(
+        config: com.github.noahshen.alcyone.context.memory.runtime.backup.BackupConfig,
+        vfs: VfsRuntimeConfig,
+    ) {
+        vfs.streamTotalLimit?.let { if (it < config.maxBytes) throw invalid("vfs.streamTotalLimit must cover context.backup.maxBytes") }
+        val temp = config.effectiveTempDirectory.toAbsolutePath().normalize()
+        if (config.tempDirectory != null && (config.tempDirectory != temp || !config.tempDirectory.isAbsolute)) {
+            throw invalid("context.backup.tempDirectory must be an absolute normalized path")
+        }
+        ContextPathIsolation.requireExistingOrPlannedSafeDirectory(temp, "context.backup.tempDirectory")
+    }
 }

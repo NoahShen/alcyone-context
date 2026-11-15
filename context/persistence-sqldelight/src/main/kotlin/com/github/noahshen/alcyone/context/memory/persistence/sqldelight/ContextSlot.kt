@@ -153,6 +153,12 @@ internal open class ContextSlot(
         return ScopedJdbc.connection(this, session, connection)
     }
 
+    /** 仅供同步在线备份：不交给用户回调，仍受当前 slot 线程和作用域检查约束。 */
+    internal fun backupConnection(session: ScopeSession): Connection {
+        checkScope(session)
+        return connection
+    }
+
     /**
      * 获取绑定到 [session] 的受保护驱动：先 [checkScope] 再返回 [ScopedSlotDriver]。
      */

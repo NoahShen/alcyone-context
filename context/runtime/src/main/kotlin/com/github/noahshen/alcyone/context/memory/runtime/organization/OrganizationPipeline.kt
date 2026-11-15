@@ -126,6 +126,8 @@ internal class OrganizationPipeline(
 
     internal fun isClosingForTesting(): Boolean = !admissionOpen()
 
+    internal fun workerStatus(): OrganizationWorkerStatus = scheduler.workerStatus()
+
     internal fun workerStatusForTesting(): OrganizationWorkerStatus = scheduler.statusForTesting()
 
     private fun admissionOpen(): Boolean = synchronized(admissionLock) { !closing }

@@ -1,0 +1,18 @@
+-- 版本 2 → 3（CT30 B1）：独立 operation journal；不修改既有 node / event / mount。
+CREATE TABLE recovery_operation (
+    operation_id TEXT NOT NULL PRIMARY KEY,
+    operation_kind TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    source_uri TEXT,
+    target_uri TEXT NOT NULL,
+    source_storage_key TEXT,
+    target_storage_key TEXT NOT NULL,
+    node_id TEXT,
+    diagnostic_code TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX recovery_operation_pending
+ON recovery_operation (phase, updated_at, operation_id);

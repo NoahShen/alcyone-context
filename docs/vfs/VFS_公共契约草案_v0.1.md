@@ -370,6 +370,8 @@ Kotlin Coroutine 的 `CancellationException` 原样传播，不包装为普通�
 
 UC-07 的外部可见契约建议：事件代表已完成的核心变更；Consumer 失败不撤销该变更。进程内 Flow 是通知机制，不能单独代表可靠消费。首版仅持久化事件和进程内通知，消费接口在实现时明确；日志游标、确认和重放列为后续 E05。
 
+本次修改（2026-11-12，CT30 B2）：E05 已提供 Core/Persistence 的显式可靠消费组件，SQLite v4 为事件分配持久 sequence，并按 consumerId 保存下一条 cursor。它是 at-least-once：整批处理成功才推进 cursor，处理函数必须按 eventId 幂等；不改变上述 VFS Flow 公共 API，也未把可靠消费默认接入 Runtime 或具体外围 Consumer。
+
 调用被取消或响应丢失时，核心变更可能已经完成并有事件，不能仅凭调用方观察到异常就判定事件不应存在。核心状态未完成的操作不能产生表示全操作成功的事件；部分完成通过异常 effect 报告，不保存恢复进度。
 
 ## 9. Runtime 与资源生命周期

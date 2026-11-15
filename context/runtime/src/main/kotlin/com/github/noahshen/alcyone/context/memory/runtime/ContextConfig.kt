@@ -1,6 +1,7 @@
 package com.github.noahshen.alcyone.context.memory.runtime
 
 import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionLimits
+import com.github.noahshen.alcyone.context.memory.runtime.backup.BackupConfig
 import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingConfig
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.ExtractionConfig
 import com.github.noahshen.alcyone.context.memory.runtime.llm.LlmConfig
@@ -54,6 +55,8 @@ data class ContextConfig(
     val retrieval: RetrievalConfig = RetrievalConfig(),
     /** `context.dreaming` 配置快照（CT22-B1）；cron=null 表示 manual-only。 */
     val dreaming: DreamingConfig = DreamingConfig(),
+    /** Backup 配置；enabled=false 时不创建 Runtime。 */
+    val backup: BackupConfig = BackupConfig(),
 ) {
     /** VFS 状态库绝对路径（`vfsConfig.stateDatabase` 的便捷视图）。 */
     val vfsDatabasePath: Path get() = vfsConfig.stateDatabase

@@ -3,6 +3,7 @@ package com.github.noahshen.alcyone.context.vfs.core.transaction
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.MetadataRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository
+import java.time.Instant
 
 /**
  * 一次事务内的聚合视图（G7 方案 A）。
@@ -20,6 +21,27 @@ interface TransactionScope {
 
     /** 事件追加视图。与节点、元数据共用同一次提交。 */
     val events: EventRepository
+
+    /** recovery journal 的同事务关闭视图；关闭与 Node / Event 一起提交或回滚。 */
+    val recovery: RecoveryCloseRepository
+}
+
+/** 事务内的 recovery 终态写入。只允许从已观察阶段写入 CLOSED。 */
+interface RecoveryCloseRepository {
+    suspend fun close(
+        operationId: String,
+        expectedGeneration: Long,
+        at: Instant,
+    )
+}
+
+/** 未启用 journal 的组装共用该视图；只有调用方确认 journal 已启用时才会调用它。 */
+object DisabledRecoveryCloseRepository : RecoveryCloseRepository {
+    override suspend fun close(
+        operationId: String,
+        expectedGeneration: Long,
+        at: Instant,
+    ): Unit = throw IllegalStateException("recovery journal is disabled")
 }
 
 /**

@@ -515,6 +515,8 @@ private class HidingNodeUnitOfWork(
                     override val metadata get() = scope.metadata
 
                     override val events get() = scope.events
+
+                    override val recovery get() = scope.recovery
                 }
             block(decorated)
         }
@@ -535,6 +537,8 @@ private class MoveCollidingEventUnitOfWork(
                     override val nodes get() = scope.nodes
 
                     override val metadata get() = scope.metadata
+
+                    override val recovery get() = scope.recovery
 
                     override val events: EventRepository =
                         object : EventRepository {

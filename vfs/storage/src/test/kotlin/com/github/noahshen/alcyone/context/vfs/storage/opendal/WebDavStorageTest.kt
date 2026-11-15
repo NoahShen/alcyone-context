@@ -25,13 +25,43 @@ class WebDavStorageTest {
 
     @Test
     @Timeout(60)
+    fun `publishNew is explicitly unsupported and closes its input`() =
+        runBlocking {
+            val storage = open()
+            var closed = false
+            val input =
+                object : java.io.ByteArrayInputStream(byteArrayOf(1)) {
+                    override fun close() {
+                        closed = true
+                        super.close()
+                    }
+                }
+            try {
+                val failure =
+                    assertFailsWith<VfsException> {
+                        storage.publishNew(StoragePath.parse("backup.sqlite"), input, 1, 1, "unused")
+                    }
+                assertEquals(VfsErrorCode.UNSUPPORTED_OPERATION, failure.code)
+                assertEquals(VfsEffect.NONE, failure.effect)
+                assertTrue(closed)
+                assertFalse(storage.capabilities().atomicPublishNew)
+            } finally {
+                storage.close()
+            }
+        }
+
+    @Test
+    @Timeout(60)
     fun `capabilities report only what this release verified`() =
         runBlocking {
             val storage = open()
             try {
                 val capabilities = storage.capabilities()
                 assertTrue(capabilities.nativeFileMove, "T25 实测 webdav rename 可用，文件移动能力如实声明")
-                assertFalse(capabilities.nativeDirectoryMove, "T25 实测 webdav rename 目录返回 IsADirectory，不能报原生目录移动")
+                assertFalse(
+                    capabilities.nativeDirectoryMove,
+                    "T25 实测 webdav rename 目录返回 IsADirectory，不能报原生目录移动",
+                )
                 assertTrue(capabilities.createDirectory, "MKCOL 是验过的最小闭环之一")
                 assertTrue(capabilities.boundedRead, "有界读是验过的最小闭环之一")
                 assertFalse(capabilities.readOnly, "只读与否要后端说了算，打开时猜不出来")

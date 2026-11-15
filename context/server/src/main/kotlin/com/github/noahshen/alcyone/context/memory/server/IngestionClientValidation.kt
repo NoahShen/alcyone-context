@@ -38,7 +38,7 @@ internal object IngestionClientValidation {
         path: String = BASE_PATH,
     ) {
         val seenRuntimeIds = HashSet<String>()
-        val apiKeyOwner = HashMap<String, String>()
+        val seenApiKeys = ArrayList<String>(clients.size)
         clients.forEach { client ->
             val runtimeId = client.runtimeId
             if (runtimeId.isBlank()) throw invalid("$path has a registration with a blank runtimeId")
@@ -47,10 +47,10 @@ internal object IngestionClientValidation {
             }
             if (client.runtimeType.isBlank()) throw invalid("$path.$runtimeId.runtimeType must not be blank")
             if (client.apiKey.isBlank()) throw invalid("$path.$runtimeId.apiKey must not be blank")
-            val owner = apiKeyOwner.putIfAbsent(client.apiKey, runtimeId)
-            if (owner != null) {
+            if (seenApiKeys.any { SecretDigest.equals(it, client.apiKey) }) {
                 throw invalid("$path.$runtimeId.apiKey conflicts with another registered runtime")
             }
+            seenApiKeys += client.apiKey
         }
     }
 

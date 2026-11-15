@@ -108,6 +108,22 @@ class RawTransactionScope internal constructor(
     /** 当前作用域会话：由执行器在 [withScope] 处创建并传入。 */
     internal var session: ScopeSession? = null
 
+    internal fun backupSnapshot(target: java.nio.file.Path): Long {
+        ensureUsable("backupSnapshot")
+        val activeSession = session ?: throw ContextDatabaseExecutor.escapedScope("write", "backupSnapshot")
+        val connection = slot.backupConnection(activeSession)
+        val userVersion =
+            ContextSqliteErrors.map("read backup schema version") {
+                connection.createStatement().use { statement ->
+                    statement.executeQuery("PRAGMA user_version").use { rows ->
+                        if (!rows.next()) throw persistenceUnavailable("cannot read SQLite schema version")
+                        rows.getInt(1)
+                    }
+                }
+            }
+        return ContextSqliteBackup.snapshot(connection, target, userVersion)
+    }
+
     /** 该写连接的 SQLDelight 驱动，供 CT05 组装生成的 TxOps 查询。
      * 仅供内部/测试使用；CT05 应通过 query/update/queryPrepared/updatePrepared 执行，
      * 以确保每次调用都校验作用域和线程。

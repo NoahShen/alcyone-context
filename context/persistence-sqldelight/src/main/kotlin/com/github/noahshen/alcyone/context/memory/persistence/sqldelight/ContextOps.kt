@@ -859,6 +859,8 @@ class OrganizationPendingReadOpsImpl(
 
     override fun hasAnyPending(): Boolean = reader.hasAnyPending()
 
+    override fun count(): Int = reader.count()
+
     override fun nextByRawCreatedAt(): String? = reader.nextByRawCreatedAt()
 
     override fun listAllByRawCreatedAt(): List<String> = reader.listAllByRawCreatedAt()
@@ -873,6 +875,8 @@ class OrganizationPendingTxOpsImpl(
     override fun exists(rawId: String): Boolean = reader.exists(rawId)
 
     override fun hasAnyPending(): Boolean = reader.hasAnyPending()
+
+    override fun count(): Int = reader.count()
 
     override fun nextByRawCreatedAt(): String? = reader.nextByRawCreatedAt()
 
@@ -895,6 +899,19 @@ internal class OrganizationPendingReader(
     fun hasAnyPending(): Boolean =
         queries.queryPrepared(ContextSqlQueries.HAS_ANY_PENDING, {}) { cursor ->
             cursor.next().value && cursor.getLong(0) == 1L
+        }
+
+    fun count(): Int =
+        queries.queryPrepared(ContextSqlQueries.COUNT_ORGANIZATION_PENDING, {}) { cursor ->
+            if (!cursor.next().value) {
+                throw persistenceUnavailable("organization pending count must contain exactly one row")
+            }
+            val value = cursor.getLong(0) ?: throw persistenceUnavailable("organization pending count is null")
+            if (cursor.next().value) {
+                throw persistenceUnavailable("organization pending count must contain exactly one row")
+            }
+            if (value < 0 || value > Int.MAX_VALUE) throw persistenceUnavailable("organization pending count is out of range")
+            value.toInt()
         }
 
     fun nextByRawCreatedAt(): String? =

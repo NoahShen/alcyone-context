@@ -18,6 +18,7 @@ class ContextOrganizationPendingRealDbTest {
         ConversationFixtures.withDatabase { executor ->
             B2Fixtures.insertRaw(executor, B2Fixtures.raw("raw-1"))
             val repository = OrganizationPendingRepositoryImpl(executor)
+            val count = suspend { executor.read { OrganizationPendingReadOpsImpl(it).count() } }
 
             assertFalse(repository.exists("raw-1"))
             assertFalse(repository.hasAnyPending())
@@ -31,6 +32,7 @@ class ContextOrganizationPendingRealDbTest {
             assertEquals(0, B2Fixtures.dequeue(executor, "raw-1"))
             assertFalse(repository.exists("raw-1"))
             assertFalse(repository.hasAnyPending())
+            assertEquals(0, count())
         }
 
     @Test
@@ -82,7 +84,35 @@ class ContextOrganizationPendingRealDbTest {
             B2Fixtures.enqueue(executor, sameA.id)
 
             val expected = listOf(sameA.id, sameB.id) + bulk.map { it.id } + late.id
-            assertEquals(expected, OrganizationPendingRepositoryImpl(executor).listAllByRawCreatedAt())
+            val repository = OrganizationPendingRepositoryImpl(executor)
+            assertEquals(expected, repository.listAllByRawCreatedAt())
+            assertEquals(expected.size, executor.read { OrganizationPendingReadOpsImpl(it).count() })
+        }
+
+    @Test
+    fun `read and transaction count share the same real SQLite snapshot`() =
+        ConversationFixtures.withDatabase { executor ->
+            assertEquals(0, executor.read { OrganizationPendingReadOpsImpl(it).count() })
+            B2Fixtures.insertRaw(executor, B2Fixtures.raw("raw-1"), B2Fixtures.raw("raw-2"))
+            executor.write { tx ->
+                OrganizationPendingTxOpsImpl(tx).enqueue("raw-1")
+                OrganizationPendingTxOpsImpl(tx).enqueue("raw-2")
+                assertEquals(2, OrganizationPendingTxOpsImpl(tx).count())
+            }
+            assertEquals(2, executor.read { OrganizationPendingReadOpsImpl(it).count() })
+        }
+
+    @Test
+    fun `count rejects null multiple rows negative and out of range values`() =
+        ConversationFixtures.withDatabase { _ ->
+            for (outcome in listOf<Long?>(null, -1L, Int.MAX_VALUE.toLong() + 1)) {
+                val reader = OrganizationPendingReader(FakeCountQuery(listOf(outcome)))
+                assertFailsWith<ContextPersistenceException> { reader.count() }
+            }
+            assertFailsWith<ContextPersistenceException> {
+                OrganizationPendingReader(FakeCountQuery(listOf(1L, 2L))).count()
+            }
+            assertEquals(Int.MAX_VALUE, OrganizationPendingReader(FakeCountQuery(listOf(Int.MAX_VALUE.toLong()))).count())
         }
 
     @Test
@@ -92,4 +122,39 @@ class ContextOrganizationPendingRealDbTest {
             assertFalse(OrganizationPendingRepositoryImpl(executor).exists("missing"))
             assertFalse(OrganizationPendingRepositoryImpl(executor).hasAnyPending())
         }
+
+    private class FakeCountQuery(
+        private val values: List<Long?>,
+    ) : ConversationQuery {
+        override fun <T> queryPrepared(
+            sql: String,
+            bind: (app.cash.sqldelight.db.SqlPreparedStatement) -> Unit,
+            mapper: (app.cash.sqldelight.db.SqlCursor) -> T,
+        ): T {
+            assertEquals(ContextSqlQueries.COUNT_ORGANIZATION_PENDING, sql)
+            return mapper(FakeCountCursor(values))
+        }
+    }
+
+    private class FakeCountCursor(
+        private val values: List<Long?>,
+    ) : app.cash.sqldelight.db.SqlCursor {
+        private var index = -1
+
+        override fun next(): app.cash.sqldelight.db.QueryResult<Boolean> {
+            index++
+            return app.cash.sqldelight.db.QueryResult
+                .Value(index < values.size)
+        }
+
+        override fun getLong(index: Int): Long? = values.getOrNull(this.index)
+
+        override fun getBoolean(index: Int): Boolean? = null
+
+        override fun getDouble(index: Int): Double? = null
+
+        override fun getString(index: Int): String? = null
+
+        override fun getBytes(index: Int): ByteArray? = null
+    }
 }

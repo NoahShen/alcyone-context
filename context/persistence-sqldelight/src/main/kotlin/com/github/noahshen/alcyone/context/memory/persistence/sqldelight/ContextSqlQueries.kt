@@ -165,6 +165,8 @@ internal object ContextSqlQueries {
 
     const val EXISTS_PENDING_RAW = "SELECT EXISTS(SELECT 1 FROM organization_pending WHERE raw_memory_id = ?)"
 
+    const val COUNT_ORGANIZATION_PENDING = "SELECT COUNT(*) FROM organization_pending"
+
     const val HAS_ANY_PENDING = "SELECT EXISTS(SELECT 1 FROM organization_pending)"
 
     /** 按 Raw 创建时间与 id 确定性取下一条待治理 Raw。 */

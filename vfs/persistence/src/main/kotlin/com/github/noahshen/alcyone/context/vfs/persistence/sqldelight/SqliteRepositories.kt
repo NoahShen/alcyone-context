@@ -2,7 +2,10 @@ package com.github.noahshen.alcyone.context.vfs.persistence.sqldelight
 
 import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.NodeMetadata
+import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
+import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsPath
+import com.github.noahshen.alcyone.context.vfs.core.repository.EventCursorStart
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.MetadataRepository
@@ -10,6 +13,8 @@ import com.github.noahshen.alcyone.context.vfs.core.repository.MountRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.MountRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository
+import com.github.noahshen.alcyone.context.vfs.core.repository.ReliableEventRepository
+import com.github.noahshen.alcyone.context.vfs.core.repository.SequencedEventRecord
 import java.time.Instant
 
 /**
@@ -90,6 +95,65 @@ class SqliteEventRepository(
 
     override suspend fun append(event: EventRecord) {
         stateCall { queries.append(event) }
+    }
+}
+
+/** SQLite 可靠事件读取；每次起点/读批/推进都是独立的短事务。 */
+class SqliteReliableEventRepository(
+    private val state: VfsStateDatabase,
+) : ReliableEventRepository {
+    override suspend fun initializeCursor(
+        consumerId: String,
+        start: EventCursorStart,
+    ): Long {
+        require(consumerId.isNotBlank()) { "consumerId must not be blank" }
+        return stateCall {
+            state.driver.inRawTransaction {
+                val queries = state.database.cursorQueries
+                queries.selectConsumerCursor(consumerId).executeAsOneOrNull()
+                    ?: run {
+                        val latest =
+                            state.database.eventQueries
+                                .selectLatestEventSequence()
+                                .executeAsOne()
+                        val next = if (start == EventCursorStart.EARLIEST) 1L else latest + 1
+                        queries.insertConsumerCursor(consumerId, next)
+                        queries.selectConsumerCursor(consumerId).executeAsOne()
+                    }
+            }
+        }
+    }
+
+    override suspend fun readAfter(
+        afterExclusive: Long,
+        limit: Int,
+    ): List<SequencedEventRecord> {
+        require(afterExclusive >= 0) { "afterExclusive must be non-negative" }
+        require(limit in 1..1000) { "limit must be in 1..1000: $limit" }
+        return stateCall {
+            state.database.eventQueries.selectEventsAfter(afterExclusive, limit.toLong()).executeAsList().map { row ->
+                SequencedEventRecord(row.sequence, row.toEventRecord())
+            }
+        }
+    }
+
+    override suspend fun advanceCursor(
+        consumerId: String,
+        expectedNextSequence: Long,
+        nextSequence: Long,
+    ) {
+        require(nextSequence > expectedNextSequence) { "cursor must advance" }
+        stateCall {
+            state.driver.inRawTransaction {
+                val changed =
+                    state.database.cursorQueries
+                        .advanceConsumerCursor(nextSequence, consumerId, expectedNextSequence)
+                        .value
+                if (changed != 1L) {
+                    throw VfsException(VfsErrorCode.STATE_ERROR, "consumer cursor changed before batch commit: $consumerId")
+                }
+            }
+        }
     }
 }
 

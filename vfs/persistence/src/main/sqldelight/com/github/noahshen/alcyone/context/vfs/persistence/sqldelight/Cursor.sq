@@ -1,0 +1,16 @@
+-- 每个 consumer 的下一条 sequence。只允许单进程单实例，不是多进程 lease。
+CREATE TABLE consumer_cursor (
+    consumer_id TEXT NOT NULL PRIMARY KEY,
+    next_sequence INTEGER NOT NULL CHECK (next_sequence > 0)
+);
+
+selectConsumerCursor:
+SELECT next_sequence FROM consumer_cursor WHERE consumer_id = ?;
+
+insertConsumerCursor:
+INSERT OR IGNORE INTO consumer_cursor (consumer_id, next_sequence) VALUES (?, ?);
+
+advanceConsumerCursor:
+UPDATE consumer_cursor
+SET next_sequence = ?
+WHERE consumer_id = ? AND next_sequence = ?;

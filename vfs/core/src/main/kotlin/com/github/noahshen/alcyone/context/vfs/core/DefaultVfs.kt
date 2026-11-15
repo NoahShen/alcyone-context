@@ -6,6 +6,8 @@ import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.NodeInfo
 import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.NodeType
+import com.github.noahshen.alcyone.context.vfs.PublishOptions
+import com.github.noahshen.alcyone.context.vfs.PublishTempName
 import com.github.noahshen.alcyone.context.vfs.ReadOptions
 import com.github.noahshen.alcyone.context.vfs.StatOptions
 import com.github.noahshen.alcyone.context.vfs.StorageStat
@@ -27,6 +29,11 @@ import com.github.noahshen.alcyone.context.vfs.core.operation.CapabilitySnapshot
 import com.github.noahshen.alcyone.context.vfs.core.operation.ExecutionStrategy
 import com.github.noahshen.alcyone.context.vfs.core.operation.OperationGuard
 import com.github.noahshen.alcyone.context.vfs.core.operation.OperationIntent
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryDiagnosticCode
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryJournal
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryOperation
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryOperationKind
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryPhase
 import com.github.noahshen.alcyone.context.vfs.core.registry.NodeRegistry
 import com.github.noahshen.alcyone.context.vfs.core.repository.MetadataRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
@@ -43,7 +50,9 @@ import com.github.noahshen.alcyone.context.vfs.core.transaction.TransactionScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import java.io.FilterInputStream
+import java.io.InputStream
 import java.time.Instant
 
 /**
@@ -138,7 +147,93 @@ class DefaultVfs(
     private val streamTotalLimit: Long? = null,
     /** Node 的逻辑时间；测试可以换成固定值。 */
     private val clock: () -> Instant = Instant::now,
+    private val publishTempNames: (String) -> String = { PublishTempName.newName() },
+    /** 可选的 operation journal；未注入时保持既有四操作行为不变。 */
+    private val recoveryJournal: RecoveryJournal? = null,
 ) : Vfs {
+    /** 流式发布全新文件；只由 Storage 关闭输入流。 */
+    override suspend fun publishNew(
+        uri: VfsUri,
+        input: InputStream,
+        options: PublishOptions,
+    ): NodeInfo {
+        if (options.maxBytes < 0 || options.expectedSizeBytes < 0 || options.expectedSizeBytes > options.maxBytes) {
+            input.close()
+            throw VfsException(VfsErrorCode.INVALID_ARGUMENT, "invalid publishNew size limits", uri)
+        }
+        try {
+            return boundary.withLock {
+                val target = OperationGuard.check(OperationIntent.write(uri.path, WriteMode.CREATE_NEW), router, capabilities).target!!
+                val storage = storageFor(target)
+                if (!capabilitiesOf(target).atomicPublishNew) {
+                    throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "publishNew is not supported by this storage backend", uri)
+                }
+                // 目标全新检查在补目录之前；物理不覆盖仍由 Storage 的最终 rename 兜底。
+                confirmWriteTarget(uri, storage, target, WriteMode.CREATE_NEW)
+                val nodeId = NodeId.parse(newUuidV7().toString())
+                val createdDirectories = createMissingParents(uri, storage, target)
+                val requested =
+                    beginRecovery(
+                        kind = RecoveryOperationKind.PUBLISH_NEW,
+                        source = null,
+                        target = uri,
+                        sourceStorageKey = null,
+                        targetStorageKey = target.mount.storageKey,
+                        nodeId = nodeId,
+                        createdDirectories = createdDirectories,
+                    )
+                val published =
+                    try {
+                        storage.publishNew(
+                            target.relativePath,
+                            input,
+                            options.expectedSizeBytes,
+                            options.maxBytes,
+                            publishTempNames(target.mount.storageKey),
+                        )
+                    } catch (failure: VfsException) {
+                        val merged = failure.withKnownChanges(createdDirectories)
+                        markStorageFailureBestEffort(requested, merged)
+                        throw merged
+                    }
+                val observed = markObserved(requested, RecoveryPhase.PUBLISH_OBSERVED, uri)
+                val info =
+                    try {
+                        pipeline.commitInsideBoundary { scope ->
+                            commitWrite(scope, uri, existedBefore = false, written = published, nodeId = nodeId).also {
+                                closeInside(scope, observed)
+                            }
+                        }
+                    } catch (failure: CancellationException) {
+                        throw failure
+                    } catch (failure: Exception) {
+                        val wrapped =
+                            VfsException(
+                                VfsErrorCode.STATE_ERROR,
+                                "The new file was published but node and event could not be committed: ${failure.message ?: failure::class.java.simpleName}",
+                                uri,
+                                effect = VfsEffect.PARTIAL,
+                            ).apply { initCause(failure) }
+                        diagnoseCommitFailure(observed, wrapped)
+                        throw wrapped
+                    }
+                info
+            }
+        } finally {
+            // Storage normally owns this close; close again as idempotent defence for
+            // parameter/capability/route failures that occur before Storage takes ownership.
+            withContext(kotlinx.coroutines.NonCancellable) {
+                var primary: Throwable? = null
+                try {
+                    input.close()
+                } catch (failure: Throwable) {
+                    primary = failure
+                }
+                primary?.let { throw it }
+            }
+        }
+    }
+
     /**
      * 读一个文件的内容。不登记 Node、不改 Metadata、不发事件。
      *
@@ -390,7 +485,8 @@ class DefaultVfs(
         }
         val storage = storageFor(target)
         val existedBefore = confirmWriteTarget(uri, storage, target, WriteMode.UPSERT)
-        nodes.findByPath(uri.path)?.let { recorded ->
+        val recorded = nodes.findByPath(uri.path)
+        recorded?.let {
             if (recorded.type != NodeType.FILE) {
                 throw VfsException(
                     VfsErrorCode.CONFLICT,
@@ -402,24 +498,42 @@ class DefaultVfs(
         }
 
         val createdDirectories = createMissingParents(uri, storage, target)
+        val requested =
+            beginRecovery(
+                kind = RecoveryOperationKind.SAFE_REPLACE,
+                source = null,
+                target = uri,
+                sourceStorageKey = null,
+                targetStorageKey = target.mount.storageKey,
+                nodeId = recorded?.id,
+                createdDirectories = createdDirectories,
+            )
         val replaced =
             try {
                 storage.safeReplace(target.relativePath, content)
             } catch (failure: VfsException) {
-                throw failure.withKnownChanges(createdDirectories)
+                val merged = failure.withKnownChanges(createdDirectories)
+                markStorageFailureBestEffort(requested, merged)
+                throw merged
             }
+        val observed = markObserved(requested, RecoveryPhase.STORAGE_REPLACE_OBSERVED, uri)
         return try {
-            pipeline.commitInsideBoundary { scope -> commitWrite(scope, uri, existedBefore, replaced) }
+            pipeline.commitInsideBoundary { scope ->
+                commitWrite(scope, uri, existedBefore, replaced).also { closeInside(scope, observed) }
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (failure: Exception) {
-            throw VfsException(
-                VfsErrorCode.STATE_ERROR,
-                "The file was atomically replaced in storage but the node state and event could not be committed: " +
-                    "${failure.message ?: failure::class.java.simpleName}",
-                uri,
-                effect = VfsEffect.PARTIAL,
-            ).apply { initCause(failure) }
+            val wrapped =
+                VfsException(
+                    VfsErrorCode.STATE_ERROR,
+                    "The file was atomically replaced in storage but the node state and event could not be committed: " +
+                        "${failure.message ?: failure::class.java.simpleName}",
+                    uri,
+                    effect = VfsEffect.PARTIAL,
+                ).apply { initCause(failure) }
+            diagnoseCommitFailure(observed, wrapped)
+            throw wrapped
         }
     }
 
@@ -575,6 +689,7 @@ class DefaultVfs(
         uri: VfsUri,
         existedBefore: Boolean,
         written: StorageAttributes,
+        nodeId: NodeId? = null,
     ): NodeInfo {
         val now = clock()
         val storageStat = StorageStat(sizeBytes = written.sizeBytes, modifiedAt = written.modifiedAt)
@@ -584,7 +699,7 @@ class DefaultVfs(
                 val registered =
                     scope.nodes.register(
                         NodeRecord(
-                            id = NodeId.parse(newUuidV7().toString()),
+                            id = nodeId ?: NodeId.parse(newUuidV7().toString()),
                             path = uri.path,
                             type = NodeType.FILE,
                             physical = true,
@@ -600,6 +715,134 @@ class DefaultVfs(
         val type = if (existedBefore) VfsEventType.FILE_WRITTEN else VfsEventType.FILE_CREATED
         scope.events.append(events.newRecord(type, info.id, uri))
         return info
+    }
+
+    /** 外部写开始前持久化请求事实；未注入 journal 时完全不参与既有路径。 */
+    private suspend fun beginRecovery(
+        kind: RecoveryOperationKind,
+        source: VfsUri?,
+        target: VfsUri,
+        sourceStorageKey: String?,
+        targetStorageKey: String,
+        nodeId: NodeId?,
+        createdDirectories: Int = 0,
+    ): RecoveryOperation? {
+        val journal = recoveryJournal ?: return null
+        val now = clock()
+        val operation =
+            RecoveryOperation.begin(
+                operationId = newUuidV7().toString(),
+                kind = kind,
+                sourceUri = source,
+                targetUri = target,
+                sourceStorageKey = sourceStorageKey,
+                targetStorageKey = targetStorageKey,
+                nodeId = nodeId,
+                at = now,
+            )
+        return try {
+            journal.begin(operation)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            val effect = if (createdDirectories == 0) VfsEffect.NONE else VfsEffect.PARTIAL
+            val detail =
+                if (createdDirectories == 0) {
+                    "storage was not changed"
+                } else {
+                    "the parent directories created for this call remain, but the storage operation was not started"
+                }
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The recovery journal could not persist the ${kind.name} request; $detail",
+                target,
+                effect = effect,
+            ).apply { initCause(failure) }
+        }
+    }
+
+    /** 外部写已确认时推进一个 observed 阶段；进度写不进去就不能继续发起后续外部写。 */
+    private suspend fun markObserved(
+        operation: RecoveryOperation?,
+        phase: RecoveryPhase,
+        target: VfsUri,
+    ): RecoveryOperation? = advanceRecovery(operation, phase, target)
+
+    private suspend fun advanceRecovery(
+        operation: RecoveryOperation?,
+        phase: RecoveryPhase,
+        target: VfsUri,
+    ): RecoveryOperation? {
+        if (operation == null) return null
+        val journal = recoveryJournal ?: return null
+        return try {
+            journal.advance(
+                operationId = operation.operationId,
+                expectedGeneration = operation.generation,
+                nextPhase = phase,
+                at = clock(),
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            throw VfsException(
+                VfsErrorCode.STATE_ERROR,
+                "The recovery journal could not persist ${operation.phase} -> $phase after an external write",
+                target,
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+    }
+
+    /** Storage 已报错时只补白名单诊断；诊断自身失败附到原异常，不改变原 code / effect。 */
+    private suspend fun markStorageFailureBestEffort(
+        operation: RecoveryOperation?,
+        primary: Throwable,
+    ) {
+        if (operation == null) return
+        val journal = recoveryJournal ?: return
+        try {
+            journal.diagnose(
+                operationId = operation.operationId,
+                expectedGeneration = operation.generation,
+                diagnosticCode = RecoveryDiagnosticCode.STORAGE_FAILURE,
+                at = clock(),
+            )
+        } catch (failure: Throwable) {
+            primary.addSuppressed(failure)
+        }
+    }
+
+    /** 物理效果已发生但状态事务失败时 best-effort 标诊断；不掩盖 STATE_ERROR 主异常。 */
+    private suspend fun diagnoseCommitFailure(
+        operation: RecoveryOperation?,
+        primary: Throwable,
+    ) {
+        if (operation == null) return
+        val journal = recoveryJournal ?: return
+        try {
+            journal.diagnose(
+                operationId = operation.operationId,
+                expectedGeneration = operation.generation,
+                diagnosticCode = RecoveryDiagnosticCode.STATE_COMMIT_FAILURE,
+                at = clock(),
+            )
+        } catch (failure: Throwable) {
+            primary.addSuppressed(failure)
+        }
+    }
+
+    /** 成功事务最后一步关闭 journal；任何失败都会回滚同一事务里的 Node 与 Event。 */
+    private suspend fun closeInside(
+        scope: TransactionScope,
+        operation: RecoveryOperation?,
+    ) {
+        if (operation == null) return
+        scope.recovery.close(
+            operationId = operation.operationId,
+            expectedGeneration = operation.generation,
+            at = clock(),
+        )
     }
 
     /**
@@ -710,30 +953,48 @@ class DefaultVfs(
         // 身份：已登记源复用原 ID；未登记源按 NodeRepository 的注册语义建立一次身份（懒注册）再迁移这条记录。
         val nodeId = ensureSourceIdentity(source.path, NodeType.FILE)
 
-        // 只在目标 Mount 内补缺失父目录（复用 T15 的逐层创建，不批量登记、不发目录事件）。
+        // 父目录也是真实副作用；先建出来，再把「即将发起原生移动」持久化到 journal。
         val createdDirectories = createMissingParents(target, storage, targetRoute)
+        val requested =
+            beginRecovery(
+                kind = RecoveryOperationKind.NATIVE_FILE_MOVE,
+                source = source,
+                target = target,
+                sourceStorageKey = sourceRoute.mount.storageKey,
+                targetStorageKey = targetRoute.mount.storageKey,
+                nodeId = nodeId,
+                createdDirectories = createdDirectories,
+            )
         // 物理原生移动；失败时把「已建出的父目录」合并进 effect，不把 UNKNOWN 降级成 NONE。
         val moved =
             try {
                 storage.move(sourceRoute.relativePath, targetRoute.relativePath)
             } catch (failure: VfsException) {
-                throw failure.withKnownChanges(createdDirectories)
+                val merged = failure.withKnownChanges(createdDirectories)
+                markStorageFailureBestEffort(requested, merged)
+                throw merged
             }
+        val observed = markObserved(requested, RecoveryPhase.NATIVE_MOVE_OBSERVED, target)
         // 状态 / 事件同事务提交；物理已经移动这件事不会因为提交失败而回退。
         return try {
-            pipeline.commitInsideBoundary { scope -> commitMove(scope, nodeId, source, target, moved) }
+            pipeline.commitInsideBoundary { scope ->
+                commitMove(scope, nodeId, source, target, moved).also { closeInside(scope, observed) }
+            }
         } catch (cancellation: CancellationException) {
             // 取消原样传播。文件已经到目标这件事不会因为取消而消失，也不声称状态已回滚。
             throw cancellation
         } catch (failure: Exception) {
             // 只收普通异常：JVM 的 Error（OOM、StackOverflow）不是状态库拒绝了一条记录，原样抛出去。
-            throw VfsException(
-                VfsErrorCode.STATE_ERROR,
-                "The file was moved on the backing storage but the node path and event could not be committed: " +
-                    "${failure.message ?: failure::class.java.simpleName}",
-                target,
-                effect = VfsEffect.PARTIAL,
-            ).apply { initCause(failure) }
+            val wrapped =
+                VfsException(
+                    VfsErrorCode.STATE_ERROR,
+                    "The file was moved on the backing storage but the node path and event could not be committed: " +
+                        "${failure.message ?: failure::class.java.simpleName}",
+                    target,
+                    effect = VfsEffect.PARTIAL,
+                ).apply { initCause(failure) }
+            diagnoseCommitFailure(observed, wrapped)
+            throw wrapped
         }
     }
 
@@ -1148,8 +1409,18 @@ class DefaultVfs(
             )
         }
 
-        // 2. 补目标父目录（读取成功并确认实际字节数后）。
+        // 目标父目录先落到真实后端；journal 持久化后紧接 CREATE_NEW 写入。
         val createdDirectories = createMissingParents(target, targetStorage, targetRoute)
+        val requested =
+            beginRecovery(
+                kind = RecoveryOperationKind.COPY_FILE_MOVE,
+                source = source,
+                target = target,
+                sourceStorageKey = sourceRoute.mount.storageKey,
+                targetStorageKey = targetRoute.mount.storageKey,
+                nodeId = nodeId,
+                createdDirectories = createdDirectories,
+            )
 
         // 3. 写入目标：用 CREATE_NEW 防止预检后目标出现时被覆盖。
         //    CREATE_NEW 表达「不覆盖已有目标」，**不**承诺写入原子性；后端仍可能写入一部分后报错。
@@ -1158,8 +1429,12 @@ class DefaultVfs(
                 targetStorage.write(targetRoute.relativePath, content.bytes, StorageWriteMode.CREATE_NEW)
             } catch (failure: VfsException) {
                 // 写入失败：把已建父目录合并进 effect，源保留。目标可能已留下部分内容，不自动清理。
-                throw failure.withKnownChanges(createdDirectories)
+                val merged = failure.withKnownChanges(createdDirectories)
+                markStorageFailureBestEffort(requested, merged)
+                throw merged
             }
+        // 写入回执已经返回就表示目标写发生过；后续 stat / 类型 / 长度确认失败也必须基于这个 observed 代际。
+        val targetObserved = markObserved(requested, RecoveryPhase.TARGET_WRITE_OBSERVED, target)
 
         // 4. 确认目标：stat 目标确认为文件，核对所有可用长度。
         val targetAttributes =
@@ -1168,7 +1443,9 @@ class DefaultVfs(
             } catch (failure: VfsException) {
                 // 确认失败：源保留、目标可能已写入（后端行为），不自动删残留目标、不继续删源。
                 // 保留后端原始 code / effect（含 UNKNOWN），仅把 NONE 提到 PARTIAL（已有目标写入）。
-                throw failure.withKnownTargetWrite()
+                val merged = failure.withKnownTargetWrite()
+                markStorageFailureBestEffort(targetObserved, merged)
+                throw merged
             }
         if (targetAttributes.type != NodeType.FILE) {
             // 目标不是文件（极罕见：并发外部把目标改成了目录），不删源、不提交
@@ -1198,34 +1475,40 @@ class DefaultVfs(
                 effect = VfsEffect.PARTIAL,
             )
         }
-
         // 5. 删除源：确认通过后才删源。确认不过的任何一条路径都在上面抛出去了，永远走不到这里。
+        val deleteRequested = advanceRecovery(targetObserved, RecoveryPhase.SOURCE_DELETE_REQUESTED, target)
         try {
             sourceStorage.delete(sourceRoute.relativePath, recursive = false)
         } catch (failure: VfsException) {
             // 删源失败：源与目标可能都在、逻辑路径仍指向源、不提交新映射。
             // 保留后端原始 code / effect（含 UNKNOWN），仅把 NONE 提到 PARTIAL（目标已写入）。
-            throw failure.withKnownTargetWrite()
+            val merged = failure.withKnownTargetWrite()
+            markStorageFailureBestEffort(deleteRequested, merged)
+            throw merged
         }
+        val sourceDeleted = markObserved(deleteRequested, RecoveryPhase.SOURCE_DELETE_OBSERVED, target)
 
         // 6. 状态 / 事件同事务提交：更新 Node 路径、追加 FILE_MOVED。
         // 物理已完成（目标有内容、源已删），提交失败报 STATE_ERROR + PARTIAL，不回移、不发成功通知。
         return try {
             pipeline.commitInsideBoundary { scope ->
-                commitMove(scope, nodeId, source, target, written)
+                commitMove(scope, nodeId, source, target, written).also { closeInside(scope, sourceDeleted) }
             }
         } catch (cancellation: CancellationException) {
             // 取消原样传播。物理已变更（目标有文件、源已删）这件事不会因为取消而消失。
             throw cancellation
         } catch (failure: Exception) {
             // 只收普通异常：JVM 的 Error（OOM、StackOverflow）不是状态库拒绝了一条记录，原样抛出去。
-            throw VfsException(
-                VfsErrorCode.STATE_ERROR,
-                "The file was copied and source deleted but the node path and event could not be committed: " +
-                    "${failure.message ?: failure::class.java.simpleName}",
-                target,
-                effect = VfsEffect.PARTIAL,
-            ).apply { initCause(failure) }
+            val wrapped =
+                VfsException(
+                    VfsErrorCode.STATE_ERROR,
+                    "The file was copied and source deleted but the node path and event could not be committed: " +
+                        "${failure.message ?: failure::class.java.simpleName}",
+                    target,
+                    effect = VfsEffect.PARTIAL,
+                ).apply { initCause(failure) }
+            diagnoseCommitFailure(sourceDeleted, wrapped)
+            throw wrapped
         }
     }
 

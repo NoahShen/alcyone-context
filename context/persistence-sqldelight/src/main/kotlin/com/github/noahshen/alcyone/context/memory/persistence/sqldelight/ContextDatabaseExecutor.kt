@@ -45,7 +45,8 @@ class ContextDatabaseExecutor
         readSlotCount: Int,
         /** 读 Slot 的打开方式；测试用它注入「第 N 个 Slot 打开失败」以验证逆序清理。 */
         readSlotOpener: ((Int) -> ContextSlot)? = null,
-    ) : AutoCloseable {
+    ) : AutoCloseable,
+        ContextBackupSnapshotter {
         // 参数校验先于资源创建，避免非法参数导致部分资源已分配。
         init {
             require(readSlotCount >= 1) { "readSlotCount must be at least 1" }
@@ -137,6 +138,20 @@ class ContextDatabaseExecutor
                     }) { scope ->
                         runBoundedTransaction(slot, "read") { block(scope) }
                     }
+                }
+            }
+
+        /** 仅由 BackupRuntime 调用；独占写 Slot 但不改变业务事务，也不传播裸 Connection。 */
+        override suspend fun backupSnapshot(target: Path): Long =
+            enter {
+                writeSemaphore.withPermit {
+                    val slot = writeSlot
+                    slot.checkPoison()
+                    withScope<RawTransactionScope, Long>(slot, { owner ->
+                        val session = ScopeSession(slot, owner)
+                        slot.currentScope = session
+                        RawTransactionScope(slot, owner).apply { this.session = session }
+                    }) { scope -> scope.backupSnapshot(target) }
                 }
             }
 

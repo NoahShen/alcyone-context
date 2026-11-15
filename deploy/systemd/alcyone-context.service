@@ -1,0 +1,40 @@
+# CT29 static example. Install as /etc/systemd/system/alcyone-context.service.
+# Linux systemd execution is not verified by the macOS test environment.
+[Unit]
+Description=Alcyone Context standalone server
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+User=alcyone-context
+Group=alcyone-context
+WorkingDirectory=/var/lib/alcyone-context
+StateDirectory=alcyone-context
+StateDirectoryMode=0700
+UMask=0077
+
+# This is the Gradle installDist launcher; no shadow JAR or second runtime.
+ExecStart=/opt/alcyone-context/bin/alcyone-context run --config /etc/alcyone-context/config.yaml
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=60
+SuccessExitStatus=0
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/alcyone-context /etc/alcyone-context/config.yaml
+ReadWritePaths=/var/lib/alcyone-context
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alcyone-context
+
+[Install]
+WantedBy=multi-user.target

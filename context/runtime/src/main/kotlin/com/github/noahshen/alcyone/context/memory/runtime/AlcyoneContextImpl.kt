@@ -1,27 +1,6 @@
 package com.github.noahshen.alcyone.context.memory.runtime
 
-import com.github.noahshen.alcyone.context.memory.api.AlcyoneContext
-import com.github.noahshen.alcyone.context.memory.api.BootstrapContext
-import com.github.noahshen.alcyone.context.memory.api.ContextConfigErrorCode
-import com.github.noahshen.alcyone.context.memory.api.ContextConfigException
-import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleErrorCode
-import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
-import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleState
-import com.github.noahshen.alcyone.context.memory.api.ContextRetrievalErrorCode
-import com.github.noahshen.alcyone.context.memory.api.ContextRetrievalException
-import com.github.noahshen.alcyone.context.memory.api.ContextStatus
-import com.github.noahshen.alcyone.context.memory.api.ConversationTurn
-import com.github.noahshen.alcyone.context.memory.api.DreamingResult
-import com.github.noahshen.alcyone.context.memory.api.IngestResult
-import com.github.noahshen.alcyone.context.memory.api.IngestStatus
-import com.github.noahshen.alcyone.context.memory.api.MapStatus
-import com.github.noahshen.alcyone.context.memory.api.OrganizedMemory
-import com.github.noahshen.alcyone.context.memory.api.RawMemory
-import com.github.noahshen.alcyone.context.memory.api.ResourceMetadata
-import com.github.noahshen.alcyone.context.memory.api.SessionKey
-import com.github.noahshen.alcyone.context.memory.api.StorageStatus
-import com.github.noahshen.alcyone.context.memory.api.WorkerState
-import com.github.noahshen.alcyone.context.memory.api.WorkerStatus
+import com.github.noahshen.alcyone.context.memory.api.*
 import com.github.noahshen.alcyone.context.memory.core.extraction.ExtractionCommitter
 import com.github.noahshen.alcyone.context.memory.core.extraction.ExtractionRunner
 import com.github.noahshen.alcyone.context.memory.core.id.MemoryIdGeneratorImpl
@@ -37,6 +16,9 @@ import com.github.noahshen.alcyone.context.memory.core.organization.Organization
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseExecutor
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseFactory
 import com.github.noahshen.alcyone.context.memory.persistence.sqldelight.ContextDatabaseImpl
+import com.github.noahshen.alcyone.context.memory.runtime.backup.BackupConfig
+import com.github.noahshen.alcyone.context.memory.runtime.backup.BackupRuntime
+import com.github.noahshen.alcyone.context.memory.runtime.backup.BackupTickSource
 import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingConfig
 import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingPeriodicTickSource
 import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingRuntime
@@ -74,6 +56,7 @@ import com.github.noahshen.alcyone.context.memory.runtime.organization.Organizat
 import com.github.noahshen.alcyone.context.memory.runtime.resource.ContextResourceAccess
 import com.github.noahshen.alcyone.context.memory.runtime.retrieval.MemorySearchService
 import com.github.noahshen.alcyone.context.memory.runtime.retrieval.RetrievalConfig
+import com.github.noahshen.alcyone.context.vfs.Vfs
 import com.github.noahshen.alcyone.context.vfs.runtime.AlcyoneVfs
 import com.github.noahshen.alcyone.context.vfs.runtime.VfsRuntimeConfig
 import kotlinx.coroutines.CancellationException
@@ -171,6 +154,9 @@ internal class AlcyoneContextImpl(
     internal val dreamingConfig: DreamingConfig = DreamingConfig(),
     internal val dreamingTickSource: DreamingPeriodicTickSource? = null,
     internal val dreamingRuntimeConfigurator: ((DreamingRuntime) -> Unit)? = null,
+    internal val backupConfig: BackupConfig = BackupConfig(),
+    private val backupTempRoot: java.nio.file.Path,
+    internal val backupTickSource: BackupTickSource? = null,
     /** `context.retrieval` 配置快照（CT20-B2）。 */
     internal val retrievalConfig: RetrievalConfig = RetrievalConfig(),
     /** 服务端 `created_at` 时钟；生产为系统 UTC，测试可注入固定时钟。 */
@@ -179,6 +165,7 @@ internal class AlcyoneContextImpl(
     private val ingestionNotifier: IngestionNotifier = IngestionNotifier { },
     /** 通知失败诊断；只接收异常对象，生产用 SLF4J 仅记录类名。 */
     private val ingestionReporter: IngestionNotificationReporter = IngestionNotificationReporter { },
+    private val vfsFactory: suspend (VfsRuntimeConfig) -> Vfs,
 ) : AlcyoneContext,
     IngestionLimitAware {
     private val notificationLock = Any()
@@ -230,6 +217,7 @@ internal class AlcyoneContextImpl(
     private var database: ContextDatabaseImpl? = null
 
     private var vfs: AlcyoneVfs? = null
+    private var managedVfs: Vfs? = null
 
     /** RUNNING 时绑定当前 VFS；关闭开始后立即清空，冷 Flow 不会继续取得旧引用。 */
     private var resourceAccess: ContextResourceAccess? = null
@@ -248,6 +236,8 @@ internal class AlcyoneContextImpl(
     /** `start()` 内组装的 Memory Map pipeline（未配置 memoryMap 时为 null）。 */
     private var memoryMapPipeline: MemoryMapPipeline? = null
     private var dreamingRuntime: DreamingRuntime? = null
+    private var backupRuntime: BackupRuntime? = null
+    private var backupStatusReader: (() -> ContextBackupStatus)? = null
 
     /** 生产默认 Map wakeup：仅在当前实例持有 pipeline 时合并一次刷新信号。 */
     private val effectiveOrganizationMapWakeup: OrganizationMapWakeup =
@@ -293,10 +283,12 @@ internal class AlcyoneContextImpl(
     private suspend fun performStart(signal: CompletableDeferred<Unit>) {
         var acquiredExecutor: ContextDatabaseExecutor? = null
         var acquiredVfs: AlcyoneVfs? = null
+        var acquiredManagedVfs: Vfs? = null
         var acquiredLlm: KtorLlmClient? = null
         var acquiredOrganizationPipeline: OrganizationPipeline? = null
         var acquiredMemoryMapPipeline: MemoryMapPipeline? = null
         var acquiredDreamingRuntime: DreamingRuntime? = null
+        var acquiredBackupRuntime: BackupRuntime? = null
         var acquiredPipeline: ExtractionPipeline? = null
         var published = false
         var failureToThrow: Throwable? = null
@@ -304,14 +296,18 @@ internal class AlcyoneContextImpl(
             startGate.beforeOpen()
             acquiredExecutor = ContextDatabaseFactory.open(databasePath)
             val assembledDatabase = ContextDatabaseImpl(acquiredExecutor)
-            acquiredVfs = AlcyoneVfs.create(vfsConfig)
+            acquiredManagedVfs = vfsFactory(vfsConfig)
+            if (acquiredManagedVfs !is AlcyoneVfs && acquiredManagedVfs !is AutoCloseable) {
+                throw ContextConfigException(ContextConfigErrorCode.INVALID_CONFIG, "custom VFS must implement AutoCloseable")
+            }
+            acquiredVfs = acquiredManagedVfs as? AlcyoneVfs
             // HttpClient（含引擎）只在这里创建：create() 保持零副作用。
             acquiredLlm = llmConfig?.let { KtorLlmClient(it) }
             acquiredOrganizationPipeline =
                 defaultOrganizationPipeline(assembledDatabase, acquiredLlm)
                     ?.also { pipeline -> organizationPipelineConfigurator?.invoke(pipeline) }
             acquiredMemoryMapPipeline =
-                defaultMemoryMapPipeline(assembledDatabase, acquiredLlm, acquiredVfs)
+                defaultMemoryMapPipeline(assembledDatabase, acquiredLlm, acquiredManagedVfs)
                     ?.also { pipeline -> memoryMapPipelineConfigurator?.invoke(pipeline) }
             val organizationWakeup =
                 organizationWakeup ?: acquiredOrganizationPipeline?.wakeup ?: OrganizationWakeup { }
@@ -321,6 +317,10 @@ internal class AlcyoneContextImpl(
                     acquiredLlm,
                     organizationWakeup,
                 )?.also { dreamingRuntimeConfigurator?.invoke(it) }
+            acquiredBackupRuntime =
+                acquiredVfs?.let { runningVfs ->
+                    BackupRuntime(backupConfig, acquiredExecutor, runningVfs, clock, backupTickSource, tempRoot = backupTempRoot)
+                }
             // pipeline 只使用已取得的 DB/配置/时钟；Runner 被激活门挡住，RUNNING 发布前不会执行。
             val pipelineRunner = extractionRunner ?: defaultExtractionRunner(assembledDatabase, acquiredLlm, organizationWakeup)
             acquiredPipeline =
@@ -338,6 +338,7 @@ internal class AlcyoneContextImpl(
             acquiredOrganizationPipeline?.start()
             acquiredMemoryMapPipeline?.start()
             acquiredDreamingRuntime?.start()
+            acquiredBackupRuntime?.start()
             acquiredPipeline?.start()
             startProbe.afterResourcesAcquired()
             published =
@@ -348,11 +349,14 @@ internal class AlcyoneContextImpl(
                         executor = acquiredExecutor
                         database = assembledDatabase
                         vfs = acquiredVfs
-                        resourceAccess = acquiredVfs?.let(::ContextResourceAccess)
+                        managedVfs = acquiredManagedVfs
+                        resourceAccess = acquiredManagedVfs?.let(::ContextResourceAccess)
                         llm = acquiredLlm
                         organizationPipeline = acquiredOrganizationPipeline
                         memoryMapPipeline = acquiredMemoryMapPipeline
                         dreamingRuntime = acquiredDreamingRuntime
+                        backupRuntime = acquiredBackupRuntime
+                        acquiredBackupRuntime?.let { backupStatusReader = it::status }
                         extractionPipeline = acquiredPipeline
                         ingestion =
                             createIngestionService(
@@ -374,8 +378,10 @@ internal class AlcyoneContextImpl(
                         acquiredOrganizationPipeline,
                         acquiredMemoryMapPipeline,
                         acquiredDreamingRuntime,
+                        acquiredBackupRuntime,
                         acquiredLlm,
                         acquiredVfs,
+                        acquiredManagedVfs,
                         acquiredExecutor,
                     )
                 val failure = cleanupFailure ?: rejected
@@ -404,8 +410,10 @@ internal class AlcyoneContextImpl(
                             acquiredOrganizationPipeline,
                             acquiredMemoryMapPipeline,
                             acquiredDreamingRuntime,
+                            acquiredBackupRuntime,
                             acquiredLlm,
                             acquiredVfs,
+                            acquiredManagedVfs,
                             acquiredExecutor,
                         )
                     cleanupFailure?.let(failure::addSuppressed)
@@ -578,8 +586,10 @@ internal class AlcyoneContextImpl(
         var organizationPipelineToClose: OrganizationPipeline? = null
         var memoryMapPipelineToClose: MemoryMapPipeline? = null
         var dreamingRuntimeToClose: DreamingRuntime? = null
+        var backupRuntimeToClose: BackupRuntime? = null
         var llmToClose: KtorLlmClient? = null
         var vfsToClose: AlcyoneVfs? = null
+        var managedVfsToClose: Vfs? = null
         var executorToClose: ContextDatabaseExecutor? = null
         var alreadyClosed = false
         synchronized(lock) {
@@ -599,13 +609,17 @@ internal class AlcyoneContextImpl(
                     organizationPipelineToClose = organizationPipeline
                     memoryMapPipelineToClose = memoryMapPipeline
                     dreamingRuntimeToClose = dreamingRuntime
+                    backupRuntimeToClose = backupRuntime
                     // 与 RUNNING→STOPPING 同锁封闭三条 pipeline 准入。
                     pipelineToClose?.beginClosing()
                     organizationPipelineToClose?.beginClosing()
                     memoryMapPipelineToClose?.beginClosing()
                     dreamingRuntimeToClose?.beginClosing()
+                    backupRuntimeToClose?.beginClosing()
+                    backupRuntime = null
                     llmToClose = llm
                     vfsToClose = vfs
+                    managedVfsToClose = managedVfs
                     executorToClose = executor
                     extractionPipeline = null
                     organizationPipeline = null
@@ -613,6 +627,7 @@ internal class AlcyoneContextImpl(
                     dreamingRuntime = null
                     llm = null
                     vfs = null
+                    managedVfs = null
                     resourceAccess = null
                     executor = null
                     database = null
@@ -645,13 +660,17 @@ internal class AlcyoneContextImpl(
             organizationPipelineToClose = organizationPipelineToClose ?: organizationPipeline
             memoryMapPipelineToClose = memoryMapPipelineToClose ?: memoryMapPipeline
             dreamingRuntimeToClose = dreamingRuntimeToClose ?: dreamingRuntime
+            backupRuntimeToClose = backupRuntimeToClose ?: backupRuntime
             // 兜底：任何路径取到 pipeline 都先封闭准入（幂等、短同步）。
             pipelineToClose?.beginClosing()
             organizationPipelineToClose?.beginClosing()
             memoryMapPipelineToClose?.beginClosing()
             dreamingRuntimeToClose?.beginClosing()
+            backupRuntimeToClose?.beginClosing()
+            backupRuntime = null
             llmToClose = llmToClose ?: llm
             vfsToClose = vfsToClose ?: vfs
+            managedVfsToClose = managedVfsToClose ?: managedVfs
             executorToClose = executorToClose ?: executor
             extractionPipeline = null
             organizationPipeline = null
@@ -659,6 +678,7 @@ internal class AlcyoneContextImpl(
             dreamingRuntime = null
             llm = null
             vfs = null
+            managedVfs = null
             resourceAccess = null
             executor = null
             database = null
@@ -672,8 +692,10 @@ internal class AlcyoneContextImpl(
             organizationPipelineToClose,
             memoryMapPipelineToClose,
             dreamingRuntimeToClose,
+            backupRuntimeToClose,
             llmToClose,
             vfsToClose,
+            managedVfsToClose,
             executorToClose,
         )?.let(failures::add)
         synchronized(lock) { lifecycle = ContextLifecycleState.CLOSED }
@@ -731,7 +753,7 @@ internal class AlcyoneContextImpl(
     private fun defaultMemoryMapPipeline(
         database: ContextDatabaseImpl,
         llmClient: KtorLlmClient?,
-        vfs: AlcyoneVfs?,
+        vfs: Vfs?,
     ): MemoryMapPipeline? {
         val config = memoryMapConfig ?: return null
         val ownedLlm = llmConfig ?: throw invalidMemoryMapConfig("context.llm is required for memory map")
@@ -809,9 +831,7 @@ internal class AlcyoneContextImpl(
         val client = llmClient ?: return null
         validateDreamingBinding(dreamingConfig, ownedLlm)
         // 无 DREAMING 专属 Task 且无 Cron 时不建 Runtime（manual-only 无绑定兼容）。
-        val hasDreamingTasks =
-            ownedLlm.tasks.keys.any { it in setOf(LlmTask.DREAMING_TOPIC, LlmTask.DREAMING_EVIDENCE, LlmTask.DREAMING_REFLECTION) }
-        if (dreamingConfig.cron == null && !hasDreamingTasks) return null
+        if (!hasDreamingCapability(ownedLlm)) return null
         return DreamingRuntime(
             config = dreamingConfig,
             database = database,
@@ -823,6 +843,12 @@ internal class AlcyoneContextImpl(
             tickSource = dreamingTickSource,
         )
     }
+
+    private fun hasDreamingCapability(config: LlmConfig): Boolean =
+        dreamingConfig.cron != null ||
+            config.tasks.keys.any {
+                it in setOf(LlmTask.DREAMING_TOPIC, LlmTask.DREAMING_EVIDENCE, LlmTask.DREAMING_REFLECTION)
+            }
 
     override suspend fun runDreaming(): DreamingResult {
         val runtime =
@@ -849,8 +875,10 @@ internal class AlcyoneContextImpl(
         acquiredOrganizationPipeline: OrganizationPipeline?,
         acquiredMemoryMapPipeline: MemoryMapPipeline?,
         acquiredDreamingRuntime: DreamingRuntime?,
+        acquiredBackupRuntime: BackupRuntime?,
         acquiredLlm: KtorLlmClient?,
         acquiredVfs: AlcyoneVfs?,
+        managedVfs: Vfs?,
         acquiredExecutor: ContextDatabaseExecutor?,
     ): Throwable? {
         var primary: Throwable? = null
@@ -883,6 +911,13 @@ internal class AlcyoneContextImpl(
                     primary = chain(primary, failure)
                 }
             }
+            acquiredBackupRuntime?.let { runtime ->
+                try {
+                    runtime.closeAsync()
+                } catch (failure: Throwable) {
+                    primary = chain(primary, failure)
+                }
+            }
             acquiredLlm?.let { client ->
                 try {
                     client.closeAsync()
@@ -890,14 +925,22 @@ internal class AlcyoneContextImpl(
                     primary = chain(primary, failure)
                 }
             }
-            acquiredVfs?.let { running ->
+            managedVfs?.let { running ->
                 try {
                     releaseProbe.beforeRelease(AlcyoneContextFactory.ReleaseTarget.VFS)
                 } catch (failure: Throwable) {
                     primary = chain(primary, failure)
                 }
                 try {
-                    running.close()
+                    when (running) {
+                        is AlcyoneVfs -> running.close()
+                        is AutoCloseable -> running.close()
+                        else ->
+                            throw ContextConfigException(
+                                ContextConfigErrorCode.INVALID_CONFIG,
+                                "custom VFS must implement AutoCloseable",
+                            )
+                    }
                 } catch (failure: Throwable) {
                     primary = chain(primary, failure)
                 }
@@ -956,6 +999,8 @@ internal class AlcyoneContextImpl(
     /** 测试/诊断用：当前持有的 VFS（未运行或已关闭为 null），不对外公开。 */
     internal fun vfsForTesting(): AlcyoneVfs? = vfs
 
+    internal fun managedVfsForTesting(): Vfs? = managedVfs
+
     /** 测试/诊断用：当前 Resource access（未运行或已关闭为 null），不对外公开。 */
     internal fun resourceAccessForTesting(): ContextResourceAccess? = synchronized(lock) { resourceAccess }
 
@@ -975,6 +1020,9 @@ internal class AlcyoneContextImpl(
 
     /** 测试/诊断用：当前持有的数据库入口（未运行或已关闭为 null），不对外公开。 */
     internal fun databaseForTesting(): ContextDatabaseImpl? = database
+
+    /** CT28 同模块管理读闸门；生产恒为 null。 */
+    internal var adminReadHookForTesting: (suspend () -> Unit)? = null
 
     override suspend fun loadMeta(uri: String): ResourceMetadata = currentResourceAccess("load resource metadata").loadMeta(uri)
 
@@ -1205,6 +1253,108 @@ internal class AlcyoneContextImpl(
             }
         }
 
+    override suspend fun checkReady(): Boolean {
+        val database = synchronized(lock) { if (lifecycle == ContextLifecycleState.RUNNING) database else null } ?: return false
+        return try {
+            adminReadHookForTesting?.invoke()
+            database.read { it.dreaming.readCheckpoint() }
+            synchronized(lock) { lifecycle == ContextLifecycleState.RUNNING }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    override suspend fun getAdminStatus(): ContextAdminStatus {
+        val snapshot =
+            synchronized(lock) {
+                AdminRuntimeSnapshot(
+                    lifecycle,
+                    database,
+                    extractionPipeline,
+                    organizationPipeline,
+                    memoryMapPipeline,
+                    dreamingRuntime,
+                    llm,
+                    backupStatusReader,
+                    extractionRunner != null || llmConfig?.let(::hasLegalExtractionBinding) == true,
+                    organizationConfig != null,
+                    memoryMapConfig != null,
+                    llmConfig?.let(::hasDreamingCapability) == true,
+                )
+            }
+        val persisted =
+            snapshot.database?.let {
+                adminReadHookForTesting?.invoke()
+                it.read { read ->
+                    AdminPendingStatus(read.pending.count()) to
+                        if (snapshot.dreamingCapability) AdminDreamingStatus(read.dreaming.readCheckpoint()) else null
+                }
+            }
+        val workerState =
+            when (snapshot.lifecycle) {
+                ContextLifecycleState.STOPPING, ContextLifecycleState.CLOSED -> AdminWorkerStatus(WorkerState.STOPPED)
+                ContextLifecycleState.CREATED, ContextLifecycleState.STARTING -> AdminWorkerStatus(WorkerState.IDLE)
+                ContextLifecycleState.RUNNING -> null
+            }
+        val extraction =
+            if (snapshot.extractionCapability) snapshot.extraction?.workerStatus() ?: workerState else null
+        val organization =
+            if (snapshot.organizationCapability) {
+                snapshot.organization?.let {
+                    it.workerStatus().toPublicWorkerState().let { state ->
+                        AdminWorkerStatus(state, if (state == WorkerState.FAILED) true else null)
+                    }
+                } ?: workerState
+            } else {
+                null
+            }
+        val map =
+            if (snapshot.mapCapability) {
+                snapshot.memoryMap?.let {
+                    it.coordinatorForTesting().statusForTesting().toPublicWorkerState().let { state ->
+                        AdminWorkerStatus(state, if (state == WorkerState.FAILED) true else null)
+                    }
+                } ?: workerState
+            } else {
+                null
+            }
+        val dreaming = if (snapshot.dreamingCapability) snapshot.dreaming?.workerStatus() ?: workerState else null
+        return ContextAdminStatus(
+            lifecycle = snapshot.lifecycle,
+            workers = AdminWorkers(extraction, organization, map, dreaming),
+            pending = persisted?.first,
+            dreaming = persisted?.second,
+            mapStatus = snapshot.memoryMap?.snapshot()?.status,
+            llm = snapshot.llm?.adminSnapshots(),
+            backup =
+                snapshot.backup?.invoke()?.let {
+                    AdminBackupStatus(
+                        state = it.state,
+                        lastUri = it.lastUri,
+                        lastCompletedAt = it.lastCompletedAt,
+                        lastFailureStage = it.lastFailureStage,
+                    )
+                },
+        )
+    }
+
+    private data class AdminRuntimeSnapshot(
+        val lifecycle: ContextLifecycleState,
+        val database: ContextDatabaseImpl?,
+        val extraction: ExtractionPipeline?,
+        val organization: OrganizationPipeline?,
+        val memoryMap: MemoryMapPipeline?,
+        val dreaming: DreamingRuntime?,
+        val llm: KtorLlmClient?,
+        val backup: (() -> ContextBackupStatus)?,
+        val extractionCapability: Boolean,
+        val organizationCapability: Boolean,
+        val mapCapability: Boolean,
+        val dreamingCapability: Boolean,
+    )
+
     override suspend fun getStatus(): ContextStatus =
         ContextStatus(
             lifecycle = lifecycle,
@@ -1214,6 +1364,7 @@ internal class AlcyoneContextImpl(
                     databasePath = databasePath.toString(),
                     databaseInitialized = databaseVerified,
                 ),
+            backup = synchronized(lock) { backupStatusReader }?.invoke(),
         )
 
     private fun organizationWorkerStatus(): Map<String, WorkerStatus> {
@@ -1246,7 +1397,23 @@ internal class AlcyoneContextImpl(
         buildMap {
             putAll(organizationWorkerStatus())
             putAll(memoryMapWorkerStatus())
+            synchronized(lock) { backupStatusReader }?.let { put("backup", WorkerStatus(it().state)) }
         }
+
+    override suspend fun backupNow(): ContextBackupResult {
+        if (lifecycle !=
+            ContextLifecycleState.RUNNING
+        ) {
+            throw ContextLifecycleException(ContextLifecycleErrorCode.CLOSED, "backup requires a running context")
+        }
+        val runtime =
+            synchronized(lock) { backupRuntime }
+                ?: throw ContextBackupException(ContextBackupErrorCode.UNAVAILABLE, "backup runtime is unavailable")
+        return runtime.runNow()
+    }
+
+    override fun backupStatus(): ContextBackupStatus =
+        synchronized(lock) { backupStatusReader }?.invoke() ?: ContextBackupStatus(WorkerState.STOPPED)
 
     private fun OrganizationWorkerStatus.toPublicWorkerState(): WorkerState =
         when (this) {

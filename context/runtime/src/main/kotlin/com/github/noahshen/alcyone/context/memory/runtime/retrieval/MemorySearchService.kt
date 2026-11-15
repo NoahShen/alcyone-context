@@ -33,6 +33,7 @@ internal class MemorySearchService(
     private val pageSize: Int = DEFAULT_PAGE_SIZE,
     private val scannerParser: JsonMemorySearchResponseParser = JsonMemorySearchResponseParser(),
     private val rerankParser: JsonMemorySearchRerankResponseParser = JsonMemorySearchRerankResponseParser(),
+    internal var selectedIdsObserver: (List<String>) -> Unit = {},
 ) {
     private val maxLimit: Int = requireValidMaxLimit(maxLimit)
 
@@ -59,6 +60,7 @@ internal class MemorySearchService(
         val scannerSchema = if (binding.profile.jsonMode == LlmResponseFormat.JSON_SCHEMA) MemorySearchPrompt.scannerSchema() else null
         val rerankSchema = if (binding.profile.jsonMode == LlmResponseFormat.JSON_SCHEMA) MemorySearchPrompt.rerankSchema() else null
         val selectedIds = scan(client, binding, scannerSchema, normalizedQuery, snapshot)
+        selectedIdsObserver(selectedIds)
         if (selectedIds.isEmpty()) return emptyList()
 
         val selectedSet = selectedIds.toSet()

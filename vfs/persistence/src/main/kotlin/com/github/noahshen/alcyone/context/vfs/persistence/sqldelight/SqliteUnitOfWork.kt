@@ -3,11 +3,14 @@ package com.github.noahshen.alcyone.context.vfs.persistence.sqldelight
 import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.NodeMetadata
 import com.github.noahshen.alcyone.context.vfs.VfsPath
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryJournal
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.EventRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.MetadataRepository
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRecord
 import com.github.noahshen.alcyone.context.vfs.core.repository.NodeRepository
+import com.github.noahshen.alcyone.context.vfs.core.transaction.DisabledRecoveryCloseRepository
+import com.github.noahshen.alcyone.context.vfs.core.transaction.RecoveryCloseRepository
 import com.github.noahshen.alcyone.context.vfs.core.transaction.TransactionScope
 import com.github.noahshen.alcyone.context.vfs.core.transaction.UnitOfWork
 import kotlinx.coroutines.NonCancellable
@@ -40,6 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class SqliteUnitOfWork(
     private val state: VfsStateDatabase,
+    private val recoveryJournal: RecoveryJournal? = null,
 ) : UnitOfWork {
     override suspend fun <T> inTransaction(block: suspend (TransactionScope) -> T): T {
         val guard = ScopeGuard()
@@ -48,6 +52,12 @@ class SqliteUnitOfWork(
                 override val nodes: NodeRepository = TransactionNodeRepository(state.database.nodeQueries, guard)
                 override val metadata: MetadataRepository = TransactionMetadataRepository(state.database.metadataQueries, guard)
                 override val events: EventRepository = TransactionEventRepository(state.database.eventQueries, guard)
+                override val recovery: RecoveryCloseRepository =
+                    if (recoveryJournal == null) {
+                        DisabledRecoveryCloseRepository
+                    } else {
+                        TransactionRecoveryCloseRepository(state.database.recoveryQueries, guard)
+                    }
             }
         val driver = state.driver
         // BEGIN 真的在 IO 线程上执行成功了吗？只有那里知道，所以标志在同一个执行块里置位。
@@ -166,5 +176,49 @@ private class TransactionEventRepository(
     override suspend fun append(event: EventRecord) {
         guard.ensureOpen()
         stateCall { queries.append(event) }
+    }
+}
+
+/** 同一条连接、同一事务里的 journal 终态写入；存在 guard 保证逃逸作用域不能写。 */
+private class TransactionRecoveryCloseRepository(
+    private val queries: RecoveryQueries,
+    private val guard: ScopeGuard,
+) : RecoveryCloseRepository {
+    override suspend fun close(
+        operationId: String,
+        expectedGeneration: Long,
+        at: Instant,
+    ) {
+        guard.ensureOpen()
+        stateCall {
+            val current =
+                queries.selectRecoveryById(operationId).executeAsOneOrNull()?.toRecoveryOperation()
+                    ?: throw com.github.noahshen.alcyone.context.vfs.VfsException(
+                        com.github.noahshen.alcyone.context.vfs.VfsErrorCode.STATE_ERROR,
+                        "recovery operation $operationId does not exist",
+                    )
+            if (current.generation != expectedGeneration) {
+                throw com.github.noahshen.alcyone.context.vfs.VfsException(
+                    com.github.noahshen.alcyone.context.vfs.VfsErrorCode.STATE_ERROR,
+                    "recovery operation $operationId generation changed before transaction close",
+                )
+            }
+            val closed = current.transitionTo(com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryPhase.CLOSED, at = at)
+            val changed =
+                queries
+                    .closeRecoveryOperation(
+                        closed.generation,
+                        closed.updatedAt.toEpochMilli(),
+                        operationId,
+                        current.generation,
+                        current.phase.name,
+                    ).value
+            if (changed != 1L) {
+                throw com.github.noahshen.alcyone.context.vfs.VfsException(
+                    com.github.noahshen.alcyone.context.vfs.VfsErrorCode.STATE_ERROR,
+                    "recovery operation $operationId was not closed by the transaction CAS",
+                )
+            }
+        }
     }
 }

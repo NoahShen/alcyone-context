@@ -8,6 +8,10 @@ import com.github.noahshen.alcyone.context.vfs.VfsEventType
 import com.github.noahshen.alcyone.context.vfs.VfsException
 import com.github.noahshen.alcyone.context.vfs.VfsUri
 import com.github.noahshen.alcyone.context.vfs.core.event.TrackedNotifiers
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryDiagnosticCode
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryJournal
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryOperation
+import com.github.noahshen.alcyone.context.vfs.core.recovery.RecoveryPhase
 import com.github.noahshen.alcyone.context.vfs.core.registry.makeDirectory
 import com.github.noahshen.alcyone.context.vfs.core.registry.withFile
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageCapabilities
@@ -118,6 +122,54 @@ class DefaultVfsSafeReplaceTest {
             assertEquals(VfsErrorCode.LIMIT_EXCEEDED, failure.code)
             assertEquals(VfsEffect.NONE, failure.effect)
             assertTrue(disk.calls.isEmpty())
+        }
+
+    @Test
+    fun `recovery begin failure reports directories created before the journal request`() =
+        runBlocking {
+            val disk = safeDisk()
+            val failingJournal =
+                object : RecoveryJournal {
+                    override suspend fun begin(operation: RecoveryOperation): RecoveryOperation =
+                        throw VfsException(VfsErrorCode.STATE_ERROR, "journal unavailable")
+
+                    override suspend fun advance(
+                        operationId: String,
+                        expectedGeneration: Long,
+                        nextPhase: RecoveryPhase,
+                        diagnosticCode: RecoveryDiagnosticCode,
+                        at: Instant,
+                    ): RecoveryOperation = error("not reached")
+
+                    override suspend fun diagnose(
+                        operationId: String,
+                        expectedGeneration: Long,
+                        diagnosticCode: RecoveryDiagnosticCode,
+                        at: Instant,
+                    ): RecoveryOperation = error("not reached")
+
+                    override suspend fun find(operationId: String): RecoveryOperation? = error("not reached")
+
+                    override suspend fun listPending(): List<RecoveryOperation> = error("not reached")
+                }
+            val journaledHarness =
+                VfsHarness(
+                    mounts = listOf(VfsHarness.Mounted("/resources", disk)),
+                    notifier = notifiers.create(),
+                    recoveryJournal = failingJournal,
+                )
+
+            val failure = assertFailsWith<VfsException> { journaledHarness.vfs.safeReplace(uri("/a/b.txt"), "new".toByteArray()) }
+
+            assertEquals(VfsErrorCode.STATE_ERROR, failure.code)
+            assertEquals(VfsEffect.PARTIAL, failure.effect)
+            assertEquals(
+                listOf("stat:a/b.txt", "stat:a", "createDirectory:a"),
+                disk.calls,
+            )
+            assertEquals(NodeType.DIRECTORY, disk.typeOfOrNull("a"))
+            assertTrue(disk.calls.none { it.startsWith("safeReplace:") || it.startsWith("write:") })
+            assertTrue(journaledHarness.committedNodes().isEmpty())
         }
 
     @Test

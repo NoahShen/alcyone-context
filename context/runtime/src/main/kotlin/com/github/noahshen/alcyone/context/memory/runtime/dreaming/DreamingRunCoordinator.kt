@@ -158,6 +158,8 @@ internal class DreamingRunCoordinator(
         failure?.let { throw it }
     }
 
+    internal fun workerActive(): Boolean = synchronized(lock) { activeRun }
+
     internal fun activeForTesting(): Boolean = synchronized(lock) { activeRun }
 
     internal fun roundCountForTesting(): Long = synchronized(lock) { rounds }

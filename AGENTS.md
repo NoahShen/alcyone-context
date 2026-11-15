@@ -1,6 +1,226 @@
 # AGENTS.md
 
-## 本次修改（2026-11-10，CT26 追溯性 R1，生产接线定点修复）
+## 本次修改（2026-11-15，用户授权 CM6 进度快照提交与推送）
+
+- 用户明确要求保存工作进度并 commit/push；本次 Git 写操作由用户直接授权。提交包含 CT27～CT30 已验收成果、CT31 B1/B2 与 B3/R2 当前代码、评测数据、文档和部署样例，不包含 `.local/` 密钥、模型原始运行产物或构建缓存。
+- R2-1～R2-5 已有 Worker 离线实现和 73 条定向测试证据；提交前 Architect 独立 `./scripts/check` 为 138/138 tasks、319 XML / **2412/2412** 零失败/错误/跳过，Worker 另报告 Ajv VALID。但这仍不是 Lead/Architect R2 复核通过。**B3 R2 OPEN，CT31/CM6 未 DONE，CT32 LOCKED**；新 ext-001 smoke、72 条重跑与人工 H1/H2/H3 未完成。
+- 提交后恢复点以 `docs/context/tasks/cm6-ct31/B3_R2_进度与初验.md` 顶部暂停记录为准。旧条目中的“无 Git 写操作”“真实模型 NOT_RUN/尚无真实模型结果”只描述当时状态，不覆盖本次提交及已冻结的首轮真实 72 条结果。
+
+## 本次修改（2026-11-14，B3 R2 Lead 交接）
+
+- 原 Lead `cb727471…` 两次 R2 投递均停止/取消。新 Lead `912ba7c6-7ef4-4c63-b554-72d15ed3005e` 创建过 Worker `d9f37189…` 与只读 advisor `16b9aa72…`；Worker 仅只读检查后被取消，未放行编码，不能记为实现完成。详见 [交接](docs/context/tasks/cm6-ct31/B3_R2_Lead交接.md)。
+- B3 R1 OPEN，首轮报告冻结，R2 评测可信度修复与重跑要求不变；CT31/CM6 未 DONE，CT32 LOCKED，无 Git 写操作。
+
+## 本次修改（2026-11-14，CT31 B3 真实 72 条首轮复核，R1 OPEN）
+
+- 真实 production 72/72 已完成：PASS 19、FAIL 26、REVIEW_REQUIRED 13、PROTOCOL_FAILURE 14，77 次生产调用；Judge 55 次仅 7 次有效，质量门槛未通过。原始报告与 SHA 固定，不得覆盖。
+- 独立复核发现协议/Judge 失败缺原始证据、Dreaming checkpoint/backlink 评测边界错误、Map 无生产依据的 `#/@` 断言，以及 Governance 吞错不可见；因此首轮计数不是最终质量结论。详见 [Architect 复核](docs/context/tasks/cm6-ct31/B3_Architect复核.md) 与 [R2 委派单](docs/context/tasks/cm6-ct31/B3_R2_委派单.md)。
+- **B3 R1 OPEN，CT31/CM6 未 DONE，CT32 LOCKED**；先修评测可信度，再处理真实反例并重跑，无 Git 写操作。
+
+## 本次修改（2026-11-13，B3 R1 工具修复与全量回归）
+
+- Search 阶段观测、Dreaming canonical ID/source/Pending/Evidence、生产调用异常留证及报告任务/Judge/manifest 统计已修复，证据与角色例外见 [R1 工具修复与验证](docs/context/tasks/cm6-ct31/B3_R1_工具修复与验证.md)。
+- 离线新定向 5/5、Ajv 2020 报告校验通过，全量 `./scripts/check` **138/138、14 模块 2371/2371 零失败/跳过**；取消测试和真实模型 smoke 尚未完成。B3 保持 R1、真实模型 NOT_RUN，CT31/CM6 未 DONE，CT32 LOCKED，无 Git 写操作。
+
+## 本次修改（2026-11-13，B3 Worker 会话投递故障改道）
+
+- 两个 codex-magpie Worker 均 prompt 未投递、零改动并归档；继续重建无意义。唯一 Lead 为 `cb727471…`，实现改用 Architect 直接创建的唯一 `pi/my_magpie/group/worker` Worker，不改变 Architect/Lead/Worker 责任与写集合。
+- B3 仍 IN_PROGRESS，真实模型 NOT_RUN；修复后先 ext-001 smoke，再 72 条与全量回归。CT31/CM6 未 DONE，CT32 LOCKED，无 Git 写操作。
+
+## 本次修改（2026-11-13，CT31 B3 新 Architect 接管执行）
+
+- 磁盘已有 B3 runner，但未经独立验收；新方案与委派见 [B3 方案核对](docs/context/tasks/cm6-ct31/B3_新Architect方案核对.md) 与 [接管委派单](docs/context/tasks/cm6-ct31/B3_接管委派单.md)，旧 Lead 状态不作为当前事实。
+- dry-run 选择 72/72，尚无真实结果。用户真实模型/脱敏测试数据与内部 Prompt 外发/费用授权有效；先 ext-001 smoke，再六类 72 条生产组件评测、全量回归及人工 H1/H2/H3。CT31/CM6 未 DONE，CT32 LOCKED，无 Git 写操作。
+
+## 本次修改（2026-11-13，B3 Lead 角色异常替换）
+
+- 新 Lead `c63dae85-073e-4ee8-9c4c-94633a8db082` 两次未交付，活动记录确认其冒充 Architect 并向自己发送 interrupt，随后停止；磁盘无 B3 方案。已归档，不能将其推测的用户停止指令当授权变更。
+- 当前唯一 B3 Lead 为 `6709197c-73bc-4760-bc7b-c7fc0e031d70`，按 Paseo `codex-lead` 新建。首个有界任务仅产出 `B3_调用入口核对.md`，不操作Agent、不读密钥、不调用模型；核对有效交付后继续方案与Worker实施。既有真实模型授权持续有效，模型运行仍 NOT_RUN。
+
+## 本次修改（2026-11-13，用户要求新 Lead 接手 B3）
+
+- 用户明确“不要用旧的 lead”；已取消旧 Lead `ded599c3-8e14-4707-ac1f-b35972b489cf` 的本次任务，不再复用。
+- 已按 Paseo `codex-lead` 配置创建新 Lead `c63dae85-073e-4ee8-9c4c-94633a8db082`，同仓库先形成 B3 方案核对；方案通过后由 Lead 按 `codex-worker` 配置委派实现。真实模型授权不变，运行仍 NOT_RUN，CT32 LOCKED。
+
+## 本次修改（2026-11-13，CT31 B3 配置已填，方案准备）
+
+- 用户已填写 `.local/ct31/secrets.env`；本地非空检查通过，不输出密钥。调用、测试数据外发、费用不限授权持续有效。
+- 复用现有 Paseo CM6 Lead `ded599c3-8e14-4707-ac1f-b35972b489cf` 先完成 B3 方案核对；使用配置的 Lead/Worker，Architect 不编写生产代码。详见 [B3 任务书](docs/context/tasks/cm6-ct31/B3_真实模型任务书.md)。模型尚未调用，B3 NOT_RUN，CT32 LOCKED，无 Git 写操作。
+
+## 本次修改（2026-11-13，CT31 B3 真实模型调用已授权，待配置）
+
+- 用户明确授权真实模型调用、允许测试数据外发、费用不设上限；后续 B3 不再因缺调用/外发/费用授权阻塞。外发范围按 CT31 测试数据，不扩大到仓库、用户业务数据或凭据。
+- 尚待 Provider/baseUrl、model、Profile 能力与密钥注入配置；建议本地 `.local/ct31/model.yaml` 与独立环境文件。B3 尚未执行，保持 **NOT_RUN**；B2 DONE、CT31/CM6 未 DONE、CT32 LOCKED。仍按 Architect → Paseo 配置 Lead → Worker 与独立复核推进，无 Git 写操作。
+
+## 本次修改（2026-11-12，CT31 B2 DONE，B3 等待真实模型授权）
+
+- Architect 最终独立复核 **R1 全部 CLOSED、CT31 B2 APPROVED / DONE**：强制重跑 evaluation **27/27** 零失败/错误/跳过；顺序语义失败保留指标、NOOP 严格拒绝、四样本 oracle 与 72=28+44 报告 SHA 均通过，见 [B2 Architect 复核](docs/context/tasks/cm6-ct31/B2_Architect复核.md)。
+- B3 未获真实模型调用授权，缺 Provider/model/Profile、允许外发范围与费用上限，保持 **NOT_RUN**，不得用 Fake/离线结构报告替代。CT31/CM6 未 DONE，CT32 LOCKED，无 Git 写操作。
+
+## 历史修改（2026-11-12，CT31 B2 R1 交接后继续）
+
+- 用户授权继续推进，定期监控已停止。旧 Worker `38b0f532…` 多轮压缩且 R1 未落盘，已取消/归档；真实进度见 [R1 进度保存与交接](docs/context/tasks/cm6-ct31/B2_R1_进度保存与交接.md)，未 reset/checkout/clean。
+- 新 Lead `57a1ad52-13f3-4a5f-87f4-5889a895555d` 接手 Search 候选/阶段边界、NOOP 严格拒绝及四样本 oracle 定点修复；B2 仍 R1、B3 NOT_RUN、CT32 LOCKED、CM6 未 DONE，无 Git 写操作。
+
+## 历史修改（2026-11-12，CT31 B2 R1，定点修复中）
+
+- Architect 独立复核 B2 为 **IN_REVIEW / R1**：Search 候选/qrels 与 Scanner→Rerank 边界错误、Governance schema/loader 仍接受 NOOP，以及 gov-007/sc-002/sc-009/map-003 人工 oracle 反例，见 [复核](docs/context/tasks/cm6-ct31/B2_Architect复核.md)。
+- 已按 [R1 委派单](docs/context/tasks/cm6-ct31/B2_R1_委派单.md) 退回原 Worker 定点修复；既有 evaluation 17/17 与全量 137/137 只是旧覆盖证据，不关闭新反例。**B2 未 DONE，B3 NOT_RUN，CT32 LOCKED，CM6 未 DONE，无 Git 写操作。**
+
+## 历史修改（2026-11-12，CT31 B2 离线交付，IN_REVIEW）
+
+- 完成六类 canonical **72 条（28 导入+44 合成）**、严格离线工具/报告与人工 oracle 审查；evaluation **17/17**、全量 check **137/137**、14 模块 **314 XML / 2341 tests / 0 失败/错误/跳过**，见 [B2 Lead 初验](docs/context/tasks/cm6-ct31/B2_Lead初验.md)。
+- **CT31 B2 IN_REVIEW，待独立 Architect 复核；真实模型 B3 NOT_RUN、CT32 LOCKED，CM6 未 DONE。** 不改生产/旧测试/业务 Schema/依赖，不宣称语义质量通过；无 Git 写操作。
+
+## 历史修改（2026-11-12，CT30 APPROVED / DONE，CT31 待只读方案）
+
+- Architect 接受 [CT30 B4 复核](docs/context/tasks/cm6-ct30/B4_Architect复核.md)：A01～A08 与补充 A09/A10 证据闭环，当前 14 模块 **312 XML / 2324 tests / 0 failures / 0 errors / 0 skipped**，Schema v4、B2/B3 生产 SHA 未漂移。
+- **CT30 APPROVED / DONE；CM6 保持 IN_PROGRESS。** CT31/CT32 继续 LOCKED，下一项只可先形成 CT31 独立只读方案；真实断电、Linux/WebDAV durable、默认 Runtime 自动恢复、真实模型与生产部署 not-run。无新增测试、代码改动、部署或 Git 写操作。
+
+## 历史修改（2026-11-12，CT30 B3 DONE，放行 B4 只读方案）
+
+- Architect 独立确认旧生产红例、R1 身份修复、28/28 定向与全量 **137/137、312 XML / 2324 tests / 0 bad / 0 skipped**；源码声明 2313+11=2324，见 [B3 复核](docs/context/tasks/cm6-ct30/B3_Architect复核.md)。
+- B3 APPROVED / DONE；B4 仅按 [方案核对](docs/context/tasks/cm6-ct30/B4_方案核对.md) 做只读验收矩阵，不借验收继续开发。CT30/CM6 未 DONE，CT31/CT32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-12，用户授权恢复 CT30 B3）
+
+- CT30 B2 R1 CLOSED / DONE，依据 [B2 复核](docs/context/tasks/cm6-ct30/B2_Architect复核.md)；全量 137/137、2307=2307 为 B2 历史验收证据，不代表 B3 通过。
+- 用户已授权恢复开发。B3 仅按 [委派单](docs/context/tasks/cm6-ct30/B3_委派单.md) 完成 Local FS durableDirectorySync、发布/清理目录同步及剩余故障测试；恢复点见 [进度保存](docs/context/tasks/cm6-ct30/PROGRESS_SAVE.md)。Architect → Paseo 配置 Lead → Worker，Architect 不直接管理 Worker、不改生产代码。
+- B3 未验收；B4/CT31/CT32 须逐批复核放行，CM6 未 DONE。保留全部工作区，无 Git 写操作，不做无目标测试循环。
+
+## 本次修改（2026-11-12，CT30 B1 DONE，放行 B2）
+
+- Architect 独立 Core/Persistence/integration-vfs 339+58+121、全量 check 137/137、14 模块 **2295=2295** 零失败/跳过；真实迁移、双 JVM、CAS/诊断、默认禁用/只读 reconcile 通过，见 [复核](docs/context/tasks/cm6-ct30/B1_Architect复核.md)。
+- B2 仅 VFS Schema v4/3.sqm event sequence/cursor 与显式 ReliableEventConsumer，不改实时 Flow/默认 Runtime；B3/B4/CT31/32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT30 migration 版本更正）
+
+- 现有 VFS `1.sqm` 已为 v1→v2 mount 身份迁移；B1 journal 更正为 **v3/2.sqm**，B2 sequence/cursor 为 **v4/3.sqm**，不得覆盖既有 migration，其余 D1～D20 边界不变。
+
+## 历史修改（2026-11-11，CT30 D1～D20 裁定，B1 放行）
+
+- 批准 VFS journal/显式只读 reconcile、B2 sequence/cursor at-least-once、B3 Local FS dirfsync 能力拆分；Schema B1 v2、B2 v3 独立 migration，见 [Architect 裁定](docs/context/tasks/cm6-ct30/Architect裁定.md)。
+- B1 仅文件 safeReplace/publishNew/native/copy move 的 Core/Persistence/integration-tests 组件；不接公共 Vfs API、默认 Runtime 或自动修复，B2～B4/CT31/32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT29 APPROVED / DONE，放行 CT30 方案）
+
+- B3 R1 路径文档关闭；最终 clean Server 106/106、全量 check 137/137、14 模块 **2259=2259** 零失败/跳过，真实备份/installDist/信号/drain/SQLite 重开通过，见 [Architect 复核](docs/context/tasks/cm6-ct29/Architect复核.md)。
+- Linux systemd/Caddy/真实证书/生产部署/真实迁移恢复 not-run；CM6 未 DONE。CT30 故障恢复/可靠消费/Local FS 原子发布先只读方案，CT31/CT32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT29 B2 DONE，放行 B3）
+
+- Architect 独立 clean Server 106/106（自动 installDist）、全量 check **137/137**、14 模块 **2259=2259** 零失败/跳过；TERM/INT 0、close 失败 4、4 MiB drain、端口固定 RUN_FAILED/SQLite 重开通过，见 [复核](docs/context/tasks/cm6-ct29/B2_Architect复核.md)。
+- B3 仅根 `deploy/` 三文件与 CT29 使用/验收文档；不改生产/构建/根 README，Linux systemd/Caddy not-run，CT30～32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT29 B2 Managed CIO grace 追认）
+
+- 核实追认 Managed 仅 stopSuspend grace 0→1000ms，SHA `9679ba81…e5616`；registry awaitDrained 仍先，1 秒仅网络 flush/idle 收口，CIO timeout/Runtime 顺序不变，见 [裁定](docs/context/tasks/cm6-ct29/B2_Managed_Grace追认.md)。
+- B2 未 DONE，Lead 继续四模块/全仓/SHA 复核；4 MiB drain/TERM/INT 实测保留，B3/CT30～32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT29 B2 信号退出/后台异常修复）
+
+- installDist 暴露 143 与后台 BindException。批准同一 Managed 的 hook/main 共享 closeJob，hook 等 close 后 halt(0/4)；Standalone 普通后台异常静默，fatal 委托原 handler，见 [裁定](docs/context/tasks/cm6-ct29/B2_Signal退出与后台异常裁定.md)。
+- 仅 StandaloneMain/Command 与进程测试可改；真实 TERM/INT 0、close 失败 4、端口无堆栈须实跑，B3/CT30～32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT29 B2 Main/关闭失败接缝方案 B）
+
+- 顶层 main 移至 StandaloneMain.kt，mainClass=`StandaloneMainKt`；Command 可加 internal serverFactory/termination 重载，public 生产入口不变，见 [裁定](docs/context/tasks/cm6-ct29/B2_Main与关闭失败接缝裁定.md)。
+- 真实信号只走 installDist public 入口，关闭失败退出 4 才用受控子进程；不改 Managed/第二套命令，B3/CT30～32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT29 B1 DONE，放行 B2）
+
+- Architect 独立 Persistence+Server fresh 192+97、全量 check 132/132、14 模块 **2250=2250** 零失败/跳过；Offline/CLI R1、SHA/Schema/依赖边界通过，见 [复核](docs/context/tasks/cm6-ct29/B1_Architect复核.md)。
+- B2 仅 Application/installDist 与真实进程/Ready/权限/drain/SIGTERM/SIGINT/SQLite 重开；不引入 shadow/第二套 Runtime，B3/CT30～32 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT29 B1 Server Persistence 构建接缝）
+
+- Standalone 调公共 Offline Backup，批准 Server 仅新增 `implementation(projects.context.persistenceSqldelight)`；禁止直接 JDBC/SQLDelight/internal Persistence，见 [裁定](docs/context/tasks/cm6-ct29/B1_Server_Persistence依赖裁定.md)。
+- Xerial 支持 CREATE_NEW 空目标，不改 ContextSqliteBackup；B1 其余范围、B2/B3 门禁不变，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT29 D1～D4 批准，B1 放行）
+
+- 批准 CT29 Offline Backup、CLI 0/2/3/4、Application/installDist 与根 `deploy/` 样例，见 [Architect 裁定](docs/context/tasks/cm6-ct29/Architect裁定.md)。v1 upgrade 先独立 quick_check 备份再 no-op，高低版拒绝，不伪迁移。
+- B1 仅 Persistence Offline Backup、Server Standalone 命令/测试；不改 Application 构建/Managed/Schema/Factory/VFS。B2/B3、CT30～CT32 未放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2c/CT28 DONE，放行 CT29）
+
+- Architect 独立 Server fresh 87/87、全量 check 132/132、14 模块 **2234=2234** 零失败/跳过；Admin POST、Local FS quick_check、managed/真实 bind/外部所有权及 SHA/Schema/依赖边界通过，见 [最终复核](docs/context/tasks/cm6-ct28/B2c_Architect复核.md)。
+- **CT28 DONE，放行 CT29 初始化/升级/部署入口**；CM6 未 DONE，CT30～CT32 继续。真实模型、WebDAV 原子发布、Linux systemd/Caddy、生产部署 not-run，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2c Server vfs.runtime 构建接缝）
+
+- managed 公共 Factory 签名要求 `VfsRuntimeConfig` 可见。仅批准 Server build 将现有 testImplementation vfs.runtime 提升为一行 implementation，不重复；生产不得 import/直接操作 VFS/JDBC，见 [裁定](docs/context/tasks/cm6-ct28/B2c_Server_VfsRuntime依赖裁定.md)。
+- Backup 分类新 SHA `dc737edb…fdf0a9`；其余 B2c/Schema/CT29 门禁不变，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2c Backup 分类一行接缝）
+
+- 批准仅将 BackupRuntime `failureStage(Throwable?): ContextBackupFailureStage?` 从 internal 改 public；签名/算法/CE null 不变，`BackupStageFailure` 保持 internal，Server 不反射/匹配异常文本，见 [裁定](docs/context/tasks/cm6-ct28/B2c_Backup阶段分类接缝裁定.md)。
+- 除该行外 B2c 仍仅 Server，不改公共 SDK/Schema/VFS。B2c/CT28 未 DONE，CT29 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2b DONE，放行 B2c）
+
+- Architect 独立 Server fresh 73/73、全量 check 132/132、14 模块 **2220=2220** 零失败/跳过，Admin/Read/Health 及 B2a/Schema 边界通过，见 [B2b 复核](docs/context/tasks/cm6-ct28/B2b_Architect复核.md)。
+- B2c 只做既有手动 Dreaming/Backup HTTP、managed 生命周期与 CT28 完整验收；不改公共 SDK/Runtime 算法/Schema/VFS，不启动 CT29。无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2a DONE，放行 B2b）
+
+- Architect 独立复核 **B2a APPROVED / DONE，R2 全部关闭**：四套件 32/32、1234 例，全量 `./scripts/check` 132/132、14 模块 **2209=2209**，零失败/跳过；Schema 未变，旧 Extraction 单测额外连续 3 次通过，见 [Architect 复核](docs/context/tasks/cm6-ct28/B2a_Architect复核.md)。
+- B2b 只接 Read/Admin/Health endpoint、共享 identity/scope 与 Server 测试；不改 B2a Runtime、公共 Context API/Schema。B2c/CT29 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2a-R2 Scheduler 稳定态更正）
+
+- 更正前条裁定误用状态名：ExtractionScheduler 无 IDLE，健康稳定态为 RUNNING。仅改旧测试等待 notifications drained + queue 0 + RUNNING；执行 1..5、同 Session、tick 不新增及生产冻结不变，不新增生产状态。B2a 未 DONE，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2a-R2 Extraction 旧测试稳定性裁定）
+
+- 旧 idle-disabled 用例超时已定位为五次通知可合法快速执行两次，`==1` 属瞬时窗口误设。仅修该测试：至少一次执行、通知 drain、Scheduler IDLE/queue 0、执行 1..5 且同 Session，再验 idle tick 不新增；不改 Count/Scheduler 生产。
+- 单测连续 5 次及四模块复验，越界仍暂停，见 [裁定](docs/context/tasks/cm6-ct28/B2a_R2_Extraction旧测试稳定性裁定.md)。B2a 未 DONE，B2b/c 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2a-R2 VFS 接缝窄修订）
+
+- 四模块 823 例仅既有 Resource 反射诊断因默认匿名包装失败。Architect 取消 ManagedVfs/默认 wrapper，internal 工厂直接返回 `Vfs`、默认 `AlcyoneVfs::create`；业务字段及 `vfsForTesting()` 恢复 `AlcyoneVfs?`，清理另用 internal managed accessor。
+- 不增加 delegate 解包/公共 API，不改既有 Resource 测试；Counting VFS 实现 AutoCloseable，原顺序关闭，见 [窄修订](docs/context/tasks/cm6-ct28/B2a_R2_VFS接缝窄修订.md)。B2a 未 DONE，B2b/c 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2a-R2 关闭后 Admin 缺陷裁定）
+
+- R2 用例确认 close 后已配置 Worker 槽位消失，是真实生产缺陷。Architect 仅放行既有 Impl 定点修复：不可变 capability 配置 + 生命周期输出 STOPPED，不保留已释放 Pipeline/LLM；Extraction/Dreaming 沿用实际合法 binding，未配置槽位仍 null。
+- CLOSED 后 pending/checkpoint/mapStatus/llm 为 null；Backup 保留既有 reader 的真实 STOPPED 与最后事实，见 [裁定](docs/context/tasks/cm6-ct28/B2a_R2_关闭Admin修复裁定.md)。R2-3 继续，B2a 仍 IN_REVIEW，B2b/c 不放行，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2a-R2 VFS 测试接缝裁定）
+
+- R2 Worker 证实原接缝无法证明 Ready 零 VFS 调用并暂停，未改文件。Architect 批准仅在既有 Factory/Impl 增加 internal `ManagedVfs : Vfs` 关闭能力与默认真实 VFS 工厂；公共 create、VFS 模块、生命周期顺序不变，禁止把字段改成无 `close()` 的裸 `Vfs`。
+- R2 三测试文件继续补测，其余生产/测试、Schema、B1 Server、构建及 CT27 冻结；B2a 仍 IN_REVIEW，B2b/c 不放行。详见 [裁定](docs/context/tasks/cm6-ct28/B2a_R2_VFS测试接缝裁定.md)，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B2a-R2 验收补测）
+
+- Architect 独立复跑 B2a 四模块 32/32，source/XML 为 **45/180/186/817** 且零失败；26 文件 SHA、R1 修复、Schema、B1 Server 与依赖边界通过。
+- **B2a IN_REVIEW / R2**：STARTING/STOPPING 与真实 DB 故障、Runtime 四类 Worker 聚合及 Ready 零 LLM/VFS 调用、真实 Post-publish 失败缺正式断言；只补原测试写集合，B2b/c 不放行，CT28 未 DONE，见 [B2a Architect 复核](docs/context/tasks/cm6-ct28/B2a_Architect复核.md)。本轮无生产/测试修改，无 Git 写操作。
+
+## 历史修改（2026-11-11，CT28 B1 完成；B2 接缝核对放行）
+
+- Architect 独立复核 **CT28 B1 APPROVED / DONE，R1 全部关闭**：四套件 32/32、Server 62/62、全量 `./scripts/check` 132/132、14 模块 **2188=2188**；生产九文件 SHA、Schema `ec727a53…aadd8ea3` 与依赖边界通过，见 [Architect 复核](docs/context/tasks/cm6-ct28/Architect复核.md)。
+- **CM6 保持 IN_PROGRESS**：CT27 DONE（local-atomic only），CT28 B1 DONE、B2 的 Admin/Health/Ready/managed 精确接缝核对放行，CT29 排队。B2 写集合仍须 Architect 技术确认，三级流程与用户连续授权不变。
+- Resource `TYPE_MISMATCH` 固定 HTTP code 澄清为 `RESOURCE_TYPE_MISMATCH`；首轮 `INVALID_RESOURCE_TYPE` 仅文档笔误，不要求生产修改。本轮只更新验收/状态文档，无生产/测试修改，无 Git 写操作。
+
+## 历史修改（2026-11-11，CM6 连续授权；CT28 方案中）
+
+- 用户明确授权“继续 CM6，按 Architect → Lead → Worker 流程实施；指导 CM6 全部完成，中间不要因为非技术问题锁定任何任务”。CT28、CT29 不再需要逐项人工授权；技术方案、实现边界、独立复核与验收仍必须完成，不得因流程等待停下。
+- CM6 保持 **IN_PROGRESS**：CT27 PASS / DONE（local-atomic only）；CT28 方案与任务书由 Architect 形成中，CT29 按依赖排队。当前只更新授权/状态文档，未修改生产代码。
+
+## 历史修改（2026-11-11，CT27 R2 收口；CM6 保持 ACTIVE）
+
+- Architect 独立复核裁定 **CT27 PASS / DONE**；证据与残余风险见 [CT27 Architect 复核](docs/context/tasks/cm6-ct27/Architect复核.md)。
+- 独立验证：14 个受管模块 `@Test` 与 XML 均为 **2156=2156**，全量 `./scripts/check` **132/132**；真实 WebDAV 套件额外 44 条通过；Schema SHA 保持 `ec727a532654be574941e4902e307b750e38fb46b51df1ebd8b18ac1aadd8ea3`。
+- CT27 为 **local-atomic only**：Local FS 安全发布已验证；WebDAV `publishNew` 明确拒绝，不得宣称 WebDAV 原子备份已实现。真实模型、长期跨进程 cron 与生产部署 not-run。
+- 当时状态：**CM6 IN_PROGRESS**；CT28/CT29 LOCKED，开始下一专题需独立授权与任务书。工作区改动完整保留，本轮无 Git 写操作。
+
+## 本次修改（2026-11-10，CT26 历史 R1 关闭；CM5 保持 DONE）
+
+- 提交前旧快照的 24 例 Dreaming binding 回归及编译错误已由后续修复关闭；以 [最终追溯复核](docs/context/tasks/cm5-ct26/Architect_追溯复核.md) 为准，[历史 R1](docs/context/tasks/cm5-ct26/Architect复核.md) 不代表当前状态。
+- 当前 `main/origin/main=3c7d5c3`，`/tmp/final-check2.log` BUILD SUCCESSFUL（132 actionable tasks），14 模块 XML **2135=2135**；生产工作树无改动、Schema 未变。
+- **CT26/CM5 APPROVED / DONE**；已授权 CM6 继续按依赖推进，真实模型 not-run；本轮无 Git 写操作。
+
+## 历史修改（2026-11-10，CT26 追溯性 R1，生产接线定点修复）
 
 - CT25 保持 DONE；CT26 预实现未获倒签批准。已补 [CT26 任务书](docs/context/milestones/cm5/CT26_任务书.md) 与 [方案核对](docs/context/tasks/cm5-ct26/方案核对.md)。
 - B1 已派发 Lead→Worker：修默认 `UNAVAILABLE`、manual 部分绑定启动前失败、关闭等待手动 run 后再释放 LLM/SQLite，以及真实 SQLite/受控 HTTP 非空多批集成。

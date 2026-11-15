@@ -5,4 +5,6 @@ data class ContextStatus(
     val lifecycle: ContextLifecycleState,
     val workers: Map<String, WorkerStatus>,
     val storage: StorageStatus,
+    /** 未启用 Backup 时为 null；进程内状态，不代表远端健康。 */
+    val backup: ContextBackupStatus? = null,
 )

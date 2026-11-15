@@ -6,6 +6,11 @@ import com.github.noahshen.alcyone.context.vfs.VfsException
 import java.io.InputStream
 import java.time.Instant
 
+/** Mount-local entropy; never derives a temporary name from user content. */
+fun interface PublishTempNameFactory {
+    fun next(): String
+}
+
 /**
  * 存储写入模式。
  */
@@ -69,6 +74,10 @@ data class StorageCapabilities(
     val readOnly: Boolean = false,
     /** 后端是否能保证完整替换：提交前失败保旧，不得降级为普通覆盖或先删后移。 */
     val atomicReplace: Boolean = false,
+    /** 能否完整写入临时对象并执行目标全新的发布，不覆盖既有目标。 */
+    val atomicPublishNew: Boolean = false,
+    /** 后端能否同步父目录项；与原子替换/发布能力独立，false 时仍保留既有的原子但非 durable 语义。 */
+    val durableDirectorySync: Boolean = false,
 )
 
 /**
@@ -129,6 +138,21 @@ interface Storage {
         path: StoragePath,
         content: ByteArray,
     ): StorageAttributes = throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "safeReplace is not supported by this storage backend")
+
+    /**
+     * 流式发布全新文件；负责关闭 [input]。临时对象只属于本次调用，失败尽力清理。
+     * 实际字节必须恰好为 [expectedSizeBytes]，且不得超过 [maxBytes]。
+     */
+    suspend fun publishNew(
+        path: StoragePath,
+        input: InputStream,
+        expectedSizeBytes: Long,
+        maxBytes: Long,
+        tempName: String,
+    ): StorageAttributes {
+        input.close()
+        throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "publishNew is not supported by this storage backend")
+    }
 
     /**
      * 创建目录。父路径异常时的错误码**条件式**：实现能确认是文件 / 目录类型冲突时抛 TYPE_MISMATCH；

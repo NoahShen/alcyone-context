@@ -1,6 +1,7 @@
 package com.github.noahshen.alcyone.context.memory.runtime.dreaming
 
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
+import com.github.noahshen.alcyone.context.memory.api.WorkerState
 import com.github.noahshen.alcyone.context.memory.core.id.MemoryIdGeneratorImpl
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmClient
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmRequest
@@ -29,6 +30,8 @@ class DreamingRuntimeTest {
     fun `manual runtime is start gated and empty run is real success`() =
         withDreamingDatabase { fixture ->
             val runtime = runtime(fixture, DreamingConfig())
+            assertEquals(WorkerState.IDLE, runtime.workerStatus().state)
+            assertNull(runtime.workerStatus().lastFailure)
             assertFailsWith<ContextLifecycleException> { runtime.runOnce() }
             runtime.start()
             val result = runtime.runOnce()
@@ -40,6 +43,33 @@ class DreamingRuntimeTest {
             assertFailsWith<ContextLifecycleException> { runtime.runOnce() }
             assertFailsWith<ContextLifecycleException> { runtime.start() }
             assertEquals("CLOSED", runtime.stateForTesting())
+            assertEquals(WorkerState.STOPPED, runtime.workerStatus().state)
+        }
+
+    @Test
+    fun `active run composes running idle and stopped worker facts without failure history`() =
+        withDreamingDatabase { fixture ->
+            coroutineScope {
+                val runtime = runtime(fixture, DreamingConfig())
+                val entered = CompletableDeferred<Unit>()
+                val release = CompletableDeferred<Unit>()
+                runtime.coordinatorForTesting().runHookForTesting = {
+                    entered.complete(Unit)
+                    release.await()
+                }
+                runtime.start()
+                val run = async(Dispatchers.Default) { runtime.runOnce() }
+                entered.await()
+                assertEquals(WorkerState.RUNNING, runtime.workerStatus().state)
+                assertNull(runtime.workerStatus().lastFailure)
+                release.complete(Unit)
+                run.await()
+                assertEquals(WorkerState.IDLE, runtime.workerStatus().state)
+                assertNull(runtime.workerStatus().lastFailure)
+                runtime.closeAsync()
+                assertEquals(WorkerState.STOPPED, runtime.workerStatus().state)
+                assertNull(runtime.workerStatus().lastFailure)
+            }
         }
 
     @Test

@@ -1,6 +1,7 @@
 package com.github.noahshen.alcyone.context.vfs.storage.opendal
 
 import com.github.noahshen.alcyone.context.vfs.NodeType
+import com.github.noahshen.alcyone.context.vfs.PublishTempName
 import com.github.noahshen.alcyone.context.vfs.VfsEffect
 import com.github.noahshen.alcyone.context.vfs.VfsErrorCode
 import com.github.noahshen.alcyone.context.vfs.VfsException
@@ -12,8 +13,11 @@ import com.github.noahshen.alcyone.context.vfs.core.storage.StoragePath
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageStream
 import com.github.noahshen.alcyone.context.vfs.core.storage.StorageWriteMode
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import org.apache.opendal.Metadata
 import org.apache.opendal.OpenDALException
 import org.apache.opendal.Operator
@@ -69,6 +73,10 @@ class LocalFsStorage private constructor(
     private val atomicMover: (Path, Path) -> Unit,
     private val tempCleaner: (Path) -> Unit,
     private val beforeAtomicMove: (suspend (Path, Path) -> Unit)?,
+    /** 目录项同步的测试缝隙；生产使用真实目录 fd 的 [FileChannel.force]。 */
+    private val directorySyncer: (Path) -> Unit,
+    /** 测试缝隙；生产读取 NOFOLLOW_LINKS 文件属性中的真实 fileKey。 */
+    private val fileKeyReader: (Path) -> Any?,
 ) : StorageAdapter {
     /**
      * 防止「一边操作一边关闭」。
@@ -135,6 +143,8 @@ class LocalFsStorage private constructor(
             atomicMover: (Path, Path) -> Unit = ::atomicReplaceFile,
             tempCleaner: (Path) -> Unit = { path -> Files.deleteIfExists(path) },
             beforeAtomicMove: (suspend (Path, Path) -> Unit)? = null,
+            directorySyncer: (Path) -> Unit = ::syncDirectory,
+            fileKeyReader: (Path) -> Any? = ::readFileKey,
         ): LocalFsStorage {
             var opened: Operator? = null
             return handoffOrRelease(release = { opened?.close() }) {
@@ -148,7 +158,7 @@ class LocalFsStorage private constructor(
                             operator,
                             realRoot,
                             options,
-                            capabilitiesOf(operator, realRoot),
+                            capabilitiesOf(operator, realRoot, directorySyncer),
                             readerFactory(operator),
                             statFactory(operator),
                             onNativeCall,
@@ -158,6 +168,8 @@ class LocalFsStorage private constructor(
                             atomicMover,
                             tempCleaner,
                             beforeAtomicMove,
+                            directorySyncer,
+                            fileKeyReader,
                         )
                     } catch (e: Throwable) {
                         opened = null
@@ -191,6 +203,7 @@ class LocalFsStorage private constructor(
         private fun capabilitiesOf(
             operator: Operator,
             root: Path,
+            directorySyncer: (Path) -> Unit,
         ): StorageCapabilities {
             val capability = operator.info.capability
             return StorageCapabilities(
@@ -200,7 +213,47 @@ class LocalFsStorage private constructor(
                 boundedRead = capability.read,
                 readOnly = false,
                 atomicReplace = atomicReplaceAvailable(root),
+                atomicPublishNew = atomicPublishNewAvailable(root),
+                durableDirectorySync = durableDirectorySyncAvailable(root, directorySyncer),
             )
+        }
+
+        /** 在真实挂载根上验证目录 fd 能打开并成功 force；仅探测 rename/link 或参数名不算。 */
+        private fun durableDirectorySyncAvailable(
+            root: Path,
+            directorySyncer: (Path) -> Unit,
+        ): Boolean =
+            try {
+                directorySyncer(root)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+
+        /** 同步目录项本身；文件内容必须先由各自的 force(true) 负责。 */
+        private fun syncDirectory(directory: Path) {
+            FileChannel.open(directory, StandardOpenOption.READ).use { channel ->
+                channel.force(true)
+            }
+        }
+
+        private fun readFileKey(path: Path): Any? =
+            Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS).fileKey()
+
+        private fun atomicPublishNewAvailable(root: Path): Boolean {
+            var source: Path? = null
+            var target: Path? = null
+            return try {
+                source = Files.createTempFile(root, SAFE_REPLACE_TEMP_PREFIX, SAFE_REPLACE_TEMP_SUFFIX)
+                target = root.resolve(PublishTempName.newName())
+                Files.createLink(target, source)
+                true
+            } catch (_: Throwable) {
+                false
+            } finally {
+                runCatching { source?.let { Files.deleteIfExists(it) } }
+                runCatching { target?.let { Files.deleteIfExists(it) } }
+            }
         }
 
         /** 在真实挂载根上验证当前 JVM / 文件系统能否原子替换一个既有目标，而不是只相信参数名。 */
@@ -476,6 +529,7 @@ class LocalFsStorage private constructor(
                             "local storage cannot atomically replace the target",
                         ).apply { initCause(unsupported) }
                     }
+                    syncPublishedDirectory(ready.target.parent, "safeReplace")
                 }
             }
 
@@ -493,20 +547,239 @@ class LocalFsStorage private constructor(
                 }
             }
         } catch (failure: Throwable) {
-            val cleanupFailure = prepared?.let { cleanupTempAfterFailure(it.temp) }
+            val cleanupFailure = prepared?.let { cleanupTempAfterFailure(it.temp, syncCleanupDirectory = true) }
             throw failure.withSafeReplaceCleanupFailure(cleanupFailure)
         } finally {
             prepared?.let { activeTempFiles.remove(it.temp) }
         }
     }
 
-    private fun cleanupTempAfterFailure(temp: Path): Throwable? =
+    override suspend fun publishNew(
+        path: StoragePath,
+        input: InputStream,
+        expectedSizeBytes: Long,
+        maxBytes: Long,
+        tempName: String,
+    ): StorageAttributes {
+        if (path.isRoot || expectedSizeBytes < 0 || expectedSizeBytes > maxBytes || maxBytes < 0) {
+            input.close()
+            throw VfsException(VfsErrorCode.INVALID_ARGUMENT, "invalid publishNew target or size")
+        }
+        val target = LocalPath.resolve(root, path.segments)
+        if (tempName.isEmpty() || tempName.contains('/') || tempName.contains('\\')) {
+            input.close()
+            throw VfsException(VfsErrorCode.INVALID_ARGUMENT, "invalid publishNew temporary name")
+        }
+        val temp = target.parent.resolve(tempName)
+        activeTempFiles.add(temp)
+        var tempKey: Any? = null
+        var stagingCreated = false
+        var primaryFailure: Throwable? = null
+        try {
+            if (Files.exists(temp, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(temp)) {
+                throw VfsException(VfsErrorCode.ALREADY_EXISTS, "publishNew temporary name is already in use")
+            }
+            call("publishNew preflight", VfsEffect.NONE) {
+                lifetime.call {
+                    requireExistingParentDirectory(path)
+                    if (metadataOrNull(plain(path)) !=
+                        null
+                    ) {
+                        throw VfsException(VfsErrorCode.ALREADY_EXISTS, "publishNew target already exists")
+                    }
+                }
+            }
+            call("publishNew copy", VfsEffect.UNKNOWN) {
+                lifetime.call {
+                    val channel = FileChannel.open(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+                    stagingCreated = true
+                    channel.use { output ->
+                        val key = readTemporaryFileIdentity(temp)
+                        tempKey = key
+                        val copied = copyExactly(input, output, expectedSizeBytes, maxBytes)
+                        if (copied != expectedSizeBytes) {
+                            throw VfsException(
+                                VfsErrorCode.STORAGE_ERROR,
+                                "publishNew input length differs from expected size",
+                                effect = VfsEffect.PARTIAL,
+                            )
+                        }
+                        output.force(true)
+                        if (!sameTemp(temp, key) || Files.size(temp) != expectedSizeBytes) {
+                            throw VfsException(
+                                VfsErrorCode.STORAGE_ERROR,
+                                "publishNew temporary file identity or size changed",
+                                effect = VfsEffect.PARTIAL,
+                            )
+                        }
+                    }
+                }
+            }
+            call("publishNew target check", VfsEffect.PARTIAL) {
+                if (metadataOrNull(plain(path)) !=
+                    null
+                ) {
+                    throw VfsException(VfsErrorCode.ALREADY_EXISTS, "publishNew target already exists", effect = VfsEffect.PARTIAL)
+                }
+            }
+            call("publishNew commit", VfsEffect.UNKNOWN) {
+                lifetime.call {
+                    if (!sameTemp(temp, tempKey)) {
+                        throw VfsException(
+                            VfsErrorCode.STORAGE_ERROR,
+                            "publishNew temporary file identity changed before commit",
+                            effect = VfsEffect.PARTIAL,
+                        )
+                    }
+                    try {
+                        // ATOMIC_MOVE may replace an existing target. A same-filesystem
+                        // hard link publishes the fsynced inode only when target is absent.
+                        Files.createLink(target, temp)
+                    } catch (exists: java.nio.file.FileAlreadyExistsException) {
+                        throw VfsException(
+                            VfsErrorCode.ALREADY_EXISTS,
+                            "publishNew target already exists",
+                            effect = VfsEffect.PARTIAL,
+                        ).apply { initCause(exists) }
+                    }
+                    syncPublishedDirectory(target.parent, "publishNew")
+                }
+            }
+            return call("publishNew attributes", VfsEffect.PARTIAL) {
+                afterChange { lifetime.call { statOrFail(plain(path), "publishNew", VfsEffect.PARTIAL) } }
+            }
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) {
+                var failure: Throwable? = null
+                try {
+                    input.close()
+                } catch (e: Throwable) {
+                    failure = e
+                }
+                activeTempFiles.remove(temp)
+                try {
+                    if (stagingCreated && sameTemp(temp, tempKey)) {
+                        Files.deleteIfExists(temp)
+                        syncPublishedDirectory(temp.parent, "publishNew cleanup")
+                    }
+                } catch (e: Throwable) {
+                    if (failure == null) failure = e else failure.addSuppressed(e)
+                }
+                failure?.let {
+                    val primary = primaryFailure
+                    if (primary == null) {
+                        throw if (it is VfsException) {
+                            it
+                        } else {
+                            VfsException(
+                                VfsErrorCode.STORAGE_ERROR,
+                                "publishNew cleanup failed after publication",
+                                effect = VfsEffect.PARTIAL,
+                            ).apply { initCause(it) }
+                        }
+                    }
+                    primary.addSuppressed(it)
+                }
+            }
+        }
+    }
+
+    private fun sameTemp(
+        path: Path,
+        expected: Any?,
+    ): Boolean {
+        if (expected == null || Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            return false
+        }
+        val actual = fileKeyReader(path) ?: return false
+        return if (expected is ByteArray && actual is ByteArray) expected.contentEquals(actual) else actual == expected
+    }
+
+    private fun readTemporaryFileIdentity(path: Path): Any {
+        val identity =
+            try {
+                fileKeyReader(path)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Throwable) {
+                throw VfsException(
+                    VfsErrorCode.STORAGE_ERROR,
+                    "publishNew could not determine temporary file identity",
+                    effect = VfsEffect.PARTIAL,
+                ).apply { initCause(failure) }
+            }
+        return identity ?: throw VfsException(
+            VfsErrorCode.STORAGE_ERROR,
+            "publishNew could not determine temporary file identity",
+            effect = VfsEffect.PARTIAL,
+        )
+    }
+
+    private fun copyExactly(
+        input: InputStream,
+        channel: FileChannel,
+        expected: Long,
+        max: Long,
+    ): Long {
+        var total = 0L
+        val buffer = ByteArray(64 * 1024)
+        while (total < expected) {
+            val count = input.read(buffer, 0, minOf(buffer.size.toLong(), expected - total).toInt())
+            if (count < 0) break
+            if (total + count >
+                max
+            ) {
+                throw VfsException(VfsErrorCode.LIMIT_EXCEEDED, "publishNew exceeds maxBytes", effect = VfsEffect.PARTIAL)
+            }
+            channel.write(ByteBuffer.wrap(buffer, 0, count))
+            total += count
+        }
+        if (input.read() !=
+            -1
+        ) {
+            throw VfsException(
+                VfsErrorCode.STORAGE_ERROR,
+                "publishNew input length differs from expected size",
+                effect = VfsEffect.PARTIAL,
+            )
+        }
+        return total
+    }
+
+    private fun cleanupTempAfterFailure(
+        temp: Path,
+        syncCleanupDirectory: Boolean,
+    ): Throwable? =
         try {
             tempCleaner(temp)
+            if (syncCleanupDirectory) syncPublishedDirectory(temp.parent, "safeReplace cleanup")
             null
         } catch (cleanup: Throwable) {
             cleanup
         }
+
+    /**
+     * 发布点和清理点共用同一条目录持久边界。能力为 false 时保留原有原子非 durable 行为；
+     * 能力为 true 时任何实际同步失败都必须原样成为失败，不能静默降级。
+     */
+    private fun syncPublishedDirectory(
+        parent: Path,
+        operation: String,
+    ) {
+        if (!capabilities.durableDirectorySync) return
+        try {
+            directorySyncer(parent)
+        } catch (failure: Throwable) {
+            throw VfsException(
+                VfsErrorCode.STORAGE_ERROR,
+                "local storage $operation could not synchronize the parent directory",
+                effect = VfsEffect.PARTIAL,
+            ).apply { initCause(failure) }
+        }
+    }
 
     /**
      * 建目录。已经存在就算成功；上级目录不存在时后端会一层层补出来。

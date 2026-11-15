@@ -21,13 +21,10 @@ import io.ktor.server.request.receiveChannel
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
-import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import java.io.ByteArrayOutputStream
 
 /**
  * 最小 HTTP 入库路由（CT07-B2）。
@@ -56,9 +53,12 @@ fun Application.ingestion(
         }
     routing {
         post("/v1/conversations/turns") {
-            val client =
-                registry.authenticate(call.request.headers[HttpHeaders.Authorization])
+            val principal =
+                registry.auth.authenticate(call.request.headers[HttpHeaders.Authorization])
                     ?: return@post call.respondError(HttpStatusCode.Unauthorized, "UNAUTHORIZED")
+            val client =
+                (principal as? ServerPrincipal.Ingestion)?.client
+                    ?: return@post call.respondError(HttpStatusCode.Forbidden, "FORBIDDEN")
 
             val declaredLength = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
             if (declaredLength != null && declaredLength > maxTurnBytes.toLong()) {
@@ -125,43 +125,6 @@ fun Application.ingestion(
     }
 }
 
-/**
- * 严格 UTF-8 解码（F2）。
- *
- * 不用 `String(bytes, Charsets.UTF_8)`：它会把非法字节静默替换成 U+FFFD，等于篡改正文。
- * 这里用 `CharsetDecoder` + `CodingErrorAction.REPORT`，非法字节 / 截断序列 / 孤立代理项
- * 一律返回 null，由调用方映射 400；合法 U+FFFD（EF BF BD）是正常字符，不受影响。
- */
-private fun decodeStrictUtf8(bytes: ByteArray): String? =
-    try {
-        Charsets.UTF_8
-            .newDecoder()
-            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
-            .decode(java.nio.ByteBuffer.wrap(bytes))
-            .toString()
-    } catch (failure: java.nio.charset.CharacterCodingException) {
-        null
-    }
-
-/** 流式读取请求体；超过 [maxTurnBytes] 返回 null（调用方映射 413），不读取完整请求。 */
-private suspend fun readBodyUpTo(
-    channel: ByteReadChannel,
-    maxTurnBytes: Int,
-): ByteArray? {
-    val output = ByteArrayOutputStream()
-    val buffer = ByteArray(BUFFER_SIZE)
-    var total = 0
-    while (true) {
-        val read = channel.readAvailable(buffer, 0, buffer.size)
-        if (read == -1) break
-        total += read
-        if (total > maxTurnBytes) return null
-        output.write(buffer, 0, read)
-    }
-    return output.toByteArray()
-}
-
 private fun mapIngestion(code: ContextIngestionErrorCode): Pair<HttpStatusCode, String> =
     when (code) {
         ContextIngestionErrorCode.INVALID_TURN -> HttpStatusCode.BadRequest to "INVALID_TURN"
@@ -179,13 +142,6 @@ private fun roleOf(value: String): ChatRole =
         else -> throw IllegalArgumentException("unsupported message role")
     }
 
-private suspend fun io.ktor.server.application.ApplicationCall.respondError(
-    status: HttpStatusCode,
-    code: String,
-) {
-    respondText("""{"error":"$code"}""", ContentType.Application.Json, status)
-}
-
 @Serializable
 private data class TurnPayload(
     @SerialName("runtime_id") val runtimeId: String,
@@ -201,5 +157,3 @@ private data class MessagePayload(
     val role: String,
     val content: String,
 )
-
-private const val BUFFER_SIZE = 8192

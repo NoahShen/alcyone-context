@@ -1,0 +1,396 @@
+{
+  "schemaVersion": 1,
+  "datasetVersion": "ct31-v1",
+  "sourceManifestSha256": "13e2d0679f573d8361a03d290aa1c0ffe98f5ceadd55e50c77815cbefcbffd0a",
+  "semanticQualityEvaluated": false,
+  "integrity": {
+    "status": "PASS",
+    "datasetCount": 6,
+    "sampleCount": 72,
+    "importedCount": 28,
+    "newCount": 44,
+    "duplicateIdCount": 0,
+    "danglingReferenceCount": 0,
+    "privacyViolationCount": 0
+  },
+  "datasets": [
+    {
+      "id": "extraction",
+      "task": "EXTRACTION",
+      "sampleCount": 12,
+      "importedCount": 4,
+      "newCount": 8,
+      "sha256": "205a5e410f1bf13ef9aa08a65256e56cd8cecde047033e9b938aa199a5d62a93",
+      "riskTags": [
+        "BUDGET_BOUNDARY",
+        "EMPTY_RESULT",
+        "H1_FABRICATION",
+        "H2_CRITICAL_CONFLICT_MISS",
+        "H3_CORRECTION_REGRESSION",
+        "INJECTION_BOUNDARY",
+        "NORMAL_PATH",
+        "SOURCE_FIDELITY",
+        "TEMPORAL_SCOPE",
+        "UNCERTAINTY"
+      ],
+      "criticalCount": 4,
+      "expectedEmptyCount": 2,
+      "expectedIds": [
+        "ext-001",
+        "ext-002",
+        "ext-003",
+        "ext-004",
+        "ext-005",
+        "ext-006",
+        "ext-007",
+        "ext-008",
+        "ext-009",
+        "ext-010",
+        "ext-011",
+        "ext-012"
+      ],
+      "protocolStatus": "NOT_RUN",
+      "semanticStatus": "NOT_EVALUATED"
+    },
+    {
+      "id": "scanner",
+      "task": "CANDIDATE_SCANNER",
+      "sampleCount": 12,
+      "importedCount": 0,
+      "newCount": 12,
+      "sha256": "6e34b6ec72381b78e62ac25e9efb9f0dc4785669a6242385dbddfa804d4223a6",
+      "riskTags": [
+        "EMPTY_RESULT",
+        "H1_FABRICATION",
+        "H2_CRITICAL_CONFLICT_MISS",
+        "H3_CORRECTION_REGRESSION",
+        "INJECTION_BOUNDARY",
+        "NORMAL_PATH",
+        "PROTOCOL_BOUNDARY",
+        "SOURCE_FIDELITY",
+        "TEMPORAL_SCOPE",
+        "UNCERTAINTY"
+      ],
+      "criticalCount": 4,
+      "expectedEmptyCount": 3,
+      "expectedIds": [
+        "sc-001",
+        "sc-002",
+        "sc-003",
+        "sc-004",
+        "sc-005",
+        "sc-006",
+        "sc-007",
+        "sc-008",
+        "sc-009",
+        "sc-010",
+        "sc-011",
+        "sc-012"
+      ],
+      "protocolStatus": "NOT_RUN",
+      "semanticStatus": "NOT_EVALUATED"
+    },
+    {
+      "id": "governance",
+      "task": "GOVERNANCE",
+      "sampleCount": 12,
+      "importedCount": 0,
+      "newCount": 12,
+      "sha256": "6dcd0d0269fe98f5011e1bdf807b12345ade419d1078c8f8d562b941576918b7",
+      "riskTags": [
+        "H1_FABRICATION",
+        "H2_CRITICAL_CONFLICT_MISS",
+        "H3_CORRECTION_REGRESSION",
+        "INJECTION_BOUNDARY",
+        "NORMAL_PATH",
+        "SOURCE_FIDELITY",
+        "TEMPORAL_SCOPE",
+        "UNCERTAINTY"
+      ],
+      "criticalCount": 4,
+      "expectedEmptyCount": 0,
+      "expectedIds": [
+        "gov-001",
+        "gov-002",
+        "gov-003",
+        "gov-004",
+        "gov-005",
+        "gov-006",
+        "gov-007",
+        "gov-008",
+        "gov-009",
+        "gov-010",
+        "gov-011",
+        "gov-012"
+      ],
+      "protocolStatus": "NOT_RUN",
+      "semanticStatus": "NOT_EVALUATED"
+    },
+    {
+      "id": "retrieval",
+      "task": "MEMORY_SEARCH",
+      "sampleCount": 12,
+      "importedCount": 10,
+      "newCount": 2,
+      "sha256": "ad714220180ccf6813d72fb5bfd85dcd3950c86f7200edf9830e8689368ea2d9",
+      "riskTags": [
+        "EMPTY_RESULT",
+        "H1_FABRICATION",
+        "H2_CRITICAL_CONFLICT_MISS",
+        "H3_CORRECTION_REGRESSION",
+        "INJECTION_BOUNDARY",
+        "NORMAL_PATH",
+        "PROTOCOL_BOUNDARY",
+        "SOURCE_FIDELITY",
+        "TEMPORAL_SCOPE",
+        "UNCERTAINTY"
+      ],
+      "criticalCount": 3,
+      "expectedEmptyCount": 3,
+      "expectedIds": [
+        "ret-001",
+        "ret-002",
+        "ret-003",
+        "ret-004",
+        "ret-005",
+        "ret-006",
+        "ret-007",
+        "ret-008",
+        "ret-009",
+        "ret-010",
+        "ret-011",
+        "ret-012"
+      ],
+      "protocolStatus": "NOT_RUN",
+      "semanticStatus": "NOT_EVALUATED"
+    },
+    {
+      "id": "memory-map",
+      "task": "MEMORY_MAP",
+      "sampleCount": 12,
+      "importedCount": 10,
+      "newCount": 2,
+      "sha256": "bc93c54891b1a3db2925852a62e1ac23ad642f9831dd07005852d5a52d4ec859",
+      "riskTags": [
+        "BUDGET_BOUNDARY",
+        "EMPTY_RESULT",
+        "H1_FABRICATION",
+        "H2_CRITICAL_CONFLICT_MISS",
+        "H3_CORRECTION_REGRESSION",
+        "INJECTION_BOUNDARY",
+        "NORMAL_PATH",
+        "PROTOCOL_BOUNDARY",
+        "SOURCE_FIDELITY",
+        "TEMPORAL_SCOPE",
+        "UNCERTAINTY"
+      ],
+      "criticalCount": 2,
+      "expectedEmptyCount": 1,
+      "expectedIds": [
+        "map-001",
+        "map-002",
+        "map-003",
+        "map-004",
+        "map-005",
+        "map-006",
+        "map-007",
+        "map-008",
+        "map-009",
+        "map-010",
+        "map-011",
+        "map-012"
+      ],
+      "protocolStatus": "NOT_RUN",
+      "semanticStatus": "NOT_EVALUATED"
+    },
+    {
+      "id": "dreaming",
+      "task": "DREAMING",
+      "sampleCount": 12,
+      "importedCount": 4,
+      "newCount": 8,
+      "sha256": "fdb67ebd605d7f398e41bd25345168d19b2c1330d5a6b4be56850116e6793eee",
+      "riskTags": [
+        "DUPLICATE_REGRESSION",
+        "EMPTY_RESULT",
+        "H1_FABRICATION",
+        "H2_CRITICAL_CONFLICT_MISS",
+        "H3_CORRECTION_REGRESSION",
+        "INJECTION_BOUNDARY",
+        "NORMAL_PATH",
+        "SOURCE_FIDELITY",
+        "TEMPORAL_SCOPE"
+      ],
+      "criticalCount": 7,
+      "expectedEmptyCount": 4,
+      "expectedIds": [
+        "dream-001",
+        "dream-002",
+        "dream-003",
+        "dream-004",
+        "dream-005",
+        "dream-006",
+        "dream-007",
+        "dream-008",
+        "dream-009",
+        "dream-010",
+        "dream-011",
+        "dream-012"
+      ],
+      "protocolStatus": "NOT_RUN",
+      "semanticStatus": "NOT_EVALUATED"
+    }
+  ],
+  "inputCoverage": {
+    "retrieval": {
+      "sampleCount": 12,
+      "samplesWithRelevantJudgments": 9,
+      "samplesWithoutRelevantJudgments": 3,
+      "totalCandidateCount": 21,
+      "semanticMetricsStatus": "NOT_APPLICABLE_NO_CAPTURED_OUTPUT",
+      "semanticMetricsNote": "Canonical inputs and qrels are summarized; no retrieval outputs were captured.",
+      "samples": [
+        {
+          "sampleId": "ret-001",
+          "k": 3,
+          "candidateCount": 2,
+          "relevantJudgmentCount": 1,
+          "expectedEmpty": false
+        },
+        {
+          "sampleId": "ret-002",
+          "k": 3,
+          "candidateCount": 3,
+          "relevantJudgmentCount": 2,
+          "expectedEmpty": false
+        },
+        {
+          "sampleId": "ret-003",
+          "k": 3,
+          "candidateCount": 2,
+          "relevantJudgmentCount": 0,
+          "expectedEmpty": true
+        },
+        {
+          "sampleId": "ret-004",
+          "k": 3,
+          "candidateCount": 2,
+          "relevantJudgmentCount": 1,
+          "expectedEmpty": false
+        },
+        {
+          "sampleId": "ret-005",
+          "k": 3,
+          "candidateCount": 2,
+          "relevantJudgmentCount": 1,
+          "expectedEmpty": false
+        },
+        {
+          "sampleId": "ret-006",
+          "k": 3,
+          "candidateCount": 2,
+          "relevantJudgmentCount": 2,
+          "expectedEmpty": false
+        },
+        {
+          "sampleId": "ret-007",
+          "k": 3,
+          "candidateCount": 2,
+          "relevantJudgmentCount": 1,
+          "expectedEmpty": false
+        },
+        {
+          "sampleId": "ret-008",
+          "k": 3,
+          "candidateCount": 2,
+          "relevantJudgmentCount": 1,
+          "expectedEmpty": false
+        },
+        {
+          "sampleId": "ret-009",
+          "k": 3,
+          "candidateCount": 1,
+          "relevantJudgmentCount": 1,
+          "expectedEmpty": false
+        },
+        {
+          "sampleId": "ret-010",
+          "k": 3,
+          "candidateCount": 0,
+          "relevantJudgmentCount": 0,
+          "expectedEmpty": true
+        },
+        {
+          "sampleId": "ret-011",
+          "k": 3,
+          "candidateCount": 0,
+          "relevantJudgmentCount": 0,
+          "expectedEmpty": true
+        },
+        {
+          "sampleId": "ret-012",
+          "k": 3,
+          "candidateCount": 3,
+          "relevantJudgmentCount": 2,
+          "expectedEmpty": false
+        }
+      ]
+    }
+  },
+  "fakeReplay": {
+    "scenarioCount": 4,
+    "status": "COMPLETED_FIXTURE_REPLAY",
+    "semanticEvidence": false
+  },
+  "aggregates": {
+    "search": {
+      "k": 3,
+      "qrelsVersion": "ct31-v1",
+      "recallAtK": {
+        "status": "NOT_APPLICABLE",
+        "value": null,
+        "numerator": 0,
+        "denominator": 0
+      },
+      "criticalRecallAtK": {
+        "status": "NOT_APPLICABLE",
+        "value": null,
+        "numerator": 0,
+        "denominator": 0
+      },
+      "mrrAtK": {
+        "status": "NOT_APPLICABLE",
+        "value": null,
+        "numerator": 0,
+        "denominator": 0
+      },
+      "finalRecallAtK": {
+        "status": "NOT_APPLICABLE",
+        "value": null,
+        "numerator": 0,
+        "denominator": 0
+      }
+    },
+    "extraction": {
+      "mustFactRecall": {
+        "status": "NOT_APPLICABLE",
+        "value": null,
+        "numerator": 0,
+        "denominator": 0
+      },
+      "emptyExactRate": {
+        "status": "NOT_APPLICABLE",
+        "value": null,
+        "numerator": 0,
+        "denominator": 0
+      }
+    }
+  },
+  "criticalErrors": [],
+  "modelRun": {
+    "status": "NOT_RUN",
+    "usage": null,
+    "cost": null,
+    "reason": "B2 is offline-only; real-model execution remains locked."
+  }
+}

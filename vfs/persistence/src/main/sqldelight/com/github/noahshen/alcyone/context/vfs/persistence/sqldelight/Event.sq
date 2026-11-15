@@ -1,7 +1,8 @@
 -- 事件日志表：随成功的状态变更在同一事务写入，事件永远引用当时的 Node ID。
 -- occurred_at 与 node 表一致，存 epoch 毫秒。
 CREATE TABLE event (
-    event_id TEXT NOT NULL PRIMARY KEY,
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
     event_type TEXT NOT NULL,
     node_id TEXT,
     occurred_at INTEGER NOT NULL,
@@ -11,7 +12,18 @@ CREATE TABLE event (
     target_uri TEXT
 );
 
+CREATE INDEX event_occurred_at ON event (occurred_at, sequence);
+
 -- 普通 INSERT：事件主键重复是错误，交给调用方映射 STATE_ERROR。
 insertEvent:
 INSERT INTO event (event_id, event_type, node_id, occurred_at, uri, operation_id, source_uri, target_uri)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+selectEventsAfter:
+SELECT * FROM event
+WHERE sequence > ?
+ORDER BY sequence
+LIMIT ?;
+
+selectLatestEventSequence:
+SELECT COALESCE(MAX(sequence), 0) FROM event;

@@ -1,5 +1,6 @@
 package com.github.noahshen.alcyone.context.memory.runtime.extraction
 
+import com.github.noahshen.alcyone.context.memory.api.AdminWorkerStatus
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleErrorCode
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
 import com.github.noahshen.alcyone.context.memory.api.SessionKey
@@ -113,6 +114,8 @@ internal class ExtractionPipeline(
     internal fun idleCronForTesting(): IdleCron? = idleCron
 
     internal fun schedulerForTesting(): ExtractionScheduler = scheduler
+
+    internal fun workerStatus(): AdminWorkerStatus = scheduler.workerStatus()
 
     internal fun idleTriggerForTesting(): IdleTrigger = idleTrigger
 

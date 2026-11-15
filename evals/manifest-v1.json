@@ -1,0 +1,271 @@
+{
+  "datasetVersion": "ct31-v1",
+  "schemaVersion": 1,
+  "routeDefinitions": {
+    "extraction-v1": {
+      "task": "EXTRACTION",
+      "stages": [
+        {
+          "stage": "EXTRACTION",
+          "task": "EXTRACTION",
+          "profile": "fixture-extraction",
+          "model": "fixture-extraction-model",
+          "promptPath": "context/core/src/main/resources/prompts/extraction-v1.md",
+          "promptSha256": "56d3278f4613499170d0cde9a06fb757ae45637b9579040c521289715849b2c8",
+          "schemaPath": "context/core/src/main/resources/prompts/extraction-schema-v1.json",
+          "schemaSha256": "041e7916957c75f8128ca7f2e2d049322945a0051b68236d7b86ffb680d563b0",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        }
+      ]
+    },
+    "scanner-v1": {
+      "task": "CANDIDATE_SCANNER",
+      "stages": [
+        {
+          "stage": "CANDIDATE_SCANNER",
+          "task": "CANDIDATE_SCANNER",
+          "profile": "fixture-scanner",
+          "model": "fixture-scanner-model",
+          "promptPath": "context/core/src/main/resources/prompts/organization-candidate-v1.md",
+          "promptSha256": "da45adb19451f3e5ecd2dbab1ab0710189b73c996ec6c35cc84b1be1aa63eda1",
+          "schemaPath": "context/core/src/main/resources/prompts/organization-candidate-schema-v1.json",
+          "schemaSha256": "2ef03476aaab3c7f752bb7b3cb0bfd6c217b53d803f97ed0a274fd601b3d672f",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        }
+      ]
+    },
+    "governance-v1": {
+      "task": "GOVERNANCE",
+      "stages": [
+        {
+          "stage": "GOVERNANCE",
+          "task": "GOVERNANCE",
+          "profile": "fixture-governance",
+          "model": "fixture-governance-model",
+          "promptPath": "context/core/src/main/resources/prompts/organization-governance-v1.md",
+          "promptSha256": "bce0dc53b2ba86cb5ec6edee5ba4c5843bbae128d6ce09d4ec342d89280c7d92",
+          "schemaPath": "context/core/src/main/resources/prompts/organization-governance-schema-v1.json",
+          "schemaSha256": "5fe5baf06a6f9d0824a7ae0ac67f8eac3e1d55e3b1e78ccf017d366ecddad384",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        }
+      ]
+    },
+    "search-v1": {
+      "task": "MEMORY_SEARCH",
+      "stages": [
+        {
+          "stage": "MEMORY_SEARCH_SCANNER",
+          "task": "MEMORY_SEARCH",
+          "profile": "fixture-memory-search",
+          "model": "fixture-memory-search-model",
+          "promptPath": "context/core/src/main/resources/prompts/memory-search-v1.md",
+          "promptSha256": "171906ece4c4d1a84a9437b09d961fc60bd045e2c7e907259754f1f45c21c16c",
+          "schemaPath": "context/core/src/main/resources/prompts/memory-search-schema-v1.json",
+          "schemaSha256": "16f8de9c907ddf7750c65f70da8905e98176f9516ad517ccc2cfd58a0ea0a879",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        },
+        {
+          "stage": "MEMORY_SEARCH_RERANK",
+          "task": "MEMORY_SEARCH",
+          "profile": "fixture-memory-rerank",
+          "model": "fixture-memory-rerank-model",
+          "promptPath": "context/core/src/main/resources/prompts/memory-search-rerank-v1.md",
+          "promptSha256": "caa29c26a0eab7e2951b92a47afbf5bd8fee50f2422d8865849adb0e2a821b86",
+          "schemaPath": "context/core/src/main/resources/prompts/memory-search-rerank-schema-v1.json",
+          "schemaSha256": "162c2e0f2f22025cb31d7c634e71cd9c8ec4edefa923945a20347e03921ad662",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        }
+      ]
+    },
+    "memory-map-v1": {
+      "task": "MEMORY_MAP",
+      "stages": [
+        {
+          "stage": "MEMORY_MAP",
+          "task": "MEMORY_MAP",
+          "profile": "fixture-memory-map",
+          "model": "fixture-memory-map-model",
+          "promptPath": "context/core/src/main/resources/prompts/memory-map-v1.md",
+          "promptSha256": "e333f259071bb68bec37f2cabac61f1448c8d183742a8a4bc1e873e4987ce56d",
+          "schemaPath": "context/core/src/main/resources/prompts/memory-map-schema-v1.json",
+          "schemaSha256": "1b6b576d7446332d590b8cee52a5c4654c107e99197cf44cd46373eaec9478a3",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        }
+      ]
+    },
+    "dreaming-v1": {
+      "task": "DREAMING",
+      "stages": [
+        {
+          "stage": "TOPIC_DISCOVERY",
+          "task": "DREAMING",
+          "profile": "fixture-topic",
+          "model": "fixture-topic-model",
+          "promptPath": "context/core/src/main/resources/prompts/dreaming-topic-discovery-v1.md",
+          "promptSha256": "c6eaf65b9c4d0a8e911a247367db76e33fed2a39243eab055df0e4537303ebef",
+          "schemaPath": "context/core/src/main/resources/prompts/dreaming-topic-discovery-schema-v1.json",
+          "schemaSha256": "7a081d1dfb242e64a90266c3c7867052bd198fa51240e8620308d346f876a084",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        },
+        {
+          "stage": "TOPIC_CONSOLIDATION",
+          "task": "DREAMING",
+          "profile": "fixture-topic",
+          "model": "fixture-topic-model",
+          "promptPath": "context/core/src/main/resources/prompts/dreaming-topic-consolidation-v1.md",
+          "promptSha256": "dfea2bbadf29163b67c54252abc4ff3e14245471f15f1154dbc017e832eb2ca5",
+          "schemaPath": "context/core/src/main/resources/prompts/dreaming-topic-consolidation-schema-v1.json",
+          "schemaSha256": "cf6ce4b8e6a191fb6b5fa6ce586b89f238026ca50ad8edabde483f4369c7a486",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        },
+        {
+          "stage": "CANDIDATE_SEARCH",
+          "task": "DREAMING",
+          "profile": "fixture-memory-search",
+          "model": "fixture-memory-search-model",
+          "promptPath": "context/core/src/main/resources/prompts/memory-search-v1.md",
+          "promptSha256": "171906ece4c4d1a84a9437b09d961fc60bd045e2c7e907259754f1f45c21c16c",
+          "schemaPath": "context/core/src/main/resources/prompts/memory-search-schema-v1.json",
+          "schemaSha256": "16f8de9c907ddf7750c65f70da8905e98176f9516ad517ccc2cfd58a0ea0a879",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        },
+        {
+          "stage": "EVIDENCE_NOVELTY",
+          "task": "DREAMING",
+          "profile": "fixture-evidence",
+          "model": "fixture-evidence-model",
+          "promptPath": "context/core/src/main/resources/prompts/dreaming-evidence-novelty-v1.md",
+          "promptSha256": "6c533545482f467f86e8fdf601af411a0cc4744040be1964fd0f847c26bbc8a9",
+          "schemaPath": "context/core/src/main/resources/prompts/dreaming-evidence-novelty-schema-v1.json",
+          "schemaSha256": "78de683e7821531a4c84a4b260a921dc527eb843fd6119664c137cf444f4a499",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        },
+        {
+          "stage": "EVIDENCE_RAW",
+          "task": "DREAMING",
+          "profile": "fixture-evidence",
+          "model": "fixture-evidence-model",
+          "promptPath": "context/core/src/main/resources/prompts/dreaming-evidence-raw-v1.md",
+          "promptSha256": "d60df5a68defe2311747cfcb4be81f99bbcde7d1b41f4852553769885f96bce6",
+          "schemaPath": "context/core/src/main/resources/prompts/dreaming-evidence-raw-schema-v1.json",
+          "schemaSha256": "c8933ff7f1a61911cef428310cc5ac20519698213866bb0a232a98228d952368",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        },
+        {
+          "stage": "EVIDENCE_CONVERSATION",
+          "task": "DREAMING",
+          "profile": "fixture-evidence",
+          "model": "fixture-evidence-model",
+          "promptPath": "context/core/src/main/resources/prompts/dreaming-evidence-conversation-v1.md",
+          "promptSha256": "fc766aa0487253f7c5f8c660e345c79ae556d5d5f27339c270b8b9af4b55a65c",
+          "schemaPath": "context/core/src/main/resources/prompts/dreaming-evidence-conversation-schema-v1.json",
+          "schemaSha256": "306b26ec4e74e7b605418e3b70ec7a688285f4288de25633d8be0f3d3e2904d7",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        },
+        {
+          "stage": "REFLECTION",
+          "task": "DREAMING",
+          "profile": "fixture-reflection",
+          "model": "fixture-reflection-model",
+          "promptPath": "context/core/src/main/resources/prompts/dreaming-reflection-v1.md",
+          "promptSha256": "516f2b6b468bb691eccba6afa0124abc500b94e06a7151f9b5149ea3f8f12c04",
+          "schemaPath": "context/core/src/main/resources/prompts/dreaming-reflection-schema-v1.json",
+          "schemaSha256": "120051b4ed851cb21cd325ae196112bad5671ac88a3a119ed7a7600b3203ea4e",
+          "jsonMode": "JSON_SCHEMA",
+          "maxInputTokens": 64000,
+          "maxOutputTokens": 4096
+        }
+      ]
+    }
+  },
+  "datasets": [
+    {
+      "id": "extraction",
+      "task": "EXTRACTION",
+      "path": "evals/datasets/extraction.jsonl",
+      "count": 12,
+      "importedCount": 4,
+      "newCount": 8,
+      "sha256": "205a5e410f1bf13ef9aa08a65256e56cd8cecde047033e9b938aa199a5d62a93",
+      "route": "extraction-v1"
+    },
+    {
+      "id": "scanner",
+      "task": "CANDIDATE_SCANNER",
+      "path": "evals/datasets/scanner.jsonl",
+      "count": 12,
+      "importedCount": 0,
+      "newCount": 12,
+      "sha256": "6e34b6ec72381b78e62ac25e9efb9f0dc4785669a6242385dbddfa804d4223a6",
+      "route": "scanner-v1"
+    },
+    {
+      "id": "governance",
+      "task": "GOVERNANCE",
+      "path": "evals/datasets/governance.jsonl",
+      "count": 12,
+      "importedCount": 0,
+      "newCount": 12,
+      "sha256": "6dcd0d0269fe98f5011e1bdf807b12345ade419d1078c8f8d562b941576918b7",
+      "route": "governance-v1"
+    },
+    {
+      "id": "retrieval",
+      "task": "MEMORY_SEARCH",
+      "path": "evals/datasets/retrieval.jsonl",
+      "count": 12,
+      "importedCount": 10,
+      "newCount": 2,
+      "sha256": "ad714220180ccf6813d72fb5bfd85dcd3950c86f7200edf9830e8689368ea2d9",
+      "route": "search-v1"
+    },
+    {
+      "id": "memory-map",
+      "task": "MEMORY_MAP",
+      "path": "evals/datasets/memory-map.jsonl",
+      "count": 12,
+      "importedCount": 10,
+      "newCount": 2,
+      "sha256": "bc93c54891b1a3db2925852a62e1ac23ad642f9831dd07005852d5a52d4ec859",
+      "route": "memory-map-v1"
+    },
+    {
+      "id": "dreaming",
+      "task": "DREAMING",
+      "path": "evals/datasets/dreaming.jsonl",
+      "count": 12,
+      "importedCount": 4,
+      "newCount": 8,
+      "sha256": "fdb67ebd605d7f398e41bd25345168d19b2c1330d5a6b4be56850116e6793eee",
+      "route": "dreaming-v1"
+    }
+  ],
+  "results": {
+    "offlineReport": "evals/results/offline-v1.json",
+    "realModelResults": "evals/results/real-model-not-run-v1.json"
+  }
+}

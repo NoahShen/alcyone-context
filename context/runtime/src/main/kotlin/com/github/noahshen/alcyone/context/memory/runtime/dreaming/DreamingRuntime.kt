@@ -1,8 +1,10 @@
 package com.github.noahshen.alcyone.context.memory.runtime.dreaming
 
+import com.github.noahshen.alcyone.context.memory.api.AdminWorkerStatus
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleErrorCode
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
 import com.github.noahshen.alcyone.context.memory.api.DreamingResult
+import com.github.noahshen.alcyone.context.memory.api.WorkerState
 import com.github.noahshen.alcyone.context.memory.core.ContextDatabase
 import com.github.noahshen.alcyone.context.memory.core.dreaming.DreamingCommitter
 import com.github.noahshen.alcyone.context.memory.core.id.MemoryIdGenerator
@@ -115,6 +117,19 @@ internal class DreamingRuntime(
         }
         failure?.let { throw it }
     }
+
+    internal fun workerStatus(): AdminWorkerStatus =
+        synchronized(lock) {
+            AdminWorkerStatus(
+                state =
+                    when {
+                        state == State.CLOSING || state == State.CLOSED -> WorkerState.STOPPED
+                        coordinator.workerActive() -> WorkerState.RUNNING
+                        else -> WorkerState.IDLE
+                    },
+                lastFailure = null,
+            )
+        }
 
     internal fun coordinatorForTesting() = coordinator
 

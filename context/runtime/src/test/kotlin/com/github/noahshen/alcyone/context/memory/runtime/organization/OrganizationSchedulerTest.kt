@@ -46,6 +46,7 @@ class OrganizationSchedulerTest {
                 assertTrue(scheduler.request())
                 firstEntered.await()
                 assertEquals(OrganizationWorkerStatus.RUNNING, scheduler.statusForTesting())
+                assertEquals(OrganizationWorkerStatus.RUNNING, scheduler.workerStatus())
                 assertEquals(1, scheduler.triggerCountForTesting(), "轮末前不得提前消费 Trigger")
 
                 assertTrue(scheduler.request())
@@ -56,6 +57,7 @@ class OrganizationSchedulerTest {
                 releaseFirst.complete(Unit)
                 awaitOrganizationUntil { scheduler.roundCountForTesting() == 3L }
                 awaitOrganizationUntil { scheduler.statusForTesting() == OrganizationWorkerStatus.IDLE }
+                assertEquals(scheduler.statusForTesting(), scheduler.workerStatus())
                 assertEquals(0, scheduler.triggerCountForTesting())
                 assertEquals(listOf(1, 2, 3), rounds)
                 assertEquals(1, scheduler.workerCreationCountForTesting(), "运行期 Trigger 不得创建第二个 Worker")
@@ -107,7 +109,9 @@ class OrganizationSchedulerTest {
                     awaitOrganizationUntil { scheduler.roundCountForTesting() == 2L }
                     awaitOrganizationUntil { scheduler.statusForTesting() == OrganizationWorkerStatus.IDLE }
                     assertEquals(OrganizationWorkerStatus.IDLE, scheduler.statusForTesting(), "普通失败不得进入 FAILED")
-                    val log = capture.logs.single { it.formattedMessage.contains("organization.round.failed") }
+                    // status 先于日志发布，await 日志避免与 worker 的 logger.warn 竞争。
+                    awaitOrganizationUntil { capture.recordsFor("organization.round.failed").isNotEmpty() }
+                    val log = capture.recordsFor("organization.round.failed").single()
                     assertEquals(Level.WARN, log.level)
                     assertNull(log.throwable)
                     assertFalse(log.formattedMessage.contains("ct16-round-marker"))
@@ -247,7 +251,9 @@ class OrganizationSchedulerTest {
                     awaitOrganizationUntil { scheduler.statusForTesting() == OrganizationWorkerStatus.FAILED }
                     assertFalse(scheduler.request())
                     assertEquals(1, attempts.get())
-                    val log = capture.logs.single { it.formattedMessage.contains("organization.worker.stopped") }
+                    // FAILED 在锁内发布，logger.warn 在其后执行，必须等日志落定再断言。
+                    awaitOrganizationUntil { capture.recordsFor("organization.worker.stopped").isNotEmpty() }
+                    val log = capture.recordsFor("organization.worker.stopped").single()
                     assertNull(log.throwable)
                     assertFalse(log.formattedMessage.contains("ct16-worker-cancel-marker"))
                 } finally {

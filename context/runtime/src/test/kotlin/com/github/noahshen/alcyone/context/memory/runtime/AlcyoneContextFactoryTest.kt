@@ -203,7 +203,8 @@ class AlcyoneContextFactoryTest {
             assertEquals(ContextLifecycleState.RUNNING, status.lifecycle)
             assertTrue(status.storage.databaseInitialized)
             assertEquals(fixture.contextPath.toAbsolutePath().normalize(), Path.of(status.storage.databasePath))
-            assertTrue(status.workers.isEmpty())
+            assertEquals(setOf("backup"), status.workers.keys)
+            assertEquals(WorkerState.IDLE, status.workers.getValue("backup").state)
             assertTrue(Files.exists(fixture.vfsPath), "VFS 状态库应由 VFS 自己创建")
 
             context.close()

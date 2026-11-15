@@ -28,6 +28,19 @@ internal object ContextPathIsolation {
     /** 单条配置路径允许解析的符号链接次数上限（与常见 OS 的 ELOOP 阈值一致）。 */
     private const val MAX_SYMLINK_REVISIONS: Int = 40
 
+    fun requireExistingOrPlannedSafeDirectory(
+        path: Path,
+        field: String,
+    ) {
+        if (Files.exists(path) && (!Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(path))) {
+            throw invalid("$field must be a real directory, not a symbolic link or file")
+        }
+        val real = canonicalizeForComparison(path, field)
+        if (real.startsWith(Path.of("/dev")) || real.startsWith(Path.of("/proc")) || real.startsWith(Path.of("/sys"))) {
+            throw invalid("$field is unsafe")
+        }
+    }
+
     fun requireDistinctDatabases(
         contextDatabase: Path,
         vfsDatabase: Path,

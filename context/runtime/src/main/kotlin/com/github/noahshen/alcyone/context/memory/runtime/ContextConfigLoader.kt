@@ -5,6 +5,7 @@ import com.github.noahshen.alcyone.context.memory.api.ContextConfigException
 import com.github.noahshen.alcyone.context.memory.core.ingestion.IngestionLimits
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmResponseFormat
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmTask
+import com.github.noahshen.alcyone.context.memory.runtime.backup.BackupConfig
 import com.github.noahshen.alcyone.context.memory.runtime.dreaming.DreamingConfig
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.ExtractionConfig
 import com.github.noahshen.alcyone.context.memory.runtime.extraction.ExtractionDefaults
@@ -58,7 +59,7 @@ import kotlin.time.Duration.Companion.seconds
  *   `triggers.periodic.enabled/cron`；固定 Asia/Shanghai，出现 `timezone` 即未知键；
  *   `context.memoryMap` 自 CT19-B1 起严格解析 `refresh.periodic.enabled/cron`；固定 Asia/Shanghai，
  *   出现 `timezone` 即未知键；`context.retrieval.search.maxLimit` 自 CT20-B2 起严格解析。
- *   `context.dreaming` 自 CT22-B1 起严格解析可选 cron 与 IANA timezone；`backup` 仍为蓝图已知但尚未实现的子树，整体接受、不校验、不展开 ENV；
+ *   `context.dreaming` 严格解析可选 cron 与 IANA timezone；`context.backup` 解析 SQLite 快照发布配置。
  * - 类型/范围错误 → `INVALID_CONFIG`，消息只带字段路径与原因，不回显原始值；
  * - 解析使用 SnakeYAML `SafeConstructor` 并禁止重复键；
  * - 加载过程只读配置：不建目录、不建文件、不打开数据库、不连网络、不启协程。
@@ -119,6 +120,17 @@ object ContextConfigLoader {
     /** 从 [yamlPath] 加载配置；ENV 取进程环境变量。 */
     fun load(yamlPath: Path): ContextConfig = load(yamlPath, System::getenv)
 
+    /** Evaluation-only profile loading; secret environment lookup remains explicit and never printed. */
+    fun loadEvaluationLlm(
+        yamlPath: Path,
+        environment: (String) -> String? = System::getenv,
+    ): com.github.noahshen.alcyone.context.memory.runtime.llm.LlmConfig =
+        load(yamlPath, environment).llm
+            ?: throw com.github.noahshen.alcyone.context.memory.api.ContextConfigException(
+                com.github.noahshen.alcyone.context.memory.api.ContextConfigErrorCode.INVALID_CONFIG,
+                "context.llm is required for evaluation",
+            )
+
     /**
      * 从 [yamlPath] 加载配置，ENV 由 [environment] 提供。
      *
@@ -152,6 +164,7 @@ object ContextConfigLoader {
         val memoryMapConfig = parseMemoryMap(contextSection, environment)
         val retrievalConfig = parseRetrieval(contextSection)
         val dreamingConfig = parseDreaming(contextSection, environment)
+        val backupConfig = parseBackup(contextSection, baseDirectory, environment)
 
         val vfsDatabase =
             parseVfsDatabase(vfsSection, baseDirectory, environment)
@@ -189,6 +202,7 @@ object ContextConfigLoader {
             memoryMap = memoryMapConfig,
             retrieval = retrievalConfig,
             dreaming = dreamingConfig,
+            backup = backupConfig,
         )
     }
 
@@ -483,6 +497,48 @@ object ContextConfigLoader {
             throw invalid("context.dreaming.timezone is not allowed without context.dreaming.cron")
         }
         return DreamingConfig(cron = cron, timezone = timezone)
+    }
+
+    private fun parseBackup(
+        context: Map<String, Any?>?,
+        baseDirectory: Path,
+        environment: (String) -> String?,
+    ): BackupConfig {
+        val section = context?.get("backup") ?: return BackupConfig()
+        val backup = asStringMap(section, "context.backup")
+        rejectUnknown(backup, setOf("cron", "timezone", "uri", "tempDirectory", "maxBytes"), "context.backup")
+        val cron = stringAt(backup, "cron", "context.backup.cron", environment)
+        val timezone = stringAt(backup, "timezone", "context.backup.timezone", environment) ?: DreamingConfig.DEFAULT_TIMEZONE
+        val uri =
+            stringAt(backup, "uri", "context.backup.uri", environment)?.let { value ->
+                try {
+                    com.github.noahshen.alcyone.context.vfs.VfsUri
+                        .parse(value)
+                } catch (
+                    _: VfsException,
+                ) {
+                    throw invalid("context.backup.uri must be a valid VFS URI")
+                }
+            } ?: BackupConfig().uri
+        val temp =
+            stringAt(backup, "tempDirectory", "context.backup.tempDirectory", environment)?.let {
+                resolvePath(baseDirectory, it, "context.backup.tempDirectory")
+            }
+        val maxBytes =
+            longAt(backup, "maxBytes", "context.backup.maxBytes")?.takeIf { it > 0 }
+                ?: if (backup.containsKey("maxBytes")) {
+                    throw invalid("context.backup.maxBytes must be positive")
+                } else {
+                    BackupConfig().maxBytes
+                }
+        val effectiveTemp =
+            temp?.toAbsolutePath()?.normalize()
+                ?: Path
+                    .of(System.getProperty("java.io.tmpdir"))
+                    .toAbsolutePath()
+                    .normalize()
+                    .resolve("alcyone-backup-${java.lang.ProcessHandle.current().pid()}")
+        return BackupConfig(cron, timezone, uri, temp, maxBytes, effectiveTemp)
     }
 
     private fun parseLlmProfile(

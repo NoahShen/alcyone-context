@@ -1,5 +1,7 @@
 package com.github.noahshen.alcyone.context.vfs
 
+import java.io.InputStream
+
 /**
  * Context System 使用的统一文件访问接口。
  *
@@ -7,6 +9,13 @@ package com.github.noahshen.alcyone.context.vfs
  * 本接口在 `vfs/api` 只声明签名，实现位于 `vfs/core` / `vfs/runtime`。
  */
 interface Vfs {
+    /** 将完整流发布到全新路径；实现负责关闭输入流，状态失败不回删正式文件。 */
+    suspend fun publishNew(
+        uri: VfsUri,
+        input: InputStream,
+        options: PublishOptions,
+    ): NodeInfo = throw VfsException(VfsErrorCode.UNSUPPORTED_OPERATION, "publishNew is not supported by this VFS implementation", uri)
+
     /** 只读取文件，不懒注册，不产生变更事件；目录输入返回 TYPE_MISMATCH。 */
     suspend fun read(
         uri: VfsUri,

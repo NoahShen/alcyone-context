@@ -252,6 +252,27 @@ class StorageFakeImpl(
         return StorageAttributes(NodeType.FILE, content.size.toLong(), now)
     }
 
+    override suspend fun publishNew(
+        path: StoragePath,
+        input: InputStream,
+        expectedSizeBytes: Long,
+        maxBytes: Long,
+        tempName: String,
+    ): StorageAttributes {
+        try {
+            val bytes = input.readNBytes(maxBytes.toInt() + 1)
+            if (bytes.size.toLong() > maxBytes) throw VfsException(VfsErrorCode.LIMIT_EXCEEDED, "stream exceeds maxBytes")
+            if (bytes.size.toLong() !=
+                expectedSizeBytes
+            ) {
+                throw VfsException(VfsErrorCode.STORAGE_ERROR, "stream length differs from expected size")
+            }
+            return write(path, bytes, StorageWriteMode.CREATE_NEW)
+        } finally {
+            input.close()
+        }
+    }
+
     override suspend fun safeReplace(
         path: StoragePath,
         content: ByteArray,

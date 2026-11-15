@@ -212,7 +212,7 @@ class MountConfigurationTest {
      * 真实旧版本库（mount 表只有两列）里已有挂载时必须明确拒绝，并说清怎么办。
      *
      * 旧库造法：先按当前代码建库并写入真实 Node 与挂载，再把 mount 表退回版本 1 的两列形状、
-     * 把 `user_version` 置回 1。版本 1 与版本 2 的差别**只有**这两列，其余表逐字未变。
+     * 删掉当前版本才引入的 journal、把 `user_version` 置回 1，得到版本 1 的真实表形。
      */
     @Test
     @Timeout(60)
@@ -239,7 +239,7 @@ class MountConfigurationTest {
             }
         }
 
-    /** 建一个真的版本 1 库：当前结构写入数据，再退回 mount 的两列形状并把版本号置回 1。 */
+    /** 建一个真的版本 1 库：当前结构写入数据，再删 journal、退回 mount 两列并把版本号置回 1。 */
     private suspend fun writeVersionOneDatabase(mount: Pair<String, String>): String =
         VfsStateDatabase
             .file(database)
@@ -259,6 +259,18 @@ class MountConfigurationTest {
             }.also {
                 // 旧库的 mount 行只有逻辑路径和 storageKey 两列。
                 raw("INSERT INTO mount (vfs_path, storage_key) VALUES ('${mount.first}', '${mount.second}')")
+                raw("DROP TABLE recovery_operation")
+                raw("DROP TABLE consumer_cursor")
+                raw("DROP INDEX event_occurred_at")
+                raw("ALTER TABLE event RENAME TO event_v4")
+                raw(
+                    "CREATE TABLE event (event_id TEXT NOT NULL PRIMARY KEY, event_type TEXT NOT NULL, node_id TEXT, " +
+                        "occurred_at INTEGER NOT NULL, uri TEXT NOT NULL, operation_id TEXT, source_uri TEXT, target_uri TEXT)",
+                )
+                raw(
+                    "INSERT INTO event SELECT event_id, event_type, node_id, occurred_at, uri, operation_id, source_uri, target_uri FROM event_v4",
+                )
+                raw("DROP TABLE event_v4")
                 raw("ALTER TABLE mount DROP COLUMN physical_root")
                 raw("ALTER TABLE mount DROP COLUMN backend_type")
                 raw("PRAGMA user_version = 1")

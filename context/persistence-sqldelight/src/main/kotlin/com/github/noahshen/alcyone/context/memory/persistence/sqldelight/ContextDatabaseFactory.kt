@@ -28,6 +28,33 @@ import java.util.Properties
  * SQLSTATE/驱动类型名，**绝不将原 SQLException 作为 cause 传递**。
  */
 object ContextDatabaseFactory {
+    /** Independently verify the current schema of a completed backup without mutating the source database. */
+    fun verifyBackupSchema(path: Path) {
+        // The Online Backup API creates a WAL-mode destination. Normalize the temporary copy
+        // after validation so publication is a single self-contained file, without -wal/-shm.
+        java.sql.DriverManager.getConnection(SqliteUrls.openReadWriteUrl(path)).use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("PRAGMA user_version").use { rows ->
+                    check(rows.next() && rows.getLong(1) == ContextDatabaseInitializer.SCHEMA_VERSION) {
+                        "published backup has an unexpected schema version"
+                    }
+                }
+            }
+            check(missingObjects(connection).isEmpty()) { "published backup is missing required schema objects" }
+            connection.createStatement().use { statement ->
+                statement.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                statement.executeQuery("PRAGMA journal_mode=DELETE").use { rows ->
+                    check(rows.next() && rows.getString(1).equals("delete", ignoreCase = true)) {
+                        "SQLite backup could not be made self-contained"
+                    }
+                }
+            }
+        }
+    }
+
+    /** Required schema objects, shared with the backup's independent read-back validation. */
+    internal fun missingObjects(connection: Connection): Set<String> = missingObjectsInternal(connection)
+
     /** 默认读 Slot 数（技术实现设计 §2.1 建议 2，可配置）。 */
     const val DEFAULT_READ_SLOTS: Int = 2
 
@@ -53,7 +80,7 @@ object ContextDatabaseFactory {
         )
 
     /** 校验六表 + 五索引是否齐备，返回缺失项。 */
-    internal fun missingObjects(connection: Connection): Set<String> {
+    private fun missingObjectsInternal(connection: Connection): Set<String> {
         val present = mutableSetOf<String>()
         connection.createStatement().use { statement ->
             statement.executeQuery("SELECT name FROM sqlite_master WHERE type IN ('table','index')").use { rs ->

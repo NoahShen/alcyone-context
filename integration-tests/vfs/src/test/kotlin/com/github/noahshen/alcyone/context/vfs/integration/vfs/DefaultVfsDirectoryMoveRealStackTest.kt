@@ -310,6 +310,8 @@ private class DirectoryCollidingEventUnitOfWork(
 
                     override val metadata get() = scope.metadata
 
+                    override val recovery get() = scope.recovery
+
                     override val events: EventRepository =
                         object : EventRepository {
                             private var first = true
@@ -383,6 +385,8 @@ private class PausingDirectoryCommitUnitOfWork(
                     override val metadata get() = scope.metadata
 
                     override val events get() = scope.events
+
+                    override val recovery get() = scope.recovery
                 }
             block(decorated)
         }

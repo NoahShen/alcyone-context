@@ -17,10 +17,12 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.IOException
+import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import kotlin.test.assertFailsWith
 
 /** CT17 B1：真实 LocalFs 同目录临时文件与原子 replace 探针。 */
@@ -45,6 +47,28 @@ class LocalFsSafeReplaceTest {
         assertEquals("new", Files.readString(target))
         assertFalse(Files.exists(source))
     }
+
+    @Test
+    fun `default create directory sync capability matches a real directory force probe`() =
+        runBlocking {
+            val actualProbe =
+                runCatching {
+                    FileChannel.open(root, StandardOpenOption.READ).use { channel -> channel.force(true) }
+                }.isSuccess
+            val osName = System.getProperty("os.name")
+            val osArch = System.getProperty("os.arch")
+            LocalFsStorage.create(root).use { storage ->
+                val capability = storage.capabilities().durableDirectorySync
+                println(
+                    "LocalFs directory sync probe: os=$osName arch=$osArch actual=$actualProbe capability=$capability",
+                )
+                assertEquals(actualProbe, capability, "default capability must match the real directory open+force probe")
+                if (osName == "Mac OS X" && osArch == "aarch64") {
+                    assertTrue(actualProbe, "current macOS arm64 directory open+force probe must succeed")
+                    assertTrue(capability, "current macOS arm64 default LocalFsStorage capability must be true")
+                }
+            }
+        }
 
     @Test
     fun `capability is backed by a real probe and first creation is complete`() =
@@ -130,6 +154,99 @@ class LocalFsSafeReplaceTest {
                     assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
                     assertEquals(VfsEffect.UNKNOWN, failure.effect)
                     assertEquals("old", Files.readString(target))
+                    assertTrue(temporaryFiles().isEmpty())
+                }
+        }
+
+    @Test
+    fun `successful replacement synchronizes the exact target parent only after atomic move`() =
+        runBlocking {
+            Files.createDirectory(root.resolve("notes"))
+            val target = Files.writeString(root.resolve("notes/a.txt"), "old")
+            val events = mutableListOf<String>()
+            LocalFsStorage
+                .open(
+                    root,
+                    LocalFsOptions(),
+                    atomicMover = { temporary, destination ->
+                        Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                        events += "move:${Files.readString(destination)}:temp=${Files.exists(temporary)}"
+                    },
+                    directorySyncer = { directory ->
+                        val directoryLabel =
+                            when {
+                                Files.isSameFile(directory, root) -> "root"
+                                Files.isSameFile(directory, root.resolve("notes")) -> "notes"
+                                else -> "unexpected:$directory"
+                            }
+                        events += "sync:$directoryLabel:${Files.readString(target)}"
+                    },
+                ).use { storage ->
+                    assertTrue(storage.capabilities().durableDirectorySync)
+                    assertEquals(listOf("sync:root:old"), events, "construction must use the same actual directory sync seam")
+
+                    events.clear()
+                    storage.safeReplace(StoragePath.parse("notes/a.txt"), "new".toByteArray())
+
+                    assertEquals(listOf("move:new:temp=false", "sync:notes:new"), events)
+                    assertTrue(temporaryFiles().isEmpty())
+                }
+        }
+
+    @Test
+    fun `post-rename directory sync failure keeps new bytes and cleanup failure stays suppressed`() =
+        runBlocking {
+            val target = Files.writeString(root.resolve("a.txt"), "old")
+            var syncCalls = 0
+            LocalFsStorage
+                .open(
+                    root,
+                    LocalFsOptions(),
+                    directorySyncer = {
+                        syncCalls++
+                        if (syncCalls >= 2) throw IOException("injected safeReplace directory sync failure $syncCalls")
+                    },
+                ).use { storage ->
+                    assertTrue(storage.capabilities().durableDirectorySync)
+                    assertEquals(1, syncCalls)
+
+                    val failure = assertFailsWith<VfsException> { storage.safeReplace(StoragePath.parse("a.txt"), "new".toByteArray()) }
+
+                    assertEquals(VfsErrorCode.STORAGE_ERROR, failure.code)
+                    assertEquals(VfsEffect.PARTIAL, failure.effect)
+                    assertEquals("new", Files.readString(target), "the published replacement must not be rolled back")
+                    assertEquals(3, syncCalls)
+                    assertEquals("injected safeReplace directory sync failure 2", failure.cause?.message)
+                    assertTrue(
+                        failure.suppressed.any { it.cause?.message == "injected safeReplace directory sync failure 3" },
+                        "cleanup sync failure must be suppressed by the primary publication failure: ${failure.suppressed}",
+                    )
+                    assertFalse(failure.message.orEmpty().contains(root.toString()), "public failure must not expose the physical path")
+                    assertTrue(temporaryFiles().isEmpty())
+                }
+        }
+
+    @Test
+    fun `durable directory sync false does not block the real atomic replacement path`() =
+        runBlocking {
+            val target = Files.writeString(root.resolve("a.txt"), "old")
+            var syncCalls = 0
+            LocalFsStorage
+                .open(
+                    root,
+                    LocalFsOptions(),
+                    directorySyncer = {
+                        syncCalls++
+                        throw IOException("injected unsupported directory sync")
+                    },
+                ).use { storage ->
+                    assertFalse(storage.capabilities().durableDirectorySync)
+                    assertEquals(1, syncCalls, "only the real capability probe may call sync")
+
+                    storage.safeReplace(StoragePath.parse("a.txt"), "new".toByteArray())
+
+                    assertEquals("new", Files.readString(target))
+                    assertEquals(1, syncCalls, "a false capability must preserve the existing atomic non-durable behavior")
                     assertTrue(temporaryFiles().isEmpty())
                 }
         }

@@ -35,7 +35,7 @@ class OrganizationRuntimeWiringTest {
     private val now = Instant.parse("2026-11-08T02:00:00Z")
 
     @Test
-    fun `organization null keeps no pipeline and empty workers`() =
+    fun `organization null keeps no organization pipeline or worker`() =
         wiringTest { fixture ->
             fixture.initialize()
             val context = AlcyoneContextFactory.create(fixture.config(), fixture.vfsConfig())
@@ -43,7 +43,7 @@ class OrganizationRuntimeWiringTest {
             try {
                 runBlocking { context.start() }
                 assertNull(impl.organizationPipelineForTesting())
-                assertTrue(context.status().workers.isEmpty())
+                assertTrue("organization" !in context.status().workers)
             } finally {
                 context.close()
             }

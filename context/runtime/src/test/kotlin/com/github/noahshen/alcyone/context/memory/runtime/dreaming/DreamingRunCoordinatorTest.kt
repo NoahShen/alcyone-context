@@ -87,6 +87,7 @@ class DreamingRunCoordinatorTest {
                 try {
                     val firstRun = async(Dispatchers.Default) { coordinator.runOnce() }
                     entered.await()
+                    assertTrue(coordinator.workerActive())
                     insertDreamingTurn(fixture.database, sessionTurnId = "second", timestamp = base.plusSeconds(1))
                     release.complete(Unit)
                     val first = firstRun.await()

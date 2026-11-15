@@ -4,6 +4,7 @@ import com.github.noahshen.alcyone.context.vfs.DeleteOptions
 import com.github.noahshen.alcyone.context.vfs.NodeId
 import com.github.noahshen.alcyone.context.vfs.NodeInfo
 import com.github.noahshen.alcyone.context.vfs.NodeMetadata
+import com.github.noahshen.alcyone.context.vfs.PublishOptions
 import com.github.noahshen.alcyone.context.vfs.ReadOptions
 import com.github.noahshen.alcyone.context.vfs.StatOptions
 import com.github.noahshen.alcyone.context.vfs.Vfs
@@ -42,6 +43,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration
 
@@ -181,6 +183,12 @@ class AlcyoneVfs private constructor(
         uri: VfsUri,
         options: ReadOptions,
     ): ByteArray = operation("read") { delegate.read(uri, options) }
+
+    override suspend fun publishNew(
+        uri: VfsUri,
+        input: InputStream,
+        options: PublishOptions,
+    ): NodeInfo = operation("publishNew") { delegate.publishNew(uri, input, options) }
 
     /**
      * 流式读取：和 [read] 一样登记在途，**多一样**是把流登记到 [openStreams]。
@@ -457,6 +465,7 @@ class AlcyoneVfs private constructor(
                             limits = resolved.limits,
                             streamTotalLimit = resolved.streamTotalLimit,
                             events = EventFactory(),
+                            publishTempNames = { key -> storages.getValue(key).publishTempNames.next() },
                         ),
                     notifier = notifier,
                     // 释放顺序：注入的 → 通知器 → 各块盘（本地与 WebDAV 一视同仁） → 状态库 → 独占锁（锁最后放）。

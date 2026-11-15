@@ -1,0 +1,53 @@
+-- 操作恢复 journal。它记录已经持久化的意图和已观察事实，不是对外部 Storage 的分布式事务。
+-- 时间均存 epoch 毫秒；diagnostic_code 只允许 Core 白名单值，禁止保存异常正文或凭据。
+CREATE TABLE recovery_operation (
+    operation_id TEXT NOT NULL PRIMARY KEY,
+    operation_kind TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    source_uri TEXT,
+    target_uri TEXT NOT NULL,
+    source_storage_key TEXT,
+    target_storage_key TEXT NOT NULL,
+    node_id TEXT,
+    diagnostic_code TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX recovery_operation_pending
+ON recovery_operation (phase, updated_at, operation_id);
+
+insertRecoveryOperation:
+INSERT INTO recovery_operation (
+    operation_id, operation_kind, phase, generation, source_uri, target_uri,
+    source_storage_key, target_storage_key, node_id, diagnostic_code, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectRecoveryById:
+SELECT *
+FROM recovery_operation
+WHERE operation_id = ?;
+
+selectPendingRecoveries:
+SELECT *
+FROM recovery_operation
+WHERE phase != 'CLOSED'
+ORDER BY created_at, operation_id;
+
+-- generation 与旧 phase 同时参与 CAS；CLOSED 的行永远不匹配后续更新。
+advanceRecoveryOperation:
+UPDATE recovery_operation
+SET phase = ?, generation = ?, diagnostic_code = ?, updated_at = ?
+WHERE operation_id = ? AND generation = ? AND phase = ? AND phase != 'CLOSED';
+
+diagnoseRecoveryOperation:
+UPDATE recovery_operation
+SET generation = ?, diagnostic_code = ?, updated_at = ?
+WHERE operation_id = ? AND generation = ? AND phase != 'CLOSED';
+
+closeRecoveryOperation:
+UPDATE recovery_operation
+SET phase = 'CLOSED', generation = ?, diagnostic_code = 'NONE', updated_at = ?
+WHERE operation_id = ? AND generation = ? AND phase = ? AND phase != 'CLOSED';

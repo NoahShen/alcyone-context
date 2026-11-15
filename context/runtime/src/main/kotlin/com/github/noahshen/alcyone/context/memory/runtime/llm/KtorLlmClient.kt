@@ -1,5 +1,6 @@
 package com.github.noahshen.alcyone.context.memory.runtime.llm
 
+import com.github.noahshen.alcyone.context.memory.api.AdminLlmTaskUsage
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleErrorCode
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
 import com.github.noahshen.alcyone.context.memory.core.llm.ConservativeTokenEstimator
@@ -141,6 +142,8 @@ class KtorLlmClient(
     /** 按 `(task, profile)` 的进程内最小统计（重启清零、不落库）。 */
     private val statistics = LlmCallStatistics()
 
+    internal fun adminSnapshots(): List<AdminLlmTaskUsage> = statistics.snapshots()
+
     /** 测试/诊断用：读取某 `(task, profile)` 的统计；无记录返回 `null`。 */
     internal fun statsForTesting(
         task: LlmTask,
@@ -149,6 +152,32 @@ class KtorLlmClient(
 
     /** 测试接缝：owner 清理的最后一步用它替代 `httpClient.close()`（生产为 null）。 */
     internal var closeActionForTesting: (() -> Unit)? = null
+
+    /**
+     * CT31 evaluation-only raw exchange seam. Production leaves this as the default no-op. Installing an
+     * observer does not alter request construction, retry classification, exceptions, timeouts or cancellation.
+     */
+    internal var rawExchangeObserver: RawExchangeObserver = RawExchangeObserver { }
+
+    /**
+     * Per-logical-call sinks keyed by the callId carried in the coroutine context. Concurrent evaluation calls on
+     * the same client therefore never overwrite or drain each other's attempts. Empty in production (no-op).
+     */
+    private val rawExchangeObservers = java.util.concurrent.ConcurrentHashMap<String, RawExchangeObserver>()
+
+    internal fun installRawExchangeObserver(
+        callId: String,
+        observer: RawExchangeObserver,
+    ) {
+        rawExchangeObservers[callId] = observer
+    }
+
+    internal fun removeRawExchangeObserver(callId: String) {
+        rawExchangeObservers.remove(callId)
+    }
+
+    /** Test/diagnostic: number of installed per-call sinks; zero means the seam is back to no-op. */
+    internal fun rawExchangeObserverCountForTesting(): Int = rawExchangeObservers.size
 
     /** 测试/诊断用：当前生命周期状态名（`RUNNING` / `CLOSING` / `CLOSED`）。 */
     internal fun stateForTesting(): String = synchronized(lock) { state.name }
@@ -289,7 +318,7 @@ class KtorLlmClient(
                 throw timeoutException(request, profile, attempt, "llm total timeout elapsed before the request was sent")
             }
             attempt++
-            when (val outcome = callOnce(request, profile, body, remaining)) {
+            when (val outcome = callOnce(request, profile, body, remaining, attempt)) {
                 is CallOutcome.Success -> {
                     recordSuccess(request, profile, attempt, outcome, decision.estimatedInputTokens, startedAt)
                     return outcome.response
@@ -388,7 +417,9 @@ class KtorLlmClient(
         profile: LlmProfileConfig,
         body: String,
         remainingMillis: Long,
+        attempt: Int,
     ): CallOutcome {
+        val rawCallId = kotlin.coroutines.coroutineContext[RawExchangeCallId]?.value
         val response =
             try {
                 httpClient.post(endpoint(profile.baseUrl)) {
@@ -406,8 +437,10 @@ class KtorLlmClient(
                 }
             } catch (cancellation: CancellationException) {
                 // 调用方取消不是超时也不是网络错误：原样传播，不包装成 LlmException。
+                notifyRawExchange(request, profile, attempt, null, null, RawExchangeFailureKind.CANCELLATION, cancellation, rawCallId)
                 throw cancellation
             } catch (transport: Exception) {
+                notifyRawExchange(request, profile, attempt, null, null, RawExchangeFailureKind.TRANSPORT, transport, rawCallId)
                 return transportFailure(transport, request, profile)
             }
 
@@ -416,15 +449,113 @@ class KtorLlmClient(
             try {
                 response.bodyAsText()
             } catch (cancellation: CancellationException) {
+                notifyRawExchange(
+                    request,
+                    profile,
+                    attempt,
+                    status,
+                    null,
+                    RawExchangeFailureKind.CANCELLATION,
+                    cancellation,
+                    rawCallId,
+                )
                 throw cancellation
             } catch (transport: Exception) {
+                notifyRawExchange(
+                    request,
+                    profile,
+                    attempt,
+                    status,
+                    null,
+                    RawExchangeFailureKind.RESPONSE_READ,
+                    transport,
+                    rawCallId,
+                )
                 return transportFailure(transport, request, profile, status)
             }
 
         if (status !in 200..299) {
+            notifyRawExchange(
+                request = request,
+                profile = profile,
+                attempt = attempt,
+                httpStatus = status,
+                rawResponse = text,
+                failureKind = RawExchangeFailureKind.HTTP_STATUS,
+                error = null,
+                callId = rawCallId,
+            )
             return httpFailure(status, response.headers, text, request, profile)
         }
-        return parseSuccessResponse(text, request, profile, status)
+        return try {
+            val outcome = parseSuccessResponse(text, request, profile, status)
+            val parsedFailure = (outcome as? CallOutcome.Failure)?.failure
+            notifyRawExchange(
+                request = request,
+                profile = profile,
+                attempt = attempt,
+                httpStatus = status,
+                rawResponse = text,
+                failureKind = RawExchangeFailureKind.INVALID_RESPONSE.takeIf { parsedFailure != null },
+                error = null,
+                errorType = parsedFailure?.errorCode?.name,
+                callId = rawCallId,
+            )
+            outcome
+        } catch (failure: Throwable) {
+            notifyRawExchange(
+                request = request,
+                profile = profile,
+                attempt = attempt,
+                httpStatus = status,
+                rawResponse = text,
+                failureKind = RawExchangeFailureKind.INVALID_RESPONSE,
+                error = failure,
+                callId = rawCallId,
+            )
+            throw failure
+        }
+    }
+
+    private fun notifyRawExchange(
+        request: LlmRequest,
+        profile: LlmProfileConfig,
+        attempt: Int,
+        httpStatus: Int?,
+        rawResponse: String?,
+        failureKind: RawExchangeFailureKind?,
+        error: Throwable?,
+        errorType: String? = null,
+        callId: String? = null,
+    ) {
+        val observation =
+            RawExchangeObservation(
+                request = request,
+                profile = profile.name,
+                model = profile.model,
+                attempt = attempt,
+                httpStatus = httpStatus,
+                rawResponse = rawResponse,
+                failureKind = failureKind,
+                errorType = errorType ?: error?.javaClass?.simpleName,
+                callId = callId,
+            )
+        val scoped = callId?.let { rawExchangeObservers[it] }
+        dispatchRawExchange(rawExchangeObserver, observation)
+        if (scoped != null) dispatchRawExchange(scoped, observation)
+    }
+
+    private fun dispatchRawExchange(
+        observer: RawExchangeObserver,
+        observation: RawExchangeObservation,
+    ) {
+        try {
+            observer.onExchange(observation)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Evidence collection is strictly observational. It must never replace the production outcome.
+        }
     }
 
     // ------------------------------------------------------------------ 发送前校验

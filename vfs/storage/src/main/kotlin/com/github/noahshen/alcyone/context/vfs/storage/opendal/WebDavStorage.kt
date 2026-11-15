@@ -16,6 +16,10 @@ import org.apache.opendal.OpenDALException
 import org.apache.opendal.Operator
 import org.apache.opendal.WriteOptions
 import java.io.InputStream
+import java.net.URI
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -55,9 +59,11 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class WebDavStorage private constructor(
     private val operator: Operator,
+    private val endpoint: String,
     /** 整理后的远端根，例如 `/dav/team`。**不含 endpoint 与凭据**，只用于诊断。 */
     val root: String,
     private val capabilities: StorageCapabilities,
+    private val authorization: String?,
 ) : StorageAdapter {
     /**
      * 防止「一边操作一边关闭」，和 [LocalFsStorage] 共用同一把锁。
@@ -118,7 +124,20 @@ class WebDavStorage private constructor(
                             },
                         )
                     opened = operator
-                    WebDavStorage(operator, normalizedRoot, capabilitiesOf(operator))
+                    WebDavStorage(
+                        operator,
+                        normalizedEndpoint,
+                        normalizedRoot,
+                        capabilitiesOf(operator),
+                        if (username.isEmpty()) {
+                            null
+                        } else {
+                            "Basic " +
+                                Base64.getEncoder().encodeToString(
+                                    "$username:$password".toByteArray(StandardCharsets.UTF_8),
+                                )
+                        },
+                    )
                 }
             }
         }
@@ -139,6 +158,7 @@ class WebDavStorage private constructor(
                 boundedRead = capability.read,
                 readOnly = false,
                 atomicReplace = false,
+                atomicPublishNew = false,
             )
         }
     }
@@ -296,6 +316,31 @@ class WebDavStorage private constructor(
                 )
             }
         }
+
+    /** A generic WebDAV server cannot prove both temp-object completeness and atomic no-clobber rename. */
+    override suspend fun publishNew(
+        path: StoragePath,
+        input: InputStream,
+        expectedSizeBytes: Long,
+        maxBytes: Long,
+        tempName: String,
+    ): StorageAttributes {
+        input.use {
+            throw VfsException(
+                VfsErrorCode.UNSUPPORTED_OPERATION,
+                "webdav storage cannot guarantee atomic no-clobber publication on the supported server",
+            )
+        }
+    }
+
+    private fun webUri(path: StoragePath): URI {
+        val relative =
+            path.toRelativeString().split('/').joinToString("/") {
+                URLEncoder.encode(it, StandardCharsets.UTF_8).replace("+", "%20")
+            }
+        val base = (endpoint + if (root == "/") "" else root).trimEnd('/')
+        return URI.create("$base/$relative")
+    }
 
     /**
      * 建目录。已经存在就算成功。

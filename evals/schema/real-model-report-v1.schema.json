@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12",
+  "$id": "https://alcyone.local/evals/real-model-report-v1.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "executionMode", "complete", "selectedSamples", "sampleCount", "model", "profile", "responseFormat", "temperature", "maxAttempts", "selection", "sourceManifestSha256", "semanticJudge", "realUserStudy", "results", "summary"],
+  "additionalProperties": true,
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "kind": { "const": "CT31_PRODUCTION_SEMANTIC_EVALUATION" },
+    "executionMode": { "enum": ["PRODUCTION_COMPONENTS", "OFFLINE_PROTOCOL_BASELINE"] },
+    "realDatabaseAssertions": { "type": "boolean" },
+    "complete": { "type": "boolean" },
+    "completeBlockedBy": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "sampleResultSha256": { "type": "object" },
+    "selectedSampleIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "selectedSamples": { "type": "integer", "minimum": 1 },
+    "sampleCount": { "type": "integer", "minimum": 0 },
+    "model": { "type": "string", "minLength": 1 },
+    "profile": { "type": "string", "minLength": 1 },
+    "responseFormat": { "enum": ["JSON_SCHEMA", "JSON_OBJECT"] },
+    "temperature": { "type": ["number", "null"] },
+    "maxAttempts": { "const": 1 },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task", "sample", "limit"],
+      "properties": {
+        "task": { "type": ["string", "null"] },
+        "sample": { "type": ["string", "null"] },
+        "limit": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "sourceManifestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "evaluationImplementation": {
+      "type": "object",
+      "required": ["version", "sourceSha256"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "sourceSha256": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "rawEvidence": {
+      "type": "object",
+      "properties": {
+        "productionLogicalCalls": { "type": "integer", "minimum": 0 },
+        "productionSucceeded": { "type": "integer", "minimum": 0 },
+        "productionFailed": { "type": "integer", "minimum": 0 },
+        "productionCancelled": { "type": "integer", "minimum": 0 },
+        "productionMissingRawEvidence": { "type": "integer", "minimum": 0 },
+        "judgeLogicalCalls": { "type": "integer", "minimum": 0 },
+        "judgeMissingRawEvidence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "semanticJudge": { "const": "ct31-semantic-judge-v1" },
+    "judgeIndependence": { "const": "ADDITIONAL_CONTROLLED_REVIEW_NOT_INDEPENDENT_MODEL" },
+    "realUserStudy": { "const": false },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["PASS", "FAIL", "REVIEW_REQUIRED", "PROTOCOL_FAILURE", "NOT_RUN", "modelCalls", "inputTokens", "outputTokens", "missingUsageCount", "latencyMs", "truncatedResponses", "tasks", "judgeCalls", "judgeTokenUsageRecorded", "taskCounts"],
+      "properties": {
+        "PASS": { "type": "integer", "minimum": 0 },
+        "FAIL": { "type": "integer", "minimum": 0 },
+        "REVIEW_REQUIRED": { "type": "integer", "minimum": 0 },
+        "PROTOCOL_FAILURE": { "type": "integer", "minimum": 0 },
+        "NOT_RUN": { "type": "integer", "minimum": 0 },
+        "modelCalls": { "type": "integer", "minimum": 0 },
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "missingUsageCount": { "type": "integer", "minimum": 0 },
+        "latencyMs": { "type": "integer", "minimum": 0 },
+        "truncatedResponses": { "type": "integer", "minimum": 0 },
+        "tasks": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "judgeCalls": { "type": "integer", "minimum": 0 },
+        "judgeSucceeded": { "type": "integer", "minimum": 0 },
+        "judgeFailed": { "type": "integer", "minimum": 0 },
+        "judgeCancelled": { "type": "integer", "minimum": 0 },
+        "judgeMissingRawEvidence": { "type": "integer", "minimum": 0 },
+        "judgeTokenUsageRecorded": { "const": false },
+        "taskCounts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "task", "status", "riskTags", "calls", "checks"],
+        "additionalProperties": true,
+        "properties": {
+          "status": { "enum": ["PASS", "FAIL", "REVIEW_REQUIRED", "PROTOCOL_FAILURE", "NOT_RUN"] },
+          "calls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["task", "profile", "model", "promptVersion", "schemaVersion", "promptSha256", "requestSha256", "estimatedInputTokens", "latencyMs", "attempts", "truncated", "output"],
+              "properties": {
+                "requestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "attempts": { "const": 1 },
+                "output": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

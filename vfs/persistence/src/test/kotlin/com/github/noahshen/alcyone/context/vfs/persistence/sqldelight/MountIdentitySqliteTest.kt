@@ -72,7 +72,7 @@ class MountIdentitySqliteTest {
         }
 
     /**
-     * 真实旧版本库（`user_version = 1`、mount 只有两列）升级到版本 2：
+     * 真实旧版本库（`user_version = 1`、mount 只有两列）升级到当前版本：
      * 表结构到位、旧数据一个不少，但**物理身份是空的**——这时候必须拒绝，不能拿新配置自动认证。
      */
     @Test
@@ -82,7 +82,7 @@ class MountIdentitySqliteTest {
             val node = writeVersionOneDatabase(file, mounts = listOf("/resources" to "disk-a"))
 
             VfsStateDatabase.file(file).use { state ->
-                assertEquals(2L, userVersion(file), "打开后应已升级到当前版本")
+                assertEquals(VfsDatabase.Schema.version, userVersion(file), "打开后应已升级到当前版本")
                 assertEquals(node, SqliteNodeRepository(state).findByPath(node.path), "旧 Node 一个不少")
                 assertEquals(1L, state.eventCount(), "旧事件一个不少")
 
@@ -100,7 +100,7 @@ class MountIdentitySqliteTest {
             writeVersionOneDatabase(file, mounts = emptyList())
 
             VfsStateDatabase.file(file).use { state ->
-                assertEquals(2L, userVersion(file))
+                assertEquals(VfsDatabase.Schema.version, userVersion(file))
                 val mounts = SqliteMountRepository(state)
                 assertEquals(emptyList<Any>(), mounts.list())
 
@@ -111,7 +111,8 @@ class MountIdentitySqliteTest {
 
     /**
      * 造一个真的版本 1 库：先按当前代码建库并写入真实 Node 与事件，
-     * 再把 mount 表退回版本 1 的两列形状（`ALTER TABLE ... DROP COLUMN`）并把版本号置回 1。
+     * 再删掉版本 3 才引入的 journal、把 mount 表退回版本 1 的两列形状（`ALTER TABLE ... DROP COLUMN`），
+     * 并把版本号置回 1。
      *
      * 版本 1 与版本 2 的差异只有 mount 这两列，另外三张表逐字未变，所以这个文件与旧代码写出来的等价。
      *
@@ -129,6 +130,20 @@ class MountIdentitySqliteTest {
                 mounts.forEach { (path, key) -> state.insertMount(path, key) }
                 node
             }.also {
+                raw(file, "DROP TABLE recovery_operation")
+                raw(file, "DROP TABLE consumer_cursor")
+                raw(file, "DROP INDEX event_occurred_at")
+                raw(file, "ALTER TABLE event RENAME TO event_v4")
+                raw(
+                    file,
+                    "CREATE TABLE event (event_id TEXT NOT NULL PRIMARY KEY, event_type TEXT NOT NULL, node_id TEXT, " +
+                        "occurred_at INTEGER NOT NULL, uri TEXT NOT NULL, operation_id TEXT, source_uri TEXT, target_uri TEXT)",
+                )
+                raw(
+                    file,
+                    "INSERT INTO event SELECT event_id, event_type, node_id, occurred_at, uri, operation_id, source_uri, target_uri FROM event_v4",
+                )
+                raw(file, "DROP TABLE event_v4")
                 raw(file, "ALTER TABLE mount DROP COLUMN physical_root")
                 raw(file, "ALTER TABLE mount DROP COLUMN backend_type")
                 raw(file, "PRAGMA user_version = 1")

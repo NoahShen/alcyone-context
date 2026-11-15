@@ -15,7 +15,7 @@ import java.nio.file.Path
  * 解析 YAML 的 `server` 分区（CT07-B2）。
  *
  * - 只负责 `server`；`context` / `vfs` 由 Runtime 解析，其他顶层分区忽略；
- * - 严格未知字段：`server`、`server.ingestion`、每个 client 内出现未识别键 → `UNKNOWN_FIELD`（含路径）；
+ * - 严格未知字段：`server`、`auth`、`limits`、`ingestion` 及每个 client 内出现未识别键 → `UNKNOWN_FIELD`（含路径）；
  * - 类型/范围错误、Key 冲突 → `INVALID_CONFIG`，消息只含字段路径、不回显 Key；
  * - 字符串中的 `${ENV_NAME}` 展开；未定义或 trim 后为空 → `MISSING_ENV`（只含路径与 ENV 名）；
  * - 解析结果复制到新的 [ServerConfig]：调用者修改原 YAML/Map 不影响认证。
@@ -23,7 +23,9 @@ import java.nio.file.Path
  * 不访问 Persistence/JDBC，也不启动 Server。
  */
 object ServerConfigLoader {
-    private val SERVER_KEYS = setOf("host", "port", "ingestion")
+    private val SERVER_KEYS = setOf("host", "port", "ingestion", "auth", "limits")
+    private val AUTH_KEYS = setOf("readKey", "adminKey")
+    private val LIMIT_KEYS = setOf("maxSearchBodyBytes", "maxResourceBytes", "requestTimeoutMillis", "readyTimeoutMillis")
     private val INGESTION_KEYS = setOf("clients")
     private val CLIENT_KEYS = setOf("runtimeType", "apiKey")
 
@@ -47,7 +49,41 @@ object ServerConfigLoader {
 
         val ingestion = section(server, "ingestion")
         val clients = if (ingestion == null) emptyMap() else parseClients(ingestion, environment)
-        return ServerConfig(host = host, port = port, clients = clients)
+        val auth = section(server, "auth")
+        val readKey =
+            auth?.let { section ->
+                rejectUnknown(section, AUTH_KEYS, "server.auth")
+                stringAt(section, "readKey", "server.auth.readKey", environment)
+            }
+        val adminKey = auth?.let { section -> stringAt(section, "adminKey", "server.auth.adminKey", environment) }
+        val limits = section(server, "limits")?.let { parseLimits(it) } ?: ServerLimits()
+        return ServerConfig(
+            host = host,
+            port = port,
+            clients = clients,
+            readKey = readKey,
+            adminKey = adminKey,
+            limits = limits,
+        )
+    }
+
+    private fun parseLimits(limits: Map<String, Any?>): ServerLimits {
+        rejectUnknown(limits, LIMIT_KEYS, "server.limits")
+        val maxSearchBodyBytes =
+            intAt(limits, "maxSearchBodyBytes", "server.limits.maxSearchBodyBytes")
+                ?: ServerLimits.DEFAULT_MAX_SEARCH_BODY_BYTES
+        val maxResourceBytes = longAt(limits, "maxResourceBytes", "server.limits.maxResourceBytes")
+        val requestTimeoutMillis =
+            longAt(limits, "requestTimeoutMillis", "server.limits.requestTimeoutMillis")
+                ?: ServerLimits.DEFAULT_REQUEST_TIMEOUT_MILLIS
+        val readyTimeoutMillis =
+            longAt(limits, "readyTimeoutMillis", "server.limits.readyTimeoutMillis")
+                ?: ServerLimits.DEFAULT_READY_TIMEOUT_MILLIS
+        if (maxSearchBodyBytes <= 0) throw invalid("server.limits.maxSearchBodyBytes must be positive")
+        if (maxResourceBytes != null && maxResourceBytes <= 0) throw invalid("server.limits.maxResourceBytes must be positive")
+        if (requestTimeoutMillis <= 0) throw invalid("server.limits.requestTimeoutMillis must be positive")
+        if (readyTimeoutMillis <= 0) throw invalid("server.limits.readyTimeoutMillis must be positive")
+        return ServerLimits(maxSearchBodyBytes, maxResourceBytes, requestTimeoutMillis, readyTimeoutMillis)
     }
 
     private fun parseClients(
@@ -172,6 +208,28 @@ object ServerConfigLoader {
             }
         if (number !in Int.MIN_VALUE..Int.MAX_VALUE) throw invalid("$path must fit in a 32-bit integer")
         return number.toInt()
+    }
+
+    private fun longAt(
+        map: Map<String, Any?>,
+        key: String,
+        path: String,
+    ): Long? {
+        if (!map.containsKey(key)) return null
+        val value = map[key]
+        return when (value) {
+            is Int -> value.toLong()
+            is Long -> value
+            is Short -> value.toLong()
+            is Byte -> value.toLong()
+            is BigInteger ->
+                try {
+                    value.longValueExact()
+                } catch (failure: ArithmeticException) {
+                    throw invalid("$path must fit in a 64-bit integer")
+                }
+            else -> throw invalid("$path must be an integer")
+        }
     }
 
     private fun invalid(detail: String): ContextConfigException = ContextConfigException(ContextConfigErrorCode.INVALID_CONFIG, detail)

@@ -702,6 +702,8 @@ private class CopyCollidingEventUnitOfWork(
 
                     override val metadata get() = scope.metadata
 
+                    override val recovery get() = scope.recovery
+
                     override val events: EventRepository =
                         object : EventRepository {
                             private var first = true

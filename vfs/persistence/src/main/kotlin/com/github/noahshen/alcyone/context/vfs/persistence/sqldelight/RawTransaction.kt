@@ -17,11 +17,12 @@ internal const val COMMIT_SQL = "COMMIT"
 internal const val ROLLBACK_SQL = "ROLLBACK"
 
 /** 同步执行一个事务；`block` 抛出即回滚，回滚失败不掩盖原始异常。 */
-internal fun JdbcDriver.inRawTransaction(block: () -> Unit) {
+internal fun <T> JdbcDriver.inRawTransaction(block: () -> T): T {
     execute(null, BEGIN_SQL, 0)
-    try {
-        block()
+    return try {
+        val result = block()
         execute(null, COMMIT_SQL, 0)
+        result
     } catch (failure: Throwable) {
         runCatching { execute(null, ROLLBACK_SQL, 0) }.exceptionOrNull()?.let { failure.addSuppressed(it) }
         throw failure

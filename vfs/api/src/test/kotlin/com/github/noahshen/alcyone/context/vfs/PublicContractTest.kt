@@ -180,10 +180,23 @@ class PublicContractTest {
         assertTrue(Vfs::class.java.isInterface)
         val methods = Vfs::class.java.declaredMethods.filterNot { it.isSynthetic } // 过滤默认参数桥接方法
         assertEquals(
-            setOf("read", "openStream", "write", "safeReplace", "stat", "getNode", "list", "move", "delete", "getMetadata", "setMetadata"),
+            setOf(
+                "publishNew",
+                "read",
+                "openStream",
+                "write",
+                "safeReplace",
+                "stat",
+                "getNode",
+                "list",
+                "move",
+                "delete",
+                "getMetadata",
+                "setMetadata",
+            ),
             methods.map { it.name }.toSet(),
         )
-        for (method in methods.filterNot { it.name == "safeReplace" }) {
+        for (method in methods.filterNot { it.name in setOf("publishNew", "safeReplace") }) {
             assertTrue(Modifier.isAbstract(method.modifiers), "${method.name} must have no body in vfs/api")
         }
         assertEquals(0, methods.filter { Modifier.isStatic(it.modifiers) }.size)

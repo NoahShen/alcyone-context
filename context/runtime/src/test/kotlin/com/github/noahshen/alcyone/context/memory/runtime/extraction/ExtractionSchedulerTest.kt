@@ -2,6 +2,7 @@ package com.github.noahshen.alcyone.context.memory.runtime.extraction
 
 import com.github.noahshen.alcyone.context.memory.api.ContextLifecycleException
 import com.github.noahshen.alcyone.context.memory.api.SessionKey
+import com.github.noahshen.alcyone.context.memory.api.WorkerState
 import com.github.noahshen.alcyone.context.memory.core.extraction.ExtractionRunner
 import com.github.noahshen.alcyone.context.memory.runtime.llm.Slf4jCapture
 import kotlinx.coroutines.CancellationException
@@ -42,10 +43,13 @@ class ExtractionSchedulerTest {
                     }
                 }
             val scheduler = ExtractionScheduler(runner)
+            assertEquals(WorkerState.IDLE, scheduler.workerStatus().state)
             scheduler.start()
             try {
                 assertTrue(scheduler.request(sessionA))
                 firstStarted.await()
+                assertEquals(WorkerState.RUNNING, scheduler.workerStatus().state)
+                assertNull(scheduler.workerStatus().lastFailure)
                 // 执行期间再触发两次：只加计数，不重复入队。
                 assertTrue(scheduler.request(sessionA))
                 assertTrue(scheduler.request(sessionA))
@@ -59,6 +63,7 @@ class ExtractionSchedulerTest {
                 assertEquals(0, scheduler.pendingForTesting(sessionA))
             } finally {
                 scheduler.closeAsync()
+                assertEquals(WorkerState.STOPPED, scheduler.workerStatus().state)
             }
         }
 
@@ -110,6 +115,8 @@ class ExtractionSchedulerTest {
                     assertTrue(scheduler.request(failing))
                     assertTrue(scheduler.request(sessionB))
                     awaitUntil { scheduler.executionCountForTesting() == 2L }
+                    assertEquals(WorkerState.RUNNING, scheduler.workerStatus().state)
+                    assertNull(scheduler.workerStatus().lastFailure)
 
                     val record = capture.logs.single { it.formattedMessage.contains("extraction.run.failed") }
                     assertEquals(Level.WARN, record.level)
@@ -219,6 +226,8 @@ class ExtractionSchedulerTest {
                 try {
                     assertTrue(scheduler.request(sessionA))
                     awaitUntil { scheduler.stateForTesting() == "CLOSED" }
+                    assertEquals(WorkerState.FAILED, scheduler.workerStatus().state)
+                    assertEquals(true, scheduler.workerStatus().lastFailure)
                     assertEquals(1L, scheduler.executionCountForTesting())
 
                     assertFalse(scheduler.request(sessionA), "终止后不得继续接单")

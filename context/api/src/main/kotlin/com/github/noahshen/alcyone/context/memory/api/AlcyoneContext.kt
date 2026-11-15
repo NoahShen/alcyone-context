@@ -111,11 +111,24 @@ interface AlcyoneContext : AutoCloseable {
             "dreaming is unsupported for this AlcyoneContext implementation",
         )
 
+    /** 创建一个已提交 SQLite 快照并发布到配置的 VFS；返回稳定 URI 后可独立读取。 */
+    suspend fun backupNow(): ContextBackupResult =
+        throw ContextBackupException(ContextBackupErrorCode.UNAVAILABLE, "backup is unsupported for this AlcyoneContext implementation")
+
+    /** 只读 Backup 进程内状态；不做文件或网络探测。 */
+    fun backupStatus(): ContextBackupStatus = ContextBackupStatus(WorkerState.STOPPED)
+
     /** 阻塞宿主关闭实例：等待同一次真实清理结果（含失败）；线程被中断不放弃清理。 */
     override fun close()
 
     /** 协程宿主关闭入口：与 [close] 共享同一次真实清理结果；等待者取消只取消自己。 */
     suspend fun closeAsync()
+
+    /** Third-party implementations remain not-ready until they implement an authoritative probe. */
+    suspend fun checkReady(): Boolean = false
+
+    /** Safe process-local administrative facts; unknown or unconfigured capabilities remain null. */
+    suspend fun getAdminStatus(): ContextAdminStatus = ContextAdminStatus(lifecycle = getStatus().lifecycle)
 
     /** 返回当前生命周期、真实存储路径与**已缓存**的数据库可用事实；不做 I/O，不探测文件/连接。 */
     suspend fun getStatus(): ContextStatus

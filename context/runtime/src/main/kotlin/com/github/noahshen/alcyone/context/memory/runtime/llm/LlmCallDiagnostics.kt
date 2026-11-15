@@ -1,5 +1,6 @@
 package com.github.noahshen.alcyone.context.memory.runtime.llm
 
+import com.github.noahshen.alcyone.context.memory.api.AdminLlmTaskUsage
 import com.github.noahshen.alcyone.context.memory.core.llm.LlmTask
 import com.github.noahshen.alcyone.context.memory.core.llm.TokenUsage
 import java.util.concurrent.ConcurrentHashMap
@@ -153,6 +154,24 @@ internal class LlmCallStatistics {
         val counters = entries.computeIfAbsent(Key(task, profile)) { Counters() }
         synchronized(counters) { counters.recordFailure(attempts) }
     }
+
+    fun snapshots(): List<AdminLlmTaskUsage> =
+        entries.map { (key, counters) ->
+            val snapshot = synchronized(counters) { counters.snapshot() }
+            AdminLlmTaskUsage(
+                task = key.task.name,
+                profile = key.profile,
+                calls = snapshot.calls,
+                successes = snapshot.successes,
+                failures = snapshot.failures,
+                attempts = snapshot.attempts,
+                usagePresent = snapshot.usagePresent,
+                usageMissing = snapshot.usageMissing,
+                inputTokens = snapshot.inputTokens,
+                outputTokens = snapshot.outputTokens,
+                totalTokens = snapshot.totalTokens,
+            )
+        }
 
     /** 无记录返回 `null`（不创建空记录）。 */
     fun stats(

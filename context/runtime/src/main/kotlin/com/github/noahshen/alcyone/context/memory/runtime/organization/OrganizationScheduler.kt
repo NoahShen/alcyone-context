@@ -178,6 +178,8 @@ internal class OrganizationScheduler(
         failure?.let { throw it }
     }
 
+    internal fun workerStatus(): OrganizationWorkerStatus = statusForTesting()
+
     internal fun statusForTesting(): OrganizationWorkerStatus =
         synchronized(lock) {
             when {
